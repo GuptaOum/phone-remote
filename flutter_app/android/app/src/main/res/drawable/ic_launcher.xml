@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Background -->
+    <path
+        android:fillColor="#6366F1"
+        android:pathData="M0,0 L108,0 L108,108 L0,108 Z"/>
+    <!-- Phone outline -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,18 C34.7,18 32,20.7 32,24 L32,84 C32,87.3 34.7,90 38,90 L70,90 C73.3,90 76,87.3 76,84 L76,24 C76,20.7 73.3,18 70,18 Z M54,86 C51.8,86 50,84.2 50,82 C50,79.8 51.8,78 54,78 C56.2,78 58,79.8 58,82 C58,84.2 56.2,86 54,86 Z M70,74 L38,74 L38,28 L70,28 Z"/>
+    <!-- WiFi signal dots -->
+    <path
+        android:fillColor="#6366F1"
+        android:pathData="M47,52 C47,48.7 49.7,46 53,46 L55,46 C58.3,46 61,48.7 61,52 L61,58 C61,61.3 58.3,64 55,64 L53,64 C49.7,64 47,61.3 47,58 Z"/>
+</vector>

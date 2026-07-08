@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Files — Phone Remote</title>
+<link rel="stylesheet" href="/shared.css"/>
+<style>
+.files-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* Sub-tabs */
+.subtabs {
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  display: flex;
+}
+.subtab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 10px 12px;
+  transition: all .15s;
+}
+.subtab:hover       { color: var(--text); }
+.subtab.active      { color: var(--accent2); border-bottom-color: var(--accent); }
+
+/* Sub-panels */
+.subpanel          { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+.subpanel.active   { display: flex; }
+
+/* Toolbar */
+.ftoolbar {
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+}
+.path-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: monospace;
+  font-size: 11px;
+  outline: none;
+  padding: 5px 10px;
+}
+
+/* Selection action bar */
+.sel-bar {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
+  border-bottom: 1px solid var(--accent);
+  flex-shrink: 0;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 12px;
+}
+.sel-bar.visible { display: flex; }
+.sel-count { color: var(--accent2); font-weight: 600; margin-right: 4px; }
+
+/* Drop zone */
+.drop-zone {
+  border: 1.5px dashed var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  margin: 12px;
+  padding: 18px;
+  text-align: center;
+  transition: all .2s;
+}
+.drop-zone.over {
+  background: #6366f10d;
+  border-color: var(--accent);
+  color: var(--accent2);
+}
+
+/* File list */
+.flist { flex: 1; overflow-y: auto; }
+.fi {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background .1s;
+  user-select: none;
+}
+.fi:hover           { background: var(--bg3); }
+.fi.selected        { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.fi:hover .fi-del,
+.fi:hover .fi-dl    { opacity: 1; }
+
+.fi-check { flex-shrink: 0; width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+.fi-icon  { width: 24px; text-align: center; flex-shrink: 0; font-size: 18px; }
+.fi-name  { flex: 1; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fi-size  { flex-shrink: 0; font-size: 11px; color: var(--muted); }
+
+.fi-dl {
+  flex-shrink: 0;
+  opacity: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--accent2);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 8px;
+  transition: opacity .15s;
+}
+.fi-del {
+  flex-shrink: 0;
+  opacity: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--red);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 8px;
+  transition: opacity .15s;
+}
+
+.empty { color: var(--muted); font-size: 13px; padding: 40px; text-align: center; }
+
+.btn.sort-on {
+  border-color: var(--accent);
+  color: var(--accent2);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* Upload progress toast */
+.toast { position: fixed; bottom: 20px; right: 20px; }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="status-dot" id="dot"></div>
+  <span class="header-title">Phone Remote</span>
+  <span class="header-status" id="status-text">Connecting...</span>
+  <nav class="tab-bar">
+    <a href="/mirror"   class="tab-btn">📱 Screen</a>
+    <a href="/camera"   class="tab-btn">📷 Camera</a>
+    <a href="/files"    class="tab-btn active">📁 Files</a>
+    <a href="/location" class="tab-btn">📍 Location</a>
+  </nav>
+</header>
+
+<div class="files-main">
+  <div class="subtabs">
+    <button class="subtab active" id="tab-pc"    onclick="switchTab('pc')">💻 PC Files</button>
+    <button class="subtab"        id="tab-phone" onclick="switchTab('phone')">📱 Phone Files</button>
+  </div>
+
+  <!-- PC Files -->
+  <div class="subpanel active" id="panel-pc">
+    <div class="ftoolbar">
+      <button class="btn" onclick="pcUp()">⬆</button>
+      <input  class="path-input" id="pc-path" readonly/>
+      <button class="btn" id="sort-size-pc"  onclick="toggleSort('pc','size')">Size</button>
+      <button class="btn" id="sort-date-pc"  onclick="toggleSort('pc','date')">Date</button>
+      <label  class="btn primary" style="cursor:pointer;">
+        ⬆ Upload
+        <input type="file" multiple style="display:none;" onchange="pcUpload(this.files)"/>
+      </label>
+      <button class="btn" onclick="loadPc(pcPath)">↺</button>
+      <input  type="checkbox" id="pc-select-all" title="Select all" style="width:15px;height:15px;cursor:pointer;accent-color:var(--accent);" onchange="toggleAll('pc', this.checked)"/>
+    </div>
+    <div class="sel-bar" id="pc-sel-bar">
+      <span class="sel-count" id="pc-sel-count">0 selected</span>
+      <button class="btn primary" onclick="pcDownloadSelected()">⬇ Download</button>
+      <button class="btn" style="color:var(--red);" onclick="pcDeleteSelected()">✕ Delete</button>
+      <button class="btn" onclick="clearSel('pc')">Clear</button>
+    </div>
+    <div class="drop-zone" id="pc-drop"
+         ondragover="event.preventDefault();this.classList.add('over')"
+         ondragleave="this.classList.remove('over')"
+         ondrop="pcDrop(event)">
+      Drop files here to upload to PC storage
+    </div>
+    <div class="flist" id="pc-list"></div>
+  </div>
+
+  <!-- Phone Files -->
+  <div class="subpanel" id="panel-phone">
+    <div class="ftoolbar">
+      <button class="btn" onclick="phoneUp()">⬆</button>
+      <input  class="path-input" id="phone-path" readonly style="font-size:11px;"/>
+      <button class="btn" id="sort-size-phone" onclick="toggleSort('phone','size')">Size</button>
+      <button class="btn" id="sort-date-phone" onclick="toggleSort('phone','date')">Date</button>
+      <label  class="btn primary" style="cursor:pointer;">
+        ⬆ Upload
+        <input type="file" multiple style="display:none;" onchange="phoneUpload(this.files)"/>
+      </label>
+      <button class="btn" onclick="loadPhone(phonePath)">↺</button>
+      <input  type="checkbox" id="phone-select-all" title="Select all" style="width:15px;height:15px;cursor:pointer;accent-color:var(--accent);" onchange="toggleAll('phone', this.checked)"/>
+    </div>
+    <div class="sel-bar" id="phone-sel-bar">
+      <span class="sel-count" id="phone-sel-count">0 selected</span>
+      <button class="btn primary" onclick="phoneDownloadSelected()">⬇ Download</button>
+      <button class="btn" style="color:var(--red);" onclick="phoneDeleteSelected()">✕ Delete</button>
+      <button class="btn" onclick="clearSel('phone')">Clear</button>
+    </div>
+    <div class="drop-zone" id="phone-drop"
+         ondragover="event.preventDefault();this.classList.add('over')"
+         ondragleave="this.classList.remove('over')"
+         ondrop="phoneDrop(event)">
+      Drop files here to upload to Phone
+    </div>
+    <div class="flist" id="phone-list"></div>
+  </div>
+</div>
+
+<div id="toast-wrap"></div>
+
+<script src="/ws.js"></script>
+<script>
+// ── State ─────────────────────────────────────────────────────────
+let pcPath      = sessionStorage.getItem('pcPath')    || '';
+let phonePath   = sessionStorage.getItem('phonePath') || '/storage/emulated/0';
+let pcFiles     = [];
+let phoneFiles  = [];
+let pcFileCount   = 0;  // count of non-dir files, cached on load
+let phoneFileCount = 0;
+let pcSort      = { by: null, dir: 1 };
+let phoneSort   = { by: null, dir: 1 };
+let activeTab   = sessionStorage.getItem('activeTab') || 'pc';
+let phoneOnline = false;
+let bulkDeleting = false;  // suppresses per-item pf_delete_ok reload during bulk delete
+
+let pcSelected    = new Set();
+let phoneSelected = new Set();
+
+const downloadResolvers = {};
+const uploadResolvers   = {};
+const chunks            = {};  // id → { parts, total }
+
+// Downloads in-flight keyed by id; saved to pendingRetries on disconnect
+const activeDownloads = new Map();
+let pendingRetries    = [];
+const retryCounts     = new Map(); // path → retry count, capped at 3
+
+function uid() { return Math.random().toString(36).slice(2); }
+
+function normalizePhonePath(path) {
+  const raw = (path || '/storage/emulated/0').replace(/\\/g, '/').trim();
+  const collapsed = raw.replace(/\/+/g, '/');
+  if (!collapsed) return '/storage/emulated/0';
+  return collapsed.startsWith('/') ? collapsed : '/' + collapsed;
+}
+
+function joinPhonePath(base, name) {
+  const safeBase = normalizePhonePath(base).replace(/\/$/, '');
+  const safeName = (name || 'file').replace(/[\\/]/g, '_').trim() || 'file';
+  return safeBase + '/' + safeName;
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────
+const ws = createWS(handleMsg);
+
+function handleMsg(msg) {
+  switch (msg.type) {
+    case 'phone_connected':
+      phoneOnline = true;
+      if (activeTab === 'phone') loadPhone(phonePath);
+      // Restart downloads interrupted by disconnect, up to 3 retries per file
+      if (pendingRetries.length) {
+        const retries = pendingRetries.splice(0);
+        retries.forEach(({ path, name }) => {
+          const attempts = (retryCounts.get(path) || 0) + 1;
+          if (attempts > 3) { retryCounts.delete(path); return; }
+          retryCounts.set(path, attempts);
+          phoneDownload(path, name);
+        });
+      }
+      break;
+    case 'phone_disconnected':
+      phoneOnline = false;
+      renderPhoneList([]);
+      // Save in-flight downloads so they can be restarted on reconnect
+      pendingRetries.push(...activeDownloads.values());
+      for (const id of activeDownloads.keys()) {
+        if (downloadResolvers[id]) { downloadResolvers[id](null); delete downloadResolvers[id]; }
+        delete chunks[id];
+      }
+      activeDownloads.clear();
+      if (pendingRetries.length)
+        showToast('Phone disconnected — will retry ' + pendingRetries.length + ' download(s) on reconnect', 0);
+      break;
+
+    case 'pf_list_result':
+      if (msg.path === phonePath) {
+        phoneFiles = msg.entries || [];
+        phoneFileCount = phoneFiles.filter(f => f.type !== 'dir').length;
+        renderPhoneList(phoneFiles);
+      }
+      break;
+
+    case 'pf_chunk':
+      receiveChunk(msg);
+      break;
+
+    case 'pf_upload_ok':
+      if (uploadResolvers[msg.id]) {
+        uploadResolvers[msg.id]();
+        delete uploadResolvers[msg.id];
+      }
+      break;
+
+    case 'pf_delete_ok':
+      if (!bulkDeleting) loadPhone(phonePath);
+      break;
+
+    case 'pf_error':
+      if (uploadResolvers[msg.id])   { uploadResolvers[msg.id]();       delete uploadResolvers[msg.id];   }
+      if (downloadResolvers[msg.id]) { downloadResolvers[msg.id](null); delete downloadResolvers[msg.id]; }
+      alert('Phone error: ' + msg.error);
+      break;
+  }
+}
+
+// ── Shared helpers ─────────────────────────────────────────────────
+function triggerDownload(url, name) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+function updateSelBar(panel) {
+  const sel       = panel === 'pc' ? pcSelected    : phoneSelected;
+  const fileCount = panel === 'pc' ? pcFileCount   : phoneFileCount;
+  const count     = sel.size;
+  document.getElementById(panel + '-sel-count').textContent = count + ' selected';
+  document.getElementById(panel + '-sel-bar').classList.toggle('visible', count > 0);
+  const allCb = document.getElementById(panel + '-select-all');
+  allCb.indeterminate = count > 0 && count < fileCount;
+  allCb.checked       = count > 0 && count === fileCount;
+}
+
+function toggleAll(panel, checked) {
+  const sel    = panel === 'pc' ? pcSelected  : phoneSelected;
+  const files  = panel === 'pc' ? pcFiles     : phoneFiles;
+  const listEl = document.getElementById(panel + '-list');
+  sel.clear();
+  if (checked) files.filter(f => f.type !== 'dir').forEach(f => sel.add(f.path));
+  listEl.querySelectorAll('.fi').forEach(row => {
+    const p  = row.dataset.path;
+    const on = p ? sel.has(p) : false;
+    const cb = row.querySelector('.fi-check');
+    if (cb) cb.checked = on;
+    row.classList.toggle('selected', on);
+  });
+  updateSelBar(panel);
+}
+
+function clearSel(panel) {
+  const sel    = panel === 'pc' ? pcSelected : phoneSelected;
+  const listEl = document.getElementById(panel + '-list');
+  sel.clear();
+  listEl.querySelectorAll('.fi').forEach(row => {
+    const cb = row.querySelector('.fi-check');
+    if (cb) cb.checked = false;
+    row.classList.remove('selected');
+  });
+  updateSelBar(panel);
+}
+
+// ── Tab switching ─────────────────────────────────────────────────
+function switchTab(tab) {
+  activeTab = tab;
+  sessionStorage.setItem('activeTab', tab);
+  document.getElementById('tab-pc').classList.toggle('active', tab === 'pc');
+  document.getElementById('tab-phone').classList.toggle('active', tab === 'phone');
+  document.getElementById('panel-pc').classList.toggle('active', tab === 'pc');
+  document.getElementById('panel-phone').classList.toggle('active', tab === 'phone');
+  if (tab === 'pc')    loadPc(pcPath);
+  if (tab === 'phone') loadPhone(phonePath);
+}
+
+// ── PC Files ──────────────────────────────────────────────────────
+async function loadPc(path) {
+  pcPath = path;
+  sessionStorage.setItem('pcPath', path);
+  document.getElementById('pc-path').value = '/' + path;
+  pcSelected.clear();
+  updateSelBar('pc');
+  try {
+    const res = await fetch('/api/files?path=' + encodeURIComponent(path));
+    const data = await res.json();
+    pcFiles     = data.entries || [];
+    pcFileCount = pcFiles.filter(f => f.type !== 'dir').length;
+    renderPcList();
+  } catch { renderPcList(); }
+}
+
+function pcUp() {
+  const parts = pcPath.split('/').filter(Boolean);
+  parts.pop();
+  loadPc(parts.join('/'));
+}
+
+function renderPcList() {
+  const sorted = sortedFiles(pcFiles, pcSort);
+  const el = document.getElementById('pc-list');
+  if (!sorted.length) { el.innerHTML = '<div class="empty">Empty folder</div>'; return; }
+  el.innerHTML = '';
+  sorted.forEach(f => {
+    const row = makeRow(
+      f,
+      () => { if (f.type === 'dir') loadPc(f.path); else pcDownload(f.path, f.name); },
+      () => pcDelete(f.path, f.name),
+      f.type !== 'dir' ? () => pcDownload(f.path, f.name) : null,
+      pcSelected,
+      () => updateSelBar('pc')
+    );
+    el.appendChild(row);
+  });
+}
+
+function pcDownload(path, name) {
+  triggerDownload('/api/files/download?path=' + encodeURIComponent(path), name);
+}
+
+async function pcDelete(path, name) {
+  if (!confirm('Delete "' + name + '"?')) return;
+  await fetch('/api/files?path=' + encodeURIComponent(path), { method: 'DELETE' });
+  loadPc(pcPath);
+}
+
+async function pcUpload(files) {
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append('files', file);
+    showToast(file.name, 0);
+    await fetch('/api/files/upload?path=' + encodeURIComponent(pcPath), { method: 'POST', body: fd });
+    showToast(file.name, 100);
+    await new Promise(r => setTimeout(r, 600));
+    hideToast();
+  }
+  loadPc(pcPath);
+}
+
+function pcDrop(e) {
+  e.preventDefault();
+  document.getElementById('pc-drop').classList.remove('over');
+  pcUpload(e.dataTransfer.files);
+}
+
+function phoneDrop(e) {
+  e.preventDefault();
+  document.getElementById('phone-drop').classList.remove('over');
+  phoneUpload(e.dataTransfer.files);
+}
+
+function pcDownloadSelected() {
+  if (!pcSelected.size) return;
+  if (pcSelected.size === 1) {
+    const [p] = pcSelected;
+    const name = pcFiles.find(f => f.path === p)?.name || p.split('/').pop() || 'file';
+    pcDownload(p, name);
+    return;
+  }
+  const qs = [...pcSelected].map(p => 'paths=' + encodeURIComponent(p)).join('&');
+  triggerDownload('/api/files/download-zip?' + qs, 'download.zip');
+}
+
+async function pcDeleteSelected() {
+  if (!pcSelected.size) return;
+  if (!confirm('Delete ' + pcSelected.size + ' item(s)?')) return;
+  await Promise.all([...pcSelected].map(p =>
+    fetch('/api/files?path=' + encodeURIComponent(p), { method: 'DELETE' })
+  ));
+  pcSelected.clear();
+  loadPc(pcPath);
+}
+
+// ── Phone Files ───────────────────────────────────────────────────
+function loadPhone(path) {
+  phonePath = path;
+  sessionStorage.setItem('phonePath', path);
+  document.getElementById('phone-path').value = path;
+  phoneSelected.clear();
+  updateSelBar('phone');
+  ws.send({ type: 'pf_list', path });
+}
+
+function phoneUp() {
+  const parts = phonePath.split('/').filter(Boolean);
+  parts.pop();
+  loadPhone('/' + parts.join('/'));
+}
+
+function renderPhoneList(entries) {
+  const sorted = sortedFiles(entries, phoneSort);
+  const el = document.getElementById('phone-list');
+  if (!phoneOnline) { el.innerHTML = '<div class="empty">Connect phone then open this tab</div>'; return; }
+  if (!sorted.length) { el.innerHTML = '<div class="empty">Empty folder</div>'; return; }
+  el.innerHTML = '';
+  sorted.forEach(f => {
+    const row = makeRow(
+      f,
+      () => { if (f.type === 'dir') loadPhone(f.path); else phoneDownload(f.path, f.name); },
+      () => phoneDelete(f.path, f.name),
+      f.type !== 'dir' ? () => phoneDownload(f.path, f.name) : null,
+      phoneSelected,
+      () => updateSelBar('phone')
+    );
+    el.appendChild(row);
+  });
+}
+
+async function phoneDownload(path, name) {
+  const id = uid();
+  activeDownloads.set(id, { path, name });
+  showToast(name, 0, () => cancelPhoneDownload(id));
+  ws.send({ type: 'pf_download', path, id });
+
+  const parts = await new Promise(resolve => { downloadResolvers[id] = resolve; });
+  activeDownloads.delete(id);
+  if (!parts) return;  // null = cancelled — toast already handled by cancel/disconnect handler
+  hideToast();
+  retryCounts.delete(path);  // successful download — reset retry counter
+
+  const totalLen = parts.reduce((s, p) => s + p.length, 0);
+  const bytes    = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const p of parts) { bytes.set(p, offset); offset += p.length; }
+
+  const url = URL.createObjectURL(new Blob([bytes]));
+  triggerDownload(url, name);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+function cancelPhoneDownload(id) {
+  if (!downloadResolvers[id]) return;
+  downloadResolvers[id](null);
+  delete downloadResolvers[id];
+  delete chunks[id];
+  activeDownloads.delete(id);
+  ws.send({ type: 'pf_download_cancel', id });
+  hideToast();
+}
+
+function receiveChunk(msg) {
+  if (!downloadResolvers[msg.id]) return;  // ignore chunks for cancelled/unknown downloads
+  if (!chunks[msg.id]) chunks[msg.id] = { parts: [], total: msg.total };
+  // Decode per-chunk — concatenating base64 strings before decoding corrupts files
+  // because each chunk's = padding is only valid at the end of a base64 string.
+  chunks[msg.id].parts[msg.index] = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0));
+  const pct = Math.round(((msg.index + 1) / msg.total) * 100);
+  const name = activeDownloads.get(msg.id)?.name || '…';
+  showToast(name, pct);
+  if (msg.done) {
+    const parts = chunks[msg.id].parts;
+    delete chunks[msg.id];
+    if (downloadResolvers[msg.id]) { downloadResolvers[msg.id](parts); delete downloadResolvers[msg.id]; }
+  }
+}
+
+async function phoneUpload(files) {
+  for (const file of files) {
+    const id    = uid();
+    const CHUNK = 64 * 1024;
+    const ab    = await file.arrayBuffer();
+    const arr   = new Uint8Array(ab);
+    const total = Math.ceil(arr.length / CHUNK) || 1;
+    const destPath = joinPhonePath(phonePath, file.name);
+
+    showToast(file.name, 0);
+    ws.send({ type: 'pf_upload_start', id, path: destPath, size: file.size, total });
+
+    for (let i = 0; i < total; i++) {
+      const slice = arr.subarray(i * CHUNK, (i + 1) * CHUNK);  // view, no copy
+      // Loop avoids spreading a 64 KB array as function arguments (call stack limit)
+      let bin = '';
+      for (let j = 0; j < slice.length; j++) bin += String.fromCharCode(slice[j]);
+      ws.send({ type: 'pf_upload_chunk', id, index: i, total, data: btoa(bin), done: i === total - 1 });
+      showToast(file.name, Math.round(((i + 1) / total) * 100));
+    }
+    // Wait for a single pf_upload_ok after all chunks are sent
+    await new Promise(resolve => { uploadResolvers[id] = resolve; });
+    hideToast();
+  }
+  loadPhone(phonePath);
+}
+
+async function phoneDelete(path, name) {
+  if (!confirm('Delete "' + name + '"?')) return;
+  ws.send({ type: 'pf_delete', path });
+}
+
+async function phoneDownloadSelected() {
+  if (!phoneSelected.size) return;
+  for (const p of phoneSelected) {
+    const name = phoneFiles.find(f => f.path === p)?.name || p.split('/').pop() || 'file';
+    await phoneDownload(p, name);
+  }
+}
+
+async function phoneDeleteSelected() {
+  if (!phoneSelected.size) return;
+  if (!confirm('Delete ' + phoneSelected.size + ' item(s)?')) return;
+  bulkDeleting = true;
+  for (const p of phoneSelected) ws.send({ type: 'pf_delete', path: p });
+  bulkDeleting = false;
+  phoneSelected.clear();
+  loadPhone(phonePath);
+}
+
+// ── Sort ──────────────────────────────────────────────────────────
+function toggleSort(panel, by) {
+  const s = panel === 'pc' ? pcSort : phoneSort;
+  const other = by === 'size' ? 'date' : 'size';
+
+  const otherBtn = document.getElementById('sort-' + other + '-' + panel);
+  otherBtn.textContent = other.charAt(0).toUpperCase() + other.slice(1);
+  otherBtn.classList.remove('sort-on');
+
+  if (s.by === by) s.dir *= -1; else { s.by = by; s.dir = 1; }
+
+  const btn = document.getElementById('sort-' + by + '-' + panel);
+  btn.textContent = by.charAt(0).toUpperCase() + by.slice(1) + (s.dir === 1 ? ' (Asc)' : ' (Des)');
+  btn.classList.add('sort-on');
+
+  if (panel === 'pc') renderPcList();
+  else                renderPhoneList(phoneFiles);
+}
+
+function sortedFiles(files, sort) {
+  const dirs  = files.filter(f => f.type === 'dir');
+  const plain = files.filter(f => f.type !== 'dir');
+  if (!sort.by) return [...dirs, ...plain];
+  const cmp = sort.by === 'size'
+    ? (a, b) => ((a.size || 0) - (b.size || 0)) * sort.dir
+    : (a, b) => (new Date(a.modified) - new Date(b.modified)) * sort.dir;
+  return [...dirs.sort(cmp), ...plain.sort(cmp)];
+}
+
+// ── Row builder ───────────────────────────────────────────────────
+function makeRow(f, onOpen, onDelete, onDownload, selSet, onSelChange) {
+  const row = document.createElement('div');
+  row.className = 'fi' + (selSet.has(f.path) ? ' selected' : '');
+  row.dataset.path = f.path;
+  row.ondblclick = onOpen;
+
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.className = 'fi-check';
+  cb.checked = selSet.has(f.path);
+  cb.onclick = e => {
+    e.stopPropagation();
+    if (cb.checked) selSet.add(f.path);
+    else selSet.delete(f.path);
+    row.classList.toggle('selected', cb.checked);
+    onSelChange();
+  };
+
+  const icon = document.createElement('span');
+  icon.className = 'fi-icon';
+  icon.textContent = f.type === 'dir' ? '📁' : mimeIcon(f.mime);
+
+  const name = document.createElement('span');
+  name.className = 'fi-name';
+  name.textContent = f.name;
+
+  const size = document.createElement('span');
+  size.className = 'fi-size';
+  size.textContent = f.size != null ? fmtSize(f.size) : '';
+
+  const del = document.createElement('button');
+  del.className = 'fi-del';
+  del.textContent = '✕';
+  del.title = 'Delete';
+  del.onclick = e => { e.stopPropagation(); onDelete(); };
+
+  row.append(cb, icon, name, size);
+
+  if (onDownload) {
+    const dl = document.createElement('button');
+    dl.className = 'fi-dl';
+    dl.textContent = '⬇';
+    dl.title = 'Download';
+    dl.onclick = e => { e.stopPropagation(); onDownload(); };
+    row.appendChild(dl);
+  }
+
+  row.appendChild(del);
+  return row;
+}
+
+function mimeIcon(mime) {
+  if (!mime) return '📄';
+  if (mime.startsWith('image/'))  return '🖼️';
+  if (mime.startsWith('video/'))  return '🎬';
+  if (mime.startsWith('audio/'))  return '🎵';
+  if (mime.includes('pdf'))       return '📕';
+  if (mime.includes('zip') || mime.includes('archive')) return '🗜️';
+  return '📄';
+}
+
+function fmtSize(b) {
+  if (b < 1024)        return b + ' B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+  if (b < 1024 ** 3)   return (b / 1024 / 1024).toFixed(1) + ' MB';
+  return (b / 1024 ** 3).toFixed(1) + ' GB';
+}
+
+// ── Toast ─────────────────────────────────────────────────────────
+let toastEl = null, toastLabelEl = null, toastBarEl = null, toastCancelEl = null;
+
+function showToast(label, pct, onCancel) {
+  if (!toastEl) {
+    toastEl = document.createElement('div');
+    toastEl.className = 'toast';
+    toastEl.innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">' +
+        '<span class="toast-label" style="flex:1;margin-bottom:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>' +
+        '<button style="flex-shrink:0;background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:0 2px;line-height:1;display:none">✕</button>' +
+      '</div>' +
+      '<div class="toast-bar" style="width:0%"></div>';
+    toastLabelEl  = toastEl.querySelector('span');
+    toastBarEl    = toastEl.querySelector('.toast-bar');
+    toastCancelEl = toastEl.querySelector('button');
+    toastCancelEl.onmouseenter = () => { toastCancelEl.style.color = 'var(--red)'; };
+    toastCancelEl.onmouseleave = () => { toastCancelEl.style.color = 'var(--muted)'; };
+    document.getElementById('toast-wrap').appendChild(toastEl);
+  }
+  toastLabelEl.textContent = label;
+  toastBarEl.style.width   = pct + '%';
+  if (onCancel !== undefined) {
+    toastCancelEl.style.display = onCancel ? 'inline' : 'none';
+    toastCancelEl.onclick = onCancel || null;
+  }
+}
+function hideToast() {
+  if (toastEl) { toastEl.remove(); toastEl = toastLabelEl = toastBarEl = toastCancelEl = null; }
+}
+
+// ── Init ──────────────────────────────────────────────────────────
+switchTab(activeTab);
+</script>
+</body>
+</html>

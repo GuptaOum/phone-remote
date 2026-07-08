@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Location — Phone Remote</title>
+<link rel="stylesheet" href="/shared.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+.location-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.loc-map-wrap {
+  flex: 1;
+  min-height: 0;
+  background: #1a1a2e;
+  position: relative;
+}
+
+#loc-map { width: 100%; height: 100%; }
+
+.loc-waiting {
+  position: absolute;
+  inset: 0;
+  z-index: 1000;
+  background: var(--bg);
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 14px;
+  font-size: 13.5px;
+  text-align: center;
+  line-height: 1.7;
+}
+.loc-waiting .loc-wait-icon {
+  width: 64px; height: 64px;
+  border-radius: 20px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  margin-bottom: 4px;
+}
+.loc-waiting small { color: #4b5563; font-size: 12px; }
+
+.loc-bar {
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+}
+.loc-bar.visible { display: flex; }
+
+.loc-live { display: flex; align-items: center; gap: 6px; }
+.loc-live-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px #22c55e88;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+.loc-live-label { color: var(--green); font-size: 11px; font-weight: 700; letter-spacing: .5px; }
+
+.loc-stat {
+  color: var(--muted);
+  font-size: 11.5px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 9px;
+}
+.loc-stat span { color: var(--text); font-weight: 500; }
+
+.loc-maps-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, var(--accent), #7c3aed);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 14px;
+  text-decoration: none;
+  box-shadow: 0 2px 10px #6366f130;
+  transition: all .18s;
+}
+.loc-maps-btn:hover { filter: brightness(1.12); box-shadow: 0 4px 16px #6366f144; }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="status-dot" id="dot"></div>
+  <span class="header-title">Phone Remote</span>
+  <span class="header-status" id="status-text">Connecting...</span>
+  <nav class="tab-bar">
+    <a href="/mirror"   class="tab-btn">📱 Screen</a>
+    <a href="/camera"   class="tab-btn">📷 Camera</a>
+    <a href="/files"    class="tab-btn">📁 Files</a>
+    <a href="/location" class="tab-btn active">📍 Location</a>
+  </nav>
+</header>
+
+<div class="location-main">
+  <div class="loc-map-wrap">
+    <div class="loc-waiting" id="loc-waiting">
+      <div class="loc-wait-icon">📍</div>
+      <div>
+        Waiting for location...<br>
+        <small>Grant location permission on the phone.</small>
+      </div>
+    </div>
+    <div id="loc-map"></div>
+  </div>
+
+  <div class="loc-bar" id="loc-bar">
+    <div class="loc-live">
+      <div class="loc-live-dot"></div>
+      <span class="loc-live-label">LIVE</span>
+    </div>
+    <span class="loc-stat">Lat: <span id="loc-lat">—</span></span>
+    <span class="loc-stat">Lng: <span id="loc-lng">—</span></span>
+    <span class="loc-stat" id="loc-acc-wrap" style="display:none;">Accuracy: <span id="loc-acc">—</span> m</span>
+    <span class="loc-stat" id="loc-alt-wrap" style="display:none;">Alt: <span id="loc-alt">—</span> m</span>
+    <span class="loc-stat" style="margin-left:auto;" id="loc-time"></span>
+    <a class="loc-maps-btn" id="loc-gmaps" href="#" target="_blank" rel="noreferrer">🗺 Google Maps</a>
+  </div>
+</div>
+
+<script src="/ws.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+let map     = null;
+let marker  = null;
+let circle  = null;
+let hasLoc  = false;
+
+// Init Leaflet map
+function initMap() {
+  map = L.map('loc-map', { zoomControl: true }).setView([20, 0], 2);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors',
+    maxZoom: 19,
+  }).addTo(map);
+}
+
+// Phone icon for marker
+function phoneIcon() {
+  return L.divIcon({
+    html: '<div style="font-size:28px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.5))">📍</div>',
+    iconSize: [32, 32],
+    iconAnchor: [16, 28],
+    className: '',
+  });
+}
+
+function handleLocation(loc) {
+  if (!map) return;
+
+  const latlng = [loc.lat, loc.lng];
+
+  if (!hasLoc) {
+    hasLoc = true;
+    document.getElementById('loc-waiting').style.display = 'none';
+    document.getElementById('loc-bar').classList.add('visible');
+    map.setView(latlng, 15);
+    marker = L.marker(latlng, { icon: phoneIcon() })
+              .addTo(map)
+              .bindPopup('Phone is here')
+              .openPopup();
+  } else {
+    marker.setLatLng(latlng);
+    map.panTo(latlng);
+  }
+
+  if (circle) circle.remove();
+  if (loc.accuracy) {
+    circle = L.circle(latlng, {
+      radius: loc.accuracy,
+      color: '#6366f1',
+      fillOpacity: .1,
+      weight: 1.5,
+    }).addTo(map);
+  }
+
+  // Update bar
+  document.getElementById('loc-lat').textContent = loc.lat.toFixed(6);
+  document.getElementById('loc-lng').textContent = loc.lng.toFixed(6);
+
+  if (loc.accuracy != null) {
+    document.getElementById('loc-acc').textContent = Math.round(loc.accuracy);
+    document.getElementById('loc-acc-wrap').style.display = '';
+  }
+  if (loc.altitude != null) {
+    document.getElementById('loc-alt').textContent = Math.round(loc.altitude);
+    document.getElementById('loc-alt-wrap').style.display = '';
+  }
+  if (loc.timestamp) {
+    document.getElementById('loc-time').textContent =
+      'Updated ' + new Date(loc.timestamp).toLocaleTimeString();
+  }
+
+  document.getElementById('loc-gmaps').href =
+    'https://www.google.com/maps?q=' + loc.lat + ',' + loc.lng;
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────
+const ws = createWS(msg => {
+  if (msg.type === 'location') handleLocation(msg);
+  if (msg.type === 'phone_disconnected') {
+    hasLoc = false;
+    document.getElementById('loc-waiting').style.display = '';
+    document.getElementById('loc-bar').classList.remove('visible');
+    if (marker) { marker.remove(); marker = null; }
+    if (circle) { circle.remove(); circle = null; }
+    if (map) map.setView([20, 0], 2);
+  }
+});
+
+// Init map after Leaflet loads (it's loaded synchronously above)
+initMap();
+</script>
+</body>
+</html>

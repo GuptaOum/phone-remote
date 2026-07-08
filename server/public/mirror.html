@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Screen Mirror — Phone Remote</title>
+<link rel="stylesheet" href="/shared.css"/>
+<style>
+/* ── Mirror layout ───────────────────────────────────────────────── */
+.mirror-main {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  background: #000;
+}
+
+/* Phone frame (left area) */
+.phone-frame {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.phone-wrap {
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;        /* prevent browser scroll/zoom on touch */
+  background: #0a0a0a;
+  border-radius: 32px;
+  position: relative;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1.5px #ffffff10,
+    0 0 0 3px #111,
+    0 0 0 5px #1e1e2a,
+    0 28px 80px rgba(0,0,0,.8),
+    0 0 60px rgba(99,102,241,.06);
+  transition: border-radius .2s, box-shadow .3s;
+  height: 100%;
+  max-height: calc(100vh - 52px - 24px);
+  aspect-ratio: 9 / 19.5;
+  max-width: 45vw;
+}
+.phone-wrap:not(.stream-off):hover {
+  box-shadow:
+    0 0 0 1.5px #ffffff14,
+    0 0 0 3px #111,
+    0 0 0 5px #1e1e2a,
+    0 28px 80px rgba(0,0,0,.8),
+    0 0 80px rgba(99,102,241,.12);
+}
+
+.screen-canvas {
+  border-radius: 30px;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+/* Overlay (shown before streaming) */
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: rgba(0,0,0,.82);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: 30px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+  animation: fadeUp .25s ease;
+}
+.overlay.gone { display: none; pointer-events: none; }
+
+.spin {
+  width: 30px; height: 30px;
+  border: 2px solid rgba(99,102,241,.25);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .75s linear infinite;
+}
+
+.overlay-msg   { color: var(--muted); font-size: 12.5px; text-align: center; line-height: 1.7; }
+.overlay-title { display: block; color: var(--text); font-size: 14px; font-weight: 600; margin-bottom: 4px; letter-spacing: -.1px; }
+
+.stream-btn {
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  padding: 10px 26px;
+  transition: all .2s var(--ease);
+  box-shadow: 0 2px 14px #6366f140;
+}
+.stream-btn:hover { filter: brightness(1.12); transform: translateY(-1px); box-shadow: 0 4px 20px #6366f155; }
+.stream-btn:active { transform: scale(.97); }
+
+
+/* Control bar (right side column) */
+.ctrl-bar {
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  width: 58px;
+  padding: 14px 0;
+}
+
+.ctrl-btn {
+  background: var(--bg3);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-shrink: 0;
+  font-size: 15px;
+  width: 38px; height: 38px;
+  transition: all .18s var(--ease);
+}
+.ctrl-btn:hover {
+  background: var(--accent-glow);
+  border-color: #6366f144;
+  color: var(--accent2);
+  transform: scale(1.07);
+}
+.ctrl-btn:active    { transform: scale(.92); }
+.ctrl-btn.active-kb {
+  background: var(--accent-glow);
+  border-color: var(--accent);
+  color: var(--accent2);
+}
+.ctrl-btn.stop-btn  {
+  background: #ef444418;
+  border-color: #ef444433;
+  color: var(--red);
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: 12px;
+}
+.ctrl-btn.stop-btn:hover {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+  box-shadow: 0 0 14px #ef444444;
+}
+
+.ctrl-divider {
+  background: var(--border);
+  width: 22px; height: 1px;
+  margin: 3px 0;
+  opacity: .6;
+}
+
+/* Stream-off: only block interaction on the phone frame itself */
+.phone-wrap.stream-off { cursor: not-allowed; }
+
+/* Flash blink picker */
+.ctrl-flash-wrap { position: relative; }
+.flash-menu {
+  display: none;
+  position: absolute;
+  right: 46px;
+  top: 0;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px;
+  flex-direction: column;
+  gap: 3px;
+  z-index: 20;
+}
+.flash-menu.open { display: flex; }
+.flash-opt { width: 40px; height: 30px; font-size: 11px; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="status-dot" id="dot"></div>
+  <span class="header-title">Phone Remote</span>
+  <span class="header-status" id="status-text">Connecting...</span>
+  <nav class="tab-bar">
+    <a href="/mirror"   class="tab-btn active">📱 Screen</a>
+    <a href="/camera"   class="tab-btn">📷 Camera</a>
+    <a href="/files"    class="tab-btn">📁 Files</a>
+    <a href="/location" class="tab-btn">📍 Location</a>
+  </nav>
+</header>
+
+<div class="mirror-main">
+  <div class="phone-frame">
+    <div class="phone-wrap" id="phone-wrap">
+      <canvas id="screen-canvas" width="360" height="720" class="screen-canvas"></canvas>
+      <video  id="rtc-video" autoplay playsinline style="display:none;border-radius:30px;width:100%;height:100%;position:absolute;inset:0;"></video>
+      <div class="overlay" id="overlay">
+        <div class="spin" id="spin" style="display:none;"></div>
+        <div class="overlay-msg">
+          <span class="overlay-title" id="overlay-title">Phone Remote</span>
+          <span id="overlay-sub">Waiting for phone...</span>
+        </div>
+        <button class="stream-btn" id="stream-btn" style="display:none;background:var(--accent);color:#fff;"
+                onclick="toggleStream()">▶ Start Streaming</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="ctrl-bar" id="ctrl-bar">
+    <button class="ctrl-btn stop-btn" id="stop-btn" title="Stop Streaming"
+            style="display:none;" onclick="stopStream()">■</button>
+    <div class="ctrl-divider" id="stop-divider" style="display:none;"></div>
+
+    <button class="ctrl-btn" title="Back"    onclick="ctrl({action:'back'})">◀</button>
+    <button class="ctrl-btn" title="Home"    onclick="ctrl({action:'home'})">⬤</button>
+    <button class="ctrl-btn" title="Recents" onclick="ctrl({action:'recents'})">▣</button>
+    <div class="ctrl-divider"></div>
+    <button class="ctrl-btn" title="Volume +"  onclick="ctrl({action:'keyevent',keycode:'KEYCODE_VOLUME_UP'})">🔊</button>
+    <button class="ctrl-btn" title="Volume -"  onclick="ctrl({action:'keyevent',keycode:'KEYCODE_VOLUME_DOWN'})">🔉</button>
+    <div class="ctrl-divider"></div>
+    <button class="ctrl-btn" title="Power"    onclick="ctrl({action:'keyevent',keycode:'KEYCODE_POWER'})">⏻</button>
+    <button class="ctrl-btn" id="kb-btn" title="Keyboard" onclick="toggleKeyboard()">⌨️</button>
+    <div class="ctrl-divider"></div>
+    <button class="ctrl-btn" id="shot-btn" title="Screenshot" onclick="takeScreenshot()">📸</button>
+    <button class="ctrl-btn" title="Ring Phone" onclick="ringPhone()">🔔</button>
+    <div class="ctrl-flash-wrap" id="flash-wrap">
+      <button class="ctrl-btn" title="Flash Blink" onclick="toggleFlashMenu()">🔦</button>
+      <div class="flash-menu" id="flash-menu">
+        <button class="ctrl-btn flash-opt" onclick="flash(2)">2×</button>
+        <button class="ctrl-btn flash-opt" onclick="flash(3)">3×</button>
+        <button class="ctrl-btn flash-opt" onclick="flash(4)">4×</button>
+      </div>
+    </div>
+  </div>
+</div>
+<textarea id="kb-capture" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+  style="position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;"></textarea>
+
+<div class="alert-banner" id="alert" style="display:none;" onclick="this.style.display='none'"></div>
+
+<script src="/ws.js"></script>
+<script>
+const canvas   = document.getElementById('screen-canvas');
+const ctx      = canvas.getContext('2d');
+const video    = document.getElementById('rtc-video');
+const overlay  = document.getElementById('overlay');
+const spin     = document.getElementById('spin');
+const oTitle   = document.getElementById('overlay-title');
+const oSub     = document.getElementById('overlay-sub');
+const streamBtn= document.getElementById('stream-btn');
+const stopBtn  = document.getElementById('stop-btn');
+const stopDiv  = document.getElementById('stop-divider');
+const phoneWrap= document.getElementById('phone-wrap');
+const kbBtn    = document.getElementById('kb-btn');
+const shotBtn  = document.getElementById('shot-btn');
+const alertEl  = document.getElementById('alert');
+
+let streaming  = false;
+let phoneW     = 1080;
+let phoneH     = 1920;
+let phoneReady = false;
+let drag       = null;
+let kbMode     = false;
+let pc         = null;   // RTCPeerConnection
+
+const ctrlBar  = document.getElementById('ctrl-bar');
+
+function setStreaming(active) {
+  streaming = active;
+  phoneWrap.classList.toggle('stream-off', !active);
+  ctrlBar.classList.toggle('stream-off', !active);
+}
+
+function onStreamStopped() {
+  setStreaming(false);
+  showStopBtn(false);
+  setOverlay('Streaming stopped', 'Touches & gestures disabled — press Start Streaming to resume');
+  streamBtn.textContent = '▶ Start Streaming';
+  streamBtn.style.background = 'var(--accent)';
+  streamBtn.style.display = 'block';
+  overlay.classList.remove('gone');
+  pc && pc.close(); pc = null;
+  video.srcObject = null;
+  video.style.display = 'none';
+  canvas.style.display = 'block';
+}
+
+const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+// ── WebSocket ─────────────────────────────────────────────────────
+const ws = createWS(handleMsg, handleBinary);
+
+function handleMsg(msg) {
+  switch (msg.type) {
+
+    case 'phone_connected':
+      phoneW = msg.screenW || 1080;
+      phoneH = msg.screenH || 1920;
+      phoneReady = true;
+      spin.style.display = 'none';
+      setOverlay('Phone connected', 'Press Start Streaming to begin');
+      streamBtn.style.display = 'block';
+      streamBtn.textContent   = '▶ Start Streaming';
+      streamBtn.style.background = 'var(--accent)';
+      break;
+
+    case 'phone_disconnected':
+      phoneReady = false;
+      setStreaming(false);
+      setOverlay('Phone disconnected', 'Waiting for phone to reconnect...');
+      streamBtn.style.display = 'none';
+      showStopBtn(false);
+      pc && pc.close(); pc = null;
+      video.srcObject = null;
+      video.style.display = 'none';
+      canvas.style.display = 'block';
+      break;
+
+    case 'stream_stopped':
+      onStreamStopped();
+      break;
+
+    case 'screenshot_error':
+      shotBtn.disabled = false;
+      shotBtn.textContent = '📸';
+      showAlert(msg.reason === 'accessibility_not_enabled'
+        ? 'Enable Accessibility Service on phone first'
+        : 'Screenshot failed — try again');
+      break;
+
+    case 'offer':
+      handleOffer(msg.sdp);
+      break;
+
+    case 'ice':
+      pc && msg.candidate && pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+      break;
+  }
+}
+
+// ── Stream control ────────────────────────────────────────────────
+function toggleStream() {
+  if (streaming) stopStream();
+  else           startStream();
+}
+
+function startStream() {
+  spin.style.display = 'block';
+  setOverlay('Starting stream...', 'Grant screen permission on phone');
+  streamBtn.style.display = 'none';
+  overlay.classList.remove('gone');
+  ws.send({ type: 'stream_start' });
+}
+
+function stopStream() {
+  setStreaming(false);
+  showStopBtn(false);
+  ws.send({ type: 'stream_stop' });
+}
+
+function showStopBtn(on) {
+  stopBtn.style.display  = on ? 'flex' : 'none';
+  stopDiv.style.display  = on ? 'block' : 'none';
+}
+
+function setOverlay(title, sub) {
+  oTitle.textContent = title;
+  oSub.textContent   = sub;
+  overlay.classList.remove('gone');
+}
+
+// ── WebRTC ────────────────────────────────────────────────────────
+async function handleOffer(sdp) {
+  pc = new RTCPeerConnection(ICE);
+  pc.onicecandidate = ({ candidate }) => candidate && ws.send({ type: 'ice', candidate });
+  pc.ontrack = ({ streams, track }) => {
+    video.srcObject = streams[0];
+    video.style.display = 'block';
+    canvas.style.display = 'none';
+    overlay.classList.add('gone');
+    setStreaming(true);
+    showStopBtn(true);
+    track.onended = () => { if (streaming) onStreamStopped(); };
+  };
+  pc.onconnectionstatechange = () => {
+    if (['failed', 'disconnected'].includes(pc?.connectionState) && streaming)
+      onStreamStopped();
+  };
+  await pc.setRemoteDescription({ type: 'offer', sdp });
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  ws.send({ type: 'answer', sdp: answer.sdp });
+}
+
+// ── Screenshot ────────────────────────────────────────────────────
+function takeScreenshot() {
+  shotBtn.disabled = true;
+  shotBtn.textContent = '⏳';
+  ws.send({ type: 'screenshot' });
+  setTimeout(() => { shotBtn.disabled = false; shotBtn.textContent = '📸'; }, 6000);
+}
+
+function ringPhone() {
+  ws.send({ type: 'ring' });
+}
+
+function toggleFlashMenu() {
+  document.getElementById('flash-menu').classList.toggle('open');
+}
+
+function flash(count) {
+  ws.send({ type: 'flash', count });
+  document.getElementById('flash-menu').classList.remove('open');
+}
+
+document.addEventListener('click', e => {
+  if (!document.getElementById('flash-wrap').contains(e.target))
+    document.getElementById('flash-menu').classList.remove('open');
+});
+
+function showAlert(msg) {
+  alertEl.textContent = msg;
+  alertEl.style.display = 'block';
+  setTimeout(() => { alertEl.style.display = 'none'; }, 4000);
+}
+
+// ── Binary frame drawing ──────────────────────────────────────────
+function handleBinary(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes[0] === 0x03) {
+    // screenshot result — download it
+    const blob = new Blob([bytes.subarray(1)], { type: 'image/jpeg' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `screenshot_${Date.now()}.jpg`;
+    a.click();
+    URL.revokeObjectURL(url);
+    shotBtn.disabled = false;
+    shotBtn.textContent = '📸';
+    return;
+  }
+  if (bytes[0] !== 0x01) return;  // not a screen frame
+  // Always sync overlay state to actual frame arrival — covers BFCache restores
+  // and any reconnect scenario where streaming flag may be stale.
+  setStreaming(true);
+  spin.style.display = 'none';
+  overlay.classList.add('gone');
+  showStopBtn(true);
+  createImageBitmap(new Blob([bytes.subarray(1)], { type: 'image/jpeg' }))
+    .then(bitmap => {
+      canvas.width  = bitmap.width;
+      canvas.height = bitmap.height;
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+    });
+}
+
+// ── Pointer control (mouse + touch unified) ───────────────────────
+function normCoords(clientX, clientY) {
+  const r = phoneWrap.getBoundingClientRect();
+  return [
+    Math.max(0, Math.min(1, (clientX - r.left) / r.width)),
+    Math.max(0, Math.min(1, (clientY - r.top)  / r.height)),
+  ];
+}
+
+phoneWrap.addEventListener('pointerdown', e => {
+  if (!streaming) return;
+  e.preventDefault();
+  // Capture keeps pointerup firing on this element even if pointer leaves
+  phoneWrap.setPointerCapture(e.pointerId);
+  const [x, y] = normCoords(e.clientX, e.clientY);
+  drag = { x, y, ts: Date.now() };
+});
+
+phoneWrap.addEventListener('pointerup', e => {
+  if (!drag) return;
+  e.preventDefault();
+  const [x2, y2] = normCoords(e.clientX, e.clientY);
+  const { x, y, ts } = drag;
+  drag = null;
+  if (!streaming) return;
+  const dt = Date.now() - ts;
+  ctrl(Math.hypot(x2 - x, y2 - y) < 0.03 && dt < 600
+    ? { action: 'tap',   x, y }
+    : { action: 'swipe', x1: x, y1: y, x2, y2, ms: dt });
+});
+
+phoneWrap.addEventListener('pointercancel', () => { drag = null; });
+
+phoneWrap.addEventListener('wheel', e => {
+  if (!streaming) return;
+  e.preventDefault();
+  const [x, y] = normCoords(e.clientX, e.clientY);
+  ctrl({ action: 'scroll', x, y, dx: e.deltaX / phoneW, dy: e.deltaY / phoneH });
+}, { passive: false });
+
+function ctrl(payload) {
+  ws.send({ type: 'control', ...payload });
+}
+
+// ── Keyboard ──────────────────────────────────────────────────────
+const kbCapture = document.getElementById('kb-capture');
+
+function toggleKeyboard() {
+  kbMode = !kbMode;
+  kbBtn.classList.toggle('active-kb', kbMode);
+  if (kbMode) kbCapture.focus();
+  else kbCapture.blur();
+}
+
+kbCapture.addEventListener('blur', () => {
+  if (kbMode) setTimeout(() => kbCapture.focus(), 0);
+});
+
+kbCapture.addEventListener('input', () => { kbCapture.value = ''; });
+
+kbCapture.addEventListener('keydown', e => {
+  e.preventDefault();
+  if (!kbMode) return;
+  switch (e.key) {
+    case 'Backspace':  ctrl({action:'keyevent', keycode:'KEYCODE_DEL'}); break;
+    case 'Delete':     ctrl({action:'keyevent', keycode:'KEYCODE_FORWARD_DEL'}); break;
+    case 'Enter':      ctrl({action:'keyevent', keycode:'KEYCODE_ENTER'}); break;
+    case 'Escape':     ctrl({action:'back'}); break;
+    case 'ArrowUp':    ctrl({action:'keyevent', keycode:'KEYCODE_DPAD_UP'}); break;
+    case 'ArrowDown':  ctrl({action:'keyevent', keycode:'KEYCODE_DPAD_DOWN'}); break;
+    case 'ArrowLeft':  ctrl({action:'keyevent', keycode:'KEYCODE_DPAD_LEFT'}); break;
+    case 'ArrowRight': ctrl({action:'keyevent', keycode:'KEYCODE_DPAD_RIGHT'}); break;
+    default:
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)
+        ctrl({action:'text', value: e.key});
+  }
+});
+
+// arrow key scrolling when keyboard mode is off
+window.addEventListener('keydown', e => {
+  if (!streaming || kbMode) return;
+  switch (e.key) {
+    case 'ArrowUp':    e.preventDefault(); ctrl({action:'swipe',x1:.5,y1:.7,x2:.5,y2:.3,ms:200}); break;
+    case 'ArrowDown':  e.preventDefault(); ctrl({action:'swipe',x1:.5,y1:.3,x2:.5,y2:.7,ms:200}); break;
+    case 'ArrowLeft':  e.preventDefault(); ctrl({action:'swipe',x1:.7,y1:.5,x2:.3,y2:.5,ms:200}); break;
+    case 'ArrowRight': e.preventDefault(); ctrl({action:'swipe',x1:.3,y1:.5,x2:.7,y2:.5,ms:200}); break;
+    case 'Escape':     ctrl({action:'back'}); break;
+  }
+});
+</script>
+</body>
+</html>

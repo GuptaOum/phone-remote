@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Camera — Phone Remote</title>
+<link rel="stylesheet" href="/shared.css"/>
+<style>
+.camera-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 18px;
+  background: radial-gradient(ellipse at center, #0f1018 0%, #0a0c10 100%);
+  position: relative;
+  overflow: hidden;
+}
+
+.cam-badge {
+  position: absolute;
+  top: 14px; left: 14px;
+  z-index: 10;
+  background: rgba(0,0,0,.65);
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 2px 12px rgba(0,0,0,.4);
+}
+.cam-dot { width: 7px; height: 7px; border-radius: 50%; transition: background .3s, box-shadow .3s; }
+.cam-dot.live {
+  background: var(--green);
+  box-shadow: 0 0 6px #22c55e88;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+.cam-dot.off  { background: var(--red); }
+.cam-label    { color: #9ca3af; font-size: 11px; font-weight: 500; letter-spacing: .3px; }
+
+.cam-canvas {
+  display: none;
+  object-fit: contain;
+  border-radius: 16px;
+  max-width: 90vw;
+  max-height: calc(95vh - 110px);
+  box-shadow: 0 8px 48px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.05);
+}
+
+.cam-placeholder {
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.9;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.cam-placeholder .cam-icon {
+  width: 56px; height: 56px;
+  border-radius: 18px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  margin-bottom: 4px;
+}
+.cam-placeholder small { color: #4b5563; font-size: 12px; }
+
+.cam-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  padding: 4px;
+  background: rgba(255,255,255,.02);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 6px 8px;
+}
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="status-dot" id="dot"></div>
+  <span class="header-title">Phone Remote</span>
+  <span class="header-status" id="status-text">Connecting...</span>
+  <nav class="tab-bar">
+    <a href="/mirror"   class="tab-btn">📱 Screen</a>
+    <a href="/camera"   class="tab-btn active">📷 Camera</a>
+    <a href="/files"    class="tab-btn">📁 Files</a>
+    <a href="/location" class="tab-btn">📍 Location</a>
+  </nav>
+</header>
+
+<div class="camera-main">
+  <div class="cam-badge">
+    <div class="cam-dot off" id="cam-dot"></div>
+    <span class="cam-label" id="cam-label">Camera off</span>
+  </div>
+
+  <canvas id="cam-canvas" class="cam-canvas"></canvas>
+
+  <div class="cam-placeholder" id="cam-placeholder">
+    <div class="cam-icon">📷</div>
+    Camera ready — select front or back.<br>
+    <small>Works even when phone screen is off.</small>
+  </div>
+
+  <div class="cam-controls">
+    <button class="btn primary" onclick="startCamera(true)">▶ Front</button>
+    <button class="btn primary" onclick="startCamera(false)">▶ Back</button>
+    <button class="btn"         onclick="flipCamera()">↔ Flip</button>
+    <button class="btn danger"  onclick="stopCamera()">■ Stop</button>
+  </div>
+</div>
+
+<div class="alert-banner" id="alert" style="display:none;" onclick="this.style.display='none'"></div>
+
+<script src="/ws.js"></script>
+<script>
+const camCanvas      = document.getElementById('cam-canvas');
+const camCtx         = camCanvas.getContext('2d');
+const camDot         = document.getElementById('cam-dot');
+const camLabel       = document.getElementById('cam-label');
+const camPlaceholder = document.getElementById('cam-placeholder');
+const alertEl        = document.getElementById('alert');
+
+let live    = false;
+let isFront = true;
+
+const ws = createWS(handleMsg, handleBinary);
+
+function handleMsg(msg) {
+  switch (msg.type) {
+    case 'camera_streaming':
+      setLive(true);
+      break;
+
+    case 'camera_stopped':
+      setLive(false);
+      break;
+
+    case 'camera_error':
+      setLive(false);
+      showAlert('Camera permission off. On the phone: Settings → Apps → Phone Remote → enable Camera.');
+      break;
+
+    case 'phone_disconnected':
+      setLive(false);
+      break;
+  }
+}
+
+function setLive(on) {
+  live = on;
+  camDot.className   = 'cam-dot ' + (on ? 'live' : 'off');
+  camLabel.textContent = on ? 'Live' : 'Camera off';
+  camCanvas.style.display      = on ? 'block' : 'none';
+  camPlaceholder.style.display = on ? 'none'  : 'block';
+}
+
+function handleBinary(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes[0] !== 0x02) return;  // not a camera frame
+  // Always sync live state — handles BFCache/reconnect scenarios
+  setLive(true);
+  createImageBitmap(new Blob([bytes.subarray(1)], { type: 'image/jpeg' }))
+    .then(bitmap => {
+      camCanvas.width  = bitmap.height;
+      camCanvas.height = bitmap.width;
+      camCtx.save();
+      if (isFront) {
+        camCtx.translate(0, bitmap.width);
+        camCtx.rotate(-Math.PI / 2);
+      } else {
+        camCtx.translate(bitmap.height, 0);
+        camCtx.rotate(Math.PI / 2);
+      }
+      camCtx.drawImage(bitmap, 0, 0);
+      camCtx.restore();
+      bitmap.close();
+    });
+}
+
+function startCamera(front) { isFront = front; ws.send({ type: 'camera_start', front }); }
+function flipCamera()       { isFront = !isFront; ws.send({ type: 'camera_flip' }); }
+function stopCamera()       { ws.send({ type: 'camera_stop' }); setLive(false); }
+
+function showAlert(msg) {
+  alertEl.textContent = msg;
+  alertEl.style.display = 'block';
+}
+</script>
+</body>
+</html>
