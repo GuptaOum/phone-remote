@@ -35,4 +35,6 @@ key.properties
 Thumbs.db
 
 # Claude local permissions (personal)
-.claude/settings.local.json
+
+# Claude Code local config (not shared)
+.claude/
