@@ -6,48 +6,61 @@ const cors = require('cors');
 const path = require('path');
 const QRCode = require('qrcode');
 
-const { setupSignaling } = require('./services/signaling');
+const db = require('./services/db');
+const { setupSignaling, presence } = require('./services/signaling');
+const { setupAuthRoutes } = require('./routes/auth');
 const { setupFileRoutes } = require('./routes/files');
 const { errorHandler } = require('./middleware/errorHandler');
 const { logger } = require('./middleware/logger');
 
 const PORT = process.env.PORT || 3000;
 
-const app = express();
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+async function main() {
+  await db.init();
 
-app.use(cors());
-app.use(express.json());
-app.use(logger);
-app.use(express.static(path.join(__dirname, '../public')));
+  const app = express();
+  const server = http.createServer(app);
+  const wss = new WebSocket.Server({ server });
 
-// Page routes — each served directly, no client-side restoration needed
-const PUBLIC = path.join(__dirname, '../public');
-app.get('/',         (_, res) => res.redirect('/mirror'));
-app.get('/mirror',   (_, res) => res.sendFile(path.join(PUBLIC, 'mirror.html')));
-app.get('/camera',   (_, res) => res.sendFile(path.join(PUBLIC, 'camera.html')));
-app.get('/files',    (_, res) => res.sendFile(path.join(PUBLIC, 'files.html')));
-app.get('/location', (_, res) => res.sendFile(path.join(PUBLIC, 'location.html')));
+  app.use(cors());
+  app.use(express.json());
+  app.use(logger);
+  app.use(express.static(path.join(__dirname, '../public')));
 
-app.get('/health', (_, res) => res.json({ ok: true }));
+  // Page routes — auth is enforced client-side (redirect to /login without a
+  // token) and server-side on every API call and WebSocket message.
+  const PUBLIC = path.join(__dirname, '../public');
+  app.get('/',          (_, res) => res.redirect('/dashboard'));
+  app.get('/login',     (_, res) => res.sendFile(path.join(PUBLIC, 'login.html')));
+  app.get('/dashboard', (_, res) => res.sendFile(path.join(PUBLIC, 'dashboard.html')));
+  app.get('/mirror',    (_, res) => res.sendFile(path.join(PUBLIC, 'mirror.html')));
+  app.get('/camera',    (_, res) => res.sendFile(path.join(PUBLIC, 'camera.html')));
+  app.get('/files',     (_, res) => res.sendFile(path.join(PUBLIC, 'files.html')));
+  app.get('/location',  (_, res) => res.sendFile(path.join(PUBLIC, 'location.html')));
 
-app.get('/qr', async (req, res) => {
-  const url = req.query.url || `http://localhost:${PORT}`;
-  const qr = await QRCode.toDataURL(url);
-  res.json({ qr });
-});
+  app.get('/health', (_, res) => res.json({ ok: true }));
 
-setupFileRoutes(app);
-setupSignaling(wss, app);
+  app.get('/qr', async (req, res) => {
+    const url = req.query.url || `http://localhost:${PORT}`;
+    const qr = await QRCode.toDataURL(url);
+    res.json({ qr });
+  });
 
-app.use(errorHandler);
+  setupAuthRoutes(app, presence);
+  setupFileRoutes(app);
+  setupSignaling(wss, app);
 
-server.listen(PORT, () => {
-  console.log('\n📱 Phone Remote');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`📡 Local:  http://localhost:${PORT}`);
-  console.log(`\n   For remote access run in a second terminal:`);
-  console.log(`   cloudflared tunnel --url http://localhost:${PORT}`);
-  console.log(`   Then use the printed https://... URL in the app`);
+  app.use(errorHandler);
+
+  server.listen(PORT, () => {
+    console.log('\n📱 Phone Remote — multi-account server');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log(`📡 Listening: http://0.0.0.0:${PORT}`);
+    console.log(`🔐 Login:     http://localhost:${PORT}/login`);
+  });
+}
+
+main().catch((e) => {
+  console.error('Fatal startup error:', e);
+  process.exit(1);
 });

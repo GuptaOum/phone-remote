@@ -59,9 +59,12 @@ class ConnectionForegroundService : Service() {
 
     var serverUrl = ""
         private set
+    private var token = ""
+    private var deviceId = ""
     private var screenW = 0
     private var screenH = 0
     private var model = "Android"
+    private var authFailed = false
 
     private var lastCameraFrameMs = 0L
     private var reconnectDelay = 1L
@@ -88,7 +91,7 @@ class ConnectionForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            prefs.edit().remove("url").apply()
+            prefs.edit().remove("url").remove("token").apply()
             onMessage?.invoke("""{"type":"_service_stopped"}""")
             stopService(Intent(this, CameraForegroundService::class.java))
             // ScreenCaptureService intentionally left running — MediaProjection token reused on next connect
@@ -98,7 +101,10 @@ class ConnectionForegroundService : Service() {
 
         val url    = intent?.getStringExtra("url")    ?: prefs.getString("url", "") ?: ""
         val status = intent?.getStringExtra("status") ?: "Connecting..."
-        model   = intent?.getStringExtra("model") ?: prefs.getString("model", "Android") ?: "Android"
+        model    = intent?.getStringExtra("model") ?: prefs.getString("model", "Android") ?: "Android"
+        token    = intent?.getStringExtra("token")?.ifEmpty { null } ?: prefs.getString("token", "") ?: ""
+        deviceId = intent?.getStringExtra("deviceId")?.ifEmpty { null } ?: prefs.getString("deviceId", "") ?: ""
+        authFailed = false
 
         // Always use real display dimensions from WindowManager.
         // Flutter's physicalSize excludes the navigation bar (~132 px on this device),
@@ -119,6 +125,8 @@ class ConnectionForegroundService : Service() {
         if (url.isNotEmpty()) {
             prefs.edit()
                 .putString("url", url)
+                .putString("token", token)
+                .putString("deviceId", deviceId)
                 .putInt("screenW", screenW)
                 .putInt("screenH", screenH)
                 .putString("model", model)
@@ -155,7 +163,11 @@ class ConnectionForegroundService : Service() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 handler.post {
                     reconnectDelay = 1
-                    webSocket.send("""{"type":"auth"}""")
+                    val auth = JSONObject().apply {
+                        put("type", "auth")
+                        put("token", token)
+                    }
+                    webSocket.send(auth.toString())
                 }
             }
 
@@ -170,12 +182,24 @@ class ConnectionForegroundService : Service() {
                                 val reg = JSONObject().apply {
                                     put("type", "register")
                                     put("role", "phone")
+                                    put("deviceId", deviceId)
+                                    put("deviceName", model)
                                     put("screenW", screenW)
                                     put("screenH", screenH)
                                     put("model", model)
                                 }
                                 webSocket.send(reg.toString())
                                 startLocationUpdates()
+                            }
+                            "auth_error" -> {
+                                handleAuthFailure("Login expired — open the app to sign in")
+                                return@post
+                            }
+                            "device_removed" -> {
+                                handleAuthFailure(
+                                    json.optString("reason").ifBlank { "Device removed from dashboard" }
+                                )
+                                return@post
                             }
                             "control" -> {
                                 // Handle directly in Kotlin — works even when Flutter is dead
@@ -222,14 +246,34 @@ class ConnectionForegroundService : Service() {
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (code == 4001) {
+                    if (authFailed) return
+                    handler.post { handleAuthFailure(reason.ifEmpty { "Device removed" }) }
+                    return
+                }
                 if (code != 1000) handler.post { onLost() }
             }
         })
     }
 
+    private fun handleAuthFailure(message: String) {
+        authFailed = true
+        isAlive = false
+        cancelReconnect()
+        stopLocationUpdates()
+        prefs.edit().remove("url").remove("token").remove("deviceId").apply()
+        updateNotification(message, serverUrl)
+        onMessage?.invoke("""{"type":"_auth_error"}""")
+        try {
+            stopService(Intent(this, CameraForegroundService::class.java))
+        } catch (_: Exception) {}
+        stopSelf()
+    }
+
     private fun onLost() {
         val was = isAlive
         isAlive = false
+        if (authFailed) return  // token rejected — don't reconnect until re-login
         if (was) {
             updateNotification("Reconnecting...", serverUrl)
             onMessage?.invoke("""{"type":"_disconnected"}""")
@@ -398,6 +442,16 @@ class ConnectionForegroundService : Service() {
                     "pf_upload_chunk" -> {
                         val data = android.util.Base64.decode(json.optString("data"), android.util.Base64.DEFAULT)
                         synchronized(uploads) { uploads.getOrPut(id) { mutableListOf() }.addAll(data.toList()) }
+                        if (!json.optBoolean("done")) {
+                            // Flow control: browser waits for this ack before sending the
+                            // next chunk — prevents flooding the WebSocket on large files
+                            // (same pattern as pf_chunk_ack on the download path).
+                            send(JSONObject().apply {
+                                put("type", "pf_upload_chunk_ack")
+                                put("id", id)
+                                put("index", json.optInt("index"))
+                            }.toString())
+                        }
                         if (json.optBoolean("done")) {
                             val allBytes: ByteArray
                             synchronized(uploads) { allBytes = uploads.remove(id)?.toByteArray() ?: byteArrayOf() }

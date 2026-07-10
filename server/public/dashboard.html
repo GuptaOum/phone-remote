@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Phone Remote — My Devices</title>
+<link rel="stylesheet" href="/shared.css"/>
+<style>
+  body { overflow: auto; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 34px 22px; width: 100%; }
+  .top { display: flex; align-items: center; gap: 12px; margin-bottom: 26px; }
+  .top h1 { font-size: 21px; letter-spacing: -.4px; margin-right: auto; }
+  .email { color: var(--muted); font-size: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+  .device {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    cursor: pointer;
+    padding: 20px 18px;
+    position: relative;
+    transition: all .18s var(--ease);
+    animation: .25s fadeUp;
+  }
+  .device:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 6px 24px #6366f122; }
+  .device .icon {
+    width: 40px; height: 40px;
+    border-radius: 11px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 19px;
+    margin-bottom: 13px;
+  }
+  .device .name { font-size: 14.5px; font-weight: 600; margin-bottom: 3px; }
+  .device .meta { color: var(--muted); font-size: 11.5px; }
+  .badge {
+    position: absolute; top: 16px; right: 16px;
+    display: flex; align-items: center; gap: 5px;
+    font-size: 10.5px; font-weight: 600; letter-spacing: .3px;
+  }
+  .badge .d { width: 7px; height: 7px; border-radius: 50%; }
+  .badge.on  { color: var(--green); } .badge.on  .d { background: var(--green); box-shadow: 0 0 6px 1px #22c55e55; }
+  .badge.off { color: var(--muted); } .badge.off .d { background: var(--muted); }
+  .device .del {
+    position: absolute; bottom: 14px; right: 14px;
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 13px; opacity: 0;
+    transition: all .18s var(--ease);
+  }
+  .device:hover .del { opacity: 1; }
+  .device .del:hover { color: var(--red); }
+  .empty {
+    border: 1px dashed var(--border);
+    border-radius: 14px;
+    color: var(--muted);
+    font-size: 13.5px;
+    line-height: 2;
+    padding: 44px 30px;
+    text-align: center;
+    grid-column: 1 / -1;
+  }
+  .empty b { color: var(--text); }
+  .error {
+    border: 1px solid #ef444455;
+    background: #ef44441a;
+    color: #fca5a5;
+  }
+  code { background: var(--bg3); border-radius: 5px; padding: 2px 7px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>My Devices</h1>
+    <span class="email" id="email"></span>
+    <button class="btn" onclick="refresh()">↻ Refresh</button>
+    <button class="btn danger" onclick="logout()">Log out</button>
+  </div>
+  <div class="grid" id="grid"></div>
+</div>
+
+<script>
+  const token = localStorage.getItem('pr_token');
+  if (!token) location.href = '/login';
+  document.getElementById('email').textContent = localStorage.getItem('pr_email') || '';
+
+  function logout() {
+    localStorage.removeItem('pr_token');
+    localStorage.removeItem('pr_device');
+    localStorage.removeItem('pr_email');
+    location.href = '/login';
+  }
+
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, (c) =>
+      ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+  }
+
+  function timeAgo(ms) {
+    if (!ms) return 'never seen';
+    const s = (Date.now() - ms) / 1000;
+    if (s < 90) return 'just now';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    if (s < 86400) return Math.round(s / 3600) + ' h ago';
+    return Math.round(s / 86400) + ' d ago';
+  }
+
+  function goToMirror(id) {
+    localStorage.setItem('pr_device', id);
+    location.href = '/mirror?device=' + encodeURIComponent(id);
+  }
+
+  async function removeDevice(e, id) {
+    e.stopPropagation();
+    if (!confirm('Remove this device from your account?')) return;
+    await api('/api/devices/' + encodeURIComponent(id), { method: 'DELETE' });
+    if (localStorage.getItem('pr_device') === id) {
+      localStorage.removeItem('pr_device');
+    }
+    refresh();
+  }
+
+  function api(path, opts = {}) {
+    opts.headers = Object.assign({ 'Authorization': 'Bearer ' + token }, opts.headers || {});
+    return fetch(path, opts).then((r) => {
+      if (r.status === 401) { logout(); throw new Error('unauthorized'); }
+      return r;
+    });
+  }
+
+  async function refresh() {
+    try {
+      const { devices } = await (await api('/api/devices')).json();
+      const grid = document.getElementById('grid');
+      if (!devices.length) {
+        grid.innerHTML = `
+          <div class="empty">
+            <b>No phones linked yet</b><br/>
+            Install the Phone Remote app on your Android phone,<br/>
+            sign in with <code>${esc(localStorage.getItem('pr_email') || 'this account')}</code> — it will appear here.
+          </div>`;
+        return;
+      }
+      grid.innerHTML = devices.map((d) => `
+        <div class="device" onclick="goToMirror('${esc(d.id)}')">
+          <div class="badge ${d.online ? 'on' : 'off'}"><span class="d"></span>${d.online ? 'ONLINE' : 'OFFLINE'}</div>
+          <div class="icon">📱</div>
+          <div class="name">${esc(d.name || d.model || 'Android Device')}</div>
+          <div class="meta">${esc(d.model || '')} · ${d.online ? 'connected' : timeAgo(d.last_seen)}</div>
+          <button class="del" title="Remove device" onclick="removeDevice(event, '${esc(d.id)}')">✕ remove</button>
+        </div>`).join('');
+    } catch (e) {
+      const grid = document.getElementById('grid');
+      grid.innerHTML = `
+        <div class="empty error">
+          <b>Could not load devices</b><br/>
+          Check the server, sign-in token, or the browser Network tab.<br/>
+          <code>${esc(e?.message || 'Unknown error')}</code>
+        </div>`;
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+</body>
+</html>

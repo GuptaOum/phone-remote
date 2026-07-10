@@ -9,12 +9,21 @@ import '../services/phone_files_service.dart';
 import '../services/touch_service.dart';
 import '../services/file_service.dart';
 import '../services/location_service.dart';
+import '../services/auth_service.dart';
 import 'files_screen.dart';
+import 'login_screen.dart';
 import 'setup_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   final String serverUrl;
-  const HomeScreen({super.key, required this.serverUrl});
+  final String token;
+  final String deviceId;
+  const HomeScreen({
+    super.key,
+    required this.serverUrl,
+    required this.token,
+    required this.deviceId,
+  });
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
@@ -75,7 +84,7 @@ class _HomeScreenState extends State<HomeScreen>
       final screenW = _screenW;
       final screenH = _screenH;
 
-      _files = FileService(serverUrl: widget.serverUrl);
+      _files = FileService(serverUrl: widget.serverUrl, token: widget.token);
 
       _sig = SignalingService(
         serverUrl: widget.serverUrl,
@@ -84,6 +93,8 @@ class _HomeScreenState extends State<HomeScreen>
           _sig!.send({
             'type': 'register',
             'role': 'phone',
+            'deviceId': widget.deviceId,
+            'deviceName': _deviceModel,
             'screenW': screenW,
             'screenH': screenH,
             'model': _deviceModel,
@@ -136,6 +147,8 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       await _connSvc.invokeMethod('startConnectionService', {
         'url': widget.serverUrl,
+        'token': widget.token,
+        'deviceId': widget.deviceId,
         'status': status,
         'screenW': _screenW,
         'screenH': _screenH,
@@ -157,6 +170,13 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _onMsg(Map<String, dynamic> msg) {
     switch (msg['type']) {
+      case '_auth_error':
+        // Server rejected our token — session expired, back to login
+        _forceLogout();
+        break;
+      case 'device_removed':
+        _forceLogout();
+        break;
       case 'stream_start':
         _handleStreamStart();
         break;
@@ -193,6 +213,17 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   // ── Stream start/stop (browser-triggered) ─────────────────────────────────
+
+  Future<void> _forceLogout() async {
+    await AuthService.logout();
+    try { await _connSvc.invokeMethod('stopConnectionService'); } catch (_) {}
+    if (!mounted) return;
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+      (route) => false,
+    );
+  }
 
   Future<void> _handleStreamStart() async {
     if (_streaming) return;
@@ -267,6 +298,23 @@ class _HomeScreenState extends State<HomeScreen>
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
+  Future<void> _logout() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Log out?'),
+        content: const Text(
+            'This phone will disconnect and stop being remotely accessible until you sign in again.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Log out')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _forceLogout();
+  }
+
   @override
   void dispose() {
     _pulseCtrl.dispose();
@@ -309,6 +357,11 @@ class _HomeScreenState extends State<HomeScreen>
                 builder: (_) => const SetupScreen(isReview: true),
               ),
             ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            tooltip: 'Log out',
+            onPressed: _logout,
           ),
         ],
       ),

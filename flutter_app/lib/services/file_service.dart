@@ -4,11 +4,15 @@ import 'package:path_provider/path_provider.dart';
 
 class FileService {
   final String serverUrl;
+  final String token;
   final Dio _dio = Dio();
 
-  FileService({required this.serverUrl});
+  FileService({required this.serverUrl, this.token = ''});
 
-  Options get _opts => Options(headers: {'ngrok-skip-browser-warning': '1'});
+  Options get _opts => Options(headers: {
+        'ngrok-skip-browser-warning': '1',
+        if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+      });
 
   Future<List<Map<String, dynamic>>> listServerFiles({String path = ''}) async {
     final r = await _dio.get(

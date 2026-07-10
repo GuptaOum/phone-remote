@@ -5,6 +5,8 @@
 
 # Node
 node_modules/
+server/data/
+server/logs/
 
 # Flutter / Dart
 **/build/
@@ -31,3 +33,6 @@ key.properties
 *.iml
 .DS_Store
 Thumbs.db
+
+# Claude local permissions (personal)
+.claude/settings.local.json

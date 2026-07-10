@@ -255,6 +255,12 @@
 
 <script src="/ws.js"></script>
 <script>
+if (!PR.device) {
+  document.getElementById('status-text').textContent = 'No device selected';
+  document.getElementById('overlay-title').textContent = 'No device selected';
+  document.getElementById('overlay-sub').textContent = 'Go back to the dashboard and click a phone card.';
+  document.getElementById('stream-btn').style.display = 'none';
+}
 const canvas   = document.getElementById('screen-canvas');
 const ctx      = canvas.getContext('2d');
 const video    = document.getElementById('rtc-video');

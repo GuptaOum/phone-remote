@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'connect_screen.dart';
+import 'login_screen.dart';
 
 class SetupScreen extends StatefulWidget {
   final bool isReview;
@@ -86,7 +86,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
     if (mounted) {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => const ConnectScreen()),
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
       );
     }
   }
