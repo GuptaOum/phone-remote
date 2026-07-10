@@ -6,7 +6,7 @@ import 'home_screen.dart';
 /// Production server — hardcode your domain here once deployed
 /// (e.g. 'https://phoneremote.example.com'). While empty, the server
 /// field is shown so any server can be used during development.
-const String kDefaultServerUrl = 'http://3.6.239.48'; // AWS EC2 Elastic IP (ap-south-1)
+const String kDefaultServerUrl = 'https://3-6-239-48.sslip.io'; // AWS EC2 (ap-south-1), HTTPS via Let's Encrypt
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
