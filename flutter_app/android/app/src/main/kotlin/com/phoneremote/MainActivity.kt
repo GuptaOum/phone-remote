@@ -202,12 +202,16 @@ class MainActivity : FlutterActivity() {
                 }
                 "startConnectionService" -> {
                     val url    = call.argument<String>("url")    ?: ""
+                    val token  = call.argument<String>("token")  ?: ""
+                    val deviceId = call.argument<String>("deviceId") ?: ""
                     val status = call.argument<String>("status") ?: "Connected"
                     val screenW = call.argument<Int>("screenW") ?: 0
                     val screenH = call.argument<Int>("screenH") ?: 0
                     val model   = call.argument<String>("model") ?: "Android"
                     val intent = android.content.Intent(this, ConnectionForegroundService::class.java)
                         .putExtra("url", url)
+                        .putExtra("token", token)
+                        .putExtra("deviceId", deviceId)
                         .putExtra("status", status)
                         .putExtra("screenW", screenW)
                         .putExtra("screenH", screenH)
@@ -217,6 +221,10 @@ class MainActivity : FlutterActivity() {
                     return@setMethodCallHandler
                 }
                 "stopConnectionService" -> {
+                    // Clear saved connection creds so a START_STICKY restart
+                    // doesn't silently reconnect after logout
+                    getSharedPreferences(ConnectionForegroundService.PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                        .edit().remove("url").remove("token").apply()
                     stopService(android.content.Intent(this, ConnectionForegroundService::class.java))
                     result.success(null)
                     return@setMethodCallHandler

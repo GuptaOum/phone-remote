@@ -324,6 +324,7 @@ function handleMsg(msg) {
       break;
 
     case 'pf_upload_ok':
+    case 'pf_upload_chunk_ack':
       if (uploadResolvers[msg.id]) {
         uploadResolvers[msg.id]();
         delete uploadResolvers[msg.id];
@@ -335,7 +336,7 @@ function handleMsg(msg) {
       break;
 
     case 'pf_error':
-      if (uploadResolvers[msg.id])   { uploadResolvers[msg.id]();       delete uploadResolvers[msg.id];   }
+      if (uploadResolvers[msg.id])   { uploadResolvers[msg.id](msg.error || 'upload failed'); delete uploadResolvers[msg.id]; }
       if (downloadResolvers[msg.id]) { downloadResolvers[msg.id](null); delete downloadResolvers[msg.id]; }
       alert('Phone error: ' + msg.error);
       break;
@@ -345,7 +346,7 @@ function handleMsg(msg) {
 // ── Shared helpers ─────────────────────────────────────────────────
 function triggerDownload(url, name) {
   const a = document.createElement('a');
-  a.href = url;
+  a.href = PR.urlWithToken(url); // <a download> can't send Authorization headers
   a.download = name;
   document.body.appendChild(a);
   a.click();
@@ -411,7 +412,7 @@ async function loadPc(path) {
   pcSelected.clear();
   updateSelBar('pc');
   try {
-    const res = await fetch('/api/files?path=' + encodeURIComponent(path));
+    const res = await PR.api('/api/files?path=' + encodeURIComponent(path));
     const data = await res.json();
     pcFiles     = data.entries || [];
     pcFileCount = pcFiles.filter(f => f.type !== 'dir').length;
@@ -449,7 +450,7 @@ function pcDownload(path, name) {
 
 async function pcDelete(path, name) {
   if (!confirm('Delete "' + name + '"?')) return;
-  await fetch('/api/files?path=' + encodeURIComponent(path), { method: 'DELETE' });
+  await PR.api('/api/files?path=' + encodeURIComponent(path), { method: 'DELETE' });
   loadPc(pcPath);
 }
 
@@ -458,7 +459,7 @@ async function pcUpload(files) {
     const fd = new FormData();
     fd.append('files', file);
     showToast(file.name, 0);
-    await fetch('/api/files/upload?path=' + encodeURIComponent(pcPath), { method: 'POST', body: fd });
+    await PR.api('/api/files/upload?path=' + encodeURIComponent(pcPath), { method: 'POST', body: fd });
     showToast(file.name, 100);
     await new Promise(r => setTimeout(r, 600));
     hideToast();
@@ -494,7 +495,7 @@ async function pcDeleteSelected() {
   if (!pcSelected.size) return;
   if (!confirm('Delete ' + pcSelected.size + ' item(s)?')) return;
   await Promise.all([...pcSelected].map(p =>
-    fetch('/api/files?path=' + encodeURIComponent(p), { method: 'DELETE' })
+    PR.api('/api/files?path=' + encodeURIComponent(p), { method: 'DELETE' })
   ));
   pcSelected.clear();
   loadPc(pcPath);
@@ -595,6 +596,7 @@ async function phoneUpload(files) {
     showToast(file.name, 0);
     ws.send({ type: 'pf_upload_start', id, path: destPath, size: file.size, total });
 
+    let failed = null;
     for (let i = 0; i < total; i++) {
       const slice = arr.subarray(i * CHUNK, (i + 1) * CHUNK);  // view, no copy
       // Loop avoids spreading a 64 KB array as function arguments (call stack limit)
@@ -602,10 +604,20 @@ async function phoneUpload(files) {
       for (let j = 0; j < slice.length; j++) bin += String.fromCharCode(slice[j]);
       ws.send({ type: 'pf_upload_chunk', id, index: i, total, data: btoa(bin), done: i === total - 1 });
       showToast(file.name, Math.round(((i + 1) / total) * 100));
+
+      // Flow control: wait for the phone's ack (pf_upload_chunk_ack, or
+      // pf_upload_ok on the final chunk) before sending the next chunk —
+      // never more than one chunk in flight, so the socket can't flood.
+      const err = await new Promise((resolve) => {
+        uploadResolvers[id] = resolve;
+        setTimeout(() => {
+          if (uploadResolvers[id]) { delete uploadResolvers[id]; resolve('timeout — phone did not acknowledge chunk ' + i); }
+        }, 20000);
+      });
+      if (err) { failed = err; break; }
     }
-    // Wait for a single pf_upload_ok after all chunks are sent
-    await new Promise(resolve => { uploadResolvers[id] = resolve; });
     hideToast();
+    if (failed) alert('Upload of ' + file.name + ' failed: ' + failed);
   }
   loadPhone(phonePath);
 }

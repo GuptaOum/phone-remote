@@ -48,6 +48,12 @@ class SignalingService {
       } else if (type == '_service_stopped') {
         _alive = false;
         onDisconnected?.call();
+      } else if (type == '_auth_error') {
+        // Token rejected by server — surface both as a disconnect and as a
+        // message so the UI can send the user back to the login screen.
+        _alive = false;
+        onDisconnected?.call();
+        onMessage(msg);
       } else {
         onMessage(msg);
       }
