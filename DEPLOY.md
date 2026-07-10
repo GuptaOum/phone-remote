@@ -5,13 +5,16 @@
 | Resource | Value |
 |---|---|
 | Region | ap-south-1 (Mumbai) |
-| EC2 instance | `i-0ec6440e1d7bd748c` (t3.micro, Ubuntu 24.04) |
-| Elastic IP | **http://3.6.239.48** |
-| Security group | `sg-0291d93d24ad4f7c6` (22 from home IP, 80/443 public) |
+| EC2 instance | `i-0ec6440e1d7bd748c` (t3.medium, Ubuntu 24.04, 8GB swap) |
+| Elastic IP | 3.6.239.48 |
+| Public URL | **https://3-6-239-48.sslip.io** (free wildcard DNS resolving to the Elastic IP — no domain purchase needed) |
+| TLS | Let's Encrypt via certbot, auto-renews (expires 2026-10-08, renewed automatically before then) |
+| Security group | `sg-0291d93d24ad4f7c6` (22 from home IP — rotates with ISP, update as needed; 80/443 public) |
 | SSH key | `~/.ssh/phone-remote.pem` → `ssh -i ~/.ssh/phone-remote.pem ubuntu@3.6.239.48` |
 | Database | SQLite on instance (`~/phone-remote/server/data/phoneremote.db`) — no RDS |
 | Process | PM2 `phone-remote` (fork, 1 instance, starts on boot) |
-| Proxy | nginx :80 → node :3000, WebSocket upgrade enabled |
+| Proxy | nginx :80 → :443 redirect → node :3000, WebSocket upgrade (wss://) enabled |
+| Build toolchain | Flutter 3.44.6 + Android SDK 36 + NDK 28.2 installed on-instance (`~/flutter`, `~/android-sdk`) for APK builds |
 
 **Redeploy after code changes** (from repo root on Windows):
 
@@ -23,9 +26,10 @@ ssh -i ~/.ssh/phone-remote.pem ubuntu@3.6.239.48 \
     "tar xzf phone-remote-server.tgz -C ~/phone-remote && cd ~/phone-remote/server && npm install --omit=dev && pm2 restart phone-remote"
 ```
 
-Next step when you buy a domain: Route 53 A-record → 3.6.239.48, then
+If you later buy a real domain: Route 53 A-record → 3.6.239.48, then
 `sudo certbot --nginx -d yourdomain.com` on the instance (section 4 below),
-and change `kDefaultServerUrl` to `https://yourdomain.com`.
+and change `kDefaultServerUrl` to `https://yourdomain.com`. The sslip.io
+setup can be dropped once a real domain is live.
 
 ---
 
