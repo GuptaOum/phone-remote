@@ -81,8 +81,11 @@
 </div>
 
 <script>
-  // Already logged in → straight to the dashboard
-  if (localStorage.getItem('pr_token')) location.href = '/dashboard';
+  // Already logged in → straight to the dashboard (or wherever we were headed)
+  if (localStorage.getItem('pr_token')) {
+    const next = new URLSearchParams(location.search).get('next');
+    location.href = (next && next.startsWith('/')) ? next : '/dashboard';
+  }
 
   let mode = 'login';
 
@@ -123,7 +126,8 @@
       if (!res.ok) throw new Error(data.error || 'Request failed');
       localStorage.setItem('pr_token', data.token);
       localStorage.setItem('pr_email', data.email);
-      location.href = '/dashboard';
+      const next = new URLSearchParams(location.search).get('next');
+      location.href = (next && next.startsWith('/')) ? next : '/dashboard';
     } catch (err) {
       showErr(err.message);
       btn.disabled = false;

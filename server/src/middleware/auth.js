@@ -7,8 +7,8 @@ if (JWT_SECRET === 'dev-secret-change-me-in-production') {
 
 const TOKEN_TTL = process.env.TOKEN_TTL || '30d';
 
-function signToken(user) {
-  return jwt.sign({ uid: user.id, email: user.email }, JWT_SECRET, { expiresIn: TOKEN_TTL });
+function signToken(user, expiresIn = TOKEN_TTL) {
+  return jwt.sign({ uid: user.id, email: user.email }, JWT_SECRET, { expiresIn });
 }
 
 /** Returns { uid, email } or null. */

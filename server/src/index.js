@@ -10,6 +10,8 @@ const db = require('./services/db');
 const { setupSignaling, presence } = require('./services/signaling');
 const { setupAuthRoutes } = require('./routes/auth');
 const { setupFileRoutes } = require('./routes/files');
+const { setupOAuthRoutes } = require('./routes/oauth');
+const { setupMcpRoutes } = require('./routes/mcp');
 const { errorHandler } = require('./middleware/errorHandler');
 const { logger } = require('./middleware/logger');
 
@@ -22,8 +24,10 @@ async function main() {
   const server = http.createServer(app);
   const wss = new WebSocket.Server({ server });
 
+  app.set('trust proxy', 1); // nginx terminates TLS — needed so req.protocol reports https
   app.use(cors());
   app.use(express.json());
+  app.use(express.urlencoded({ extended: false })); // OAuth token exchange uses form-encoded bodies
   app.use(logger);
   app.use(express.static(path.join(__dirname, '../public')));
 
@@ -49,6 +53,8 @@ async function main() {
   setupAuthRoutes(app, presence);
   setupFileRoutes(app);
   setupSignaling(wss, app);
+  setupOAuthRoutes(app);
+  setupMcpRoutes(app);
 
   app.use(errorHandler);
 
