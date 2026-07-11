@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Connect to Phone Remote</title>
+<link rel="stylesheet" href="/shared.css"/>
+<style>
+  body { align-items: center; justify-content: center; overflow: auto; }
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    width: 100%;
+    max-width: 420px;
+    padding: 36px 32px;
+    animation: .3s fadeUp;
+    text-align: center;
+  }
+  .logo {
+    width: 46px; height: 46px;
+    border-radius: 13px;
+    background: linear-gradient(135deg, var(--accent), #7c3aed);
+    margin: 0 auto 18px;
+    box-shadow: 0 4px 18px #6366f14a;
+  }
+  h1 { font-size: 20px; letter-spacing: -.3px; margin-bottom: 8px; }
+  .client-name { color: var(--accent2); font-weight: 600; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 26px; line-height: 1.6; }
+  .perms {
+    text-align: left;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 24px;
+    font-size: 12.5px;
+    color: var(--text);
+    line-height: 2;
+  }
+  .perms li { margin-left: 18px; color: var(--muted); }
+  .perms li::marker { color: var(--accent2); }
+  .row { display: flex; gap: 10px; }
+  .row .btn { flex: 1; padding: 11px; }
+  .err {
+    background: #ef444418;
+    border: 1px solid #ef444444;
+    border-radius: 9px;
+    color: #fca5a5;
+    font-size: 12.5px;
+    margin-top: 16px;
+    padding: 10px 13px;
+  }
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <div class="logo"></div>
+  <h1>Connecting <span class="client-name" id="client-name">an app</span></h1>
+  <div class="sub">wants to access your Phone Remote account and control your linked phones.</div>
+  <ul class="perms">
+    <li>View your connected devices</li>
+    <li>Send touch, swipe, and text commands</li>
+    <li>Take screenshots and browse phone files</li>
+    <li>Read the most recent location</li>
+  </ul>
+  <div class="row">
+    <button class="btn" onclick="deny()">Cancel</button>
+    <button class="btn primary" id="approve-btn" onclick="approve()">Approve</button>
+  </div>
+  <div id="err"></div>
+</div>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const clientId = params.get('client_id');
+  const redirectUri = params.get('redirect_uri');
+  const state = params.get('state');
+  const codeChallenge = params.get('code_challenge');
+  const codeChallengeMethod = params.get('code_challenge_method') || 'S256';
+
+  function showErr(text) {
+    document.getElementById('err').innerHTML = text ? `<div class="err">${text}</div>` : '';
+  }
+
+  if (!clientId || !redirectUri || !codeChallenge) {
+    document.getElementById('card').innerHTML =
+      '<h1>Invalid request</h1><div class="sub">This authorization link is missing required parameters.</div>';
+  } else {
+    const token = localStorage.getItem('pr_token');
+    if (!token) {
+      // Not logged in — send through the normal login page, then back here
+      location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+    }
+  }
+
+  function deny() {
+    const url = new URL(redirectUri);
+    url.searchParams.set('error', 'access_denied');
+    if (state) url.searchParams.set('state', state);
+    location.href = url.toString();
+  }
+
+  async function approve() {
+    const btn = document.getElementById('approve-btn');
+    btn.disabled = true;
+    btn.textContent = 'Connecting...';
+    showErr('');
+    try {
+      const res = await fetch('/oauth/authorize', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + localStorage.getItem('pr_token'),
+        },
+        body: JSON.stringify({
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          code_challenge: codeChallenge,
+          code_challenge_method: codeChallengeMethod,
+          state,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error_description || data.error || 'Authorization failed');
+      location.href = data.redirect;
+    } catch (e) {
+      showErr(e.message);
+      btn.disabled = false;
+      btn.textContent = 'Approve';
+    }
+  }
+</script>
+</body>
+</html>

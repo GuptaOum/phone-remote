@@ -68,6 +68,111 @@ const presence = {
   },
 };
 
+// ── MCP bridge ───────────────────────────────────────────────────────────────
+// The MCP HTTP endpoint has no persistent connection of its own — it borrows
+// the account's existing phone WebSocket for fire-and-forget commands, and
+// for request/response calls (file listing, screenshot) it correlates on the
+// same `id` field the browser dashboard already uses.
+
+// requestId → { resolve, reject } — resolved when the matching phone→server
+// reply (pf_list_result, pf_error, ...) arrives, regardless of whether any
+// browser is also watching.
+const pendingHttpRequests = new Map();
+
+function getPhoneSocket(userId, deviceId) {
+  const p = accounts.get(userId)?.phones.get(deviceId);
+  return p?.readyState === 1 ? p : null;
+}
+
+/** Fire-and-forget control command (tap/swipe/text/ring/flash/...). */
+function sendToPhone(userId, deviceId, msg) {
+  const phone = getPhoneSocket(userId, deviceId);
+  if (!phone) return false;
+  phone.send(j(msg));
+  return true;
+}
+
+function getLastLocation(userId, deviceId) {
+  return accounts.get(userId)?.lastLocation.get(deviceId) || null;
+}
+
+/** Live screen dimensions, known only while the phone is connected. */
+function getDeviceScreenSize(userId, deviceId) {
+  const p = getPhoneSocket(userId, deviceId);
+  return p ? { screenW: p.screenW, screenH: p.screenH } : null;
+}
+
+/**
+ * Send a message to the phone and wait for its correlated reply (matched by
+ * `id`). Used for pf_list / pf_delete, which already round-trip an id.
+ */
+function requestFromPhone(userId, deviceId, buildMsg, timeoutMs = 15000) {
+  const phone = getPhoneSocket(userId, deviceId);
+  if (!phone) return Promise.reject(new Error('Device is offline'));
+  const id = uuidv4();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingHttpRequests.delete(id);
+      reject(new Error('Phone did not respond in time'));
+    }, timeoutMs);
+    pendingHttpRequests.set(id, {
+      resolve: (v) => { clearTimeout(timer); resolve(v); },
+      reject: (e) => { clearTimeout(timer); reject(e); },
+    });
+    phone.send(j(buildMsg(id)));
+  });
+}
+
+/**
+ * Screenshot has no request-id in its binary reply — it's a broadcast to
+ * whichever browsers are "watching" the device. So we register a fake
+ * browser socket for the duration of one capture: it looks enough like a
+ * real ws (readyState + send) to receive the relay, and its send() just
+ * resolves our promise with the raw JPEG bytes instead of touching a socket.
+ * No phone-side (Kotlin) changes needed.
+ */
+function captureScreenshot(userId, deviceId, timeoutMs = 15000) {
+  const phone = getPhoneSocket(userId, deviceId);
+  if (!phone) return Promise.reject(new Error('Device is offline'));
+  const a = acct(userId);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fake = {
+      watchId: deviceId,
+      readyState: 1,
+      send: (data, opts) => {
+        if (settled) return;
+        if (opts && opts.binary && Buffer.isBuffer(data) && data[0] === 0x03) {
+          settled = true;
+          cleanup();
+          resolve(data.subarray(1));
+        }
+      },
+    };
+    const onJson = (msg) => {
+      if (settled || msg.type !== 'screenshot_error') return;
+      settled = true;
+      cleanup();
+      reject(new Error(msg.reason || 'Screenshot failed'));
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('Screenshot timed out'));
+    }, timeoutMs);
+    function cleanup() {
+      clearTimeout(timer);
+      a.browsers.delete(fake);
+      a.mcpErrorListeners?.delete(onJson);
+    }
+    a.browsers.add(fake);
+    if (!a.mcpErrorListeners) a.mcpErrorListeners = new Set();
+    a.mcpErrorListeners.add(onJson);
+    phone.send(j({ type: 'screenshot' }));
+  });
+}
+
 function setupSignaling(wss, app) {
   wss.on('connection', (ws) => {
     ws.id = uuidv4();
@@ -228,9 +333,12 @@ function setupSignaling(wss, app) {
         case 'camera_error':
           relayToWatchers({ type: 'camera_error', reason: msg.reason });
           break;
-        case 'screenshot_error':
-          relayToWatchers({ type: 'screenshot_error', reason: msg.reason });
+        case 'screenshot_error': {
+          const errMsg = { type: 'screenshot_error', reason: msg.reason };
+          relayToWatchers(errMsg);
+          acct(ws.userId).mcpErrorListeners?.forEach((fn) => fn(errMsg));
           break;
+        }
 
         // ── Browser → phone commands ──────────────────────────────────────
         case 'camera_start':
@@ -261,9 +369,18 @@ function setupSignaling(wss, app) {
         case 'pf_upload_ok':
         case 'pf_upload_chunk_ack':
         case 'pf_delete_ok':
-        case 'pf_error':
+        case 'pf_error': {
           relayToWatchers(msg);
+          // Resolve any MCP tool call waiting on this exact request id —
+          // independent of whether a browser dashboard is also watching.
+          const pending = pendingHttpRequests.get(msg.id);
+          if (pending) {
+            pendingHttpRequests.delete(msg.id);
+            if (msg.type === 'pf_error') pending.reject(new Error(msg.error || 'Phone reported an error'));
+            else pending.resolve(msg);
+          }
           break;
+        }
         case 'pf_chunk': {
           if (ws.role !== 'phone') return;
           bcast(watchers(), msg);
@@ -362,4 +479,7 @@ const bcast = (targets, msg) => {
   targets.forEach((ws) => { if (ws.readyState === 1) ws.send(s); });
 };
 
-module.exports = { setupSignaling, presence, revokeDevice };
+module.exports = {
+  setupSignaling, presence, revokeDevice,
+  sendToPhone, getLastLocation, getDeviceScreenSize, requestFromPhone, captureScreenshot,
+};
