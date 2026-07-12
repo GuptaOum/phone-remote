@@ -355,6 +355,9 @@ function setupSignaling(wss, app) {
         case 'flash':
           relayToPhone({ type: 'flash', count: msg.count ?? 3 });
           break;
+        case 'open_app':
+          relayToPhone({ type: 'open_app', id: msg.id, query: msg.query, package: msg.package });
+          break;
 
         // ── Phone file system (browser ↔ phone) ───────────────────────────
         case 'pf_list':
@@ -369,6 +372,7 @@ function setupSignaling(wss, app) {
         case 'pf_upload_ok':
         case 'pf_upload_chunk_ack':
         case 'pf_delete_ok':
+        case 'open_app_result':
         case 'pf_error': {
           relayToWatchers(msg);
           // Resolve any MCP tool call waiting on this exact request id —
