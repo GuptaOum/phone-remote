@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const db = require('../services/db');
 const { verifyToken } = require('../middleware/auth');
 const signaling = require('../services/signaling');
@@ -23,7 +24,21 @@ const signaling = require('../services/signaling');
  */
 
 const PROTOCOL_VERSION = '2025-06-18';
-const SERVER_VERSION = '1.1.0';
+const SERVER_VERSION = '1.3.0';
+
+// send_file: JSON body limit is 25 MB (index.js) and base64 inflates ~4/3,
+// so cap the decoded payload safely below that.
+const MAX_SEND_FILE_BYTES = 18 * 1024 * 1024;
+
+// send_local_file: one-time upload URLs. The tool call reserves a token, the
+// MCP client then POSTs the raw file bytes to /mcp/upload/<token> — the file
+// never has to be base64'd through the model's context window.
+const UPLOAD_TTL_MS = 10 * 60 * 1000;
+const pendingUploads = new Map(); // token → { userId, deviceId, dest, expiresAt }
+function pruneUploads() {
+  const now = Date.now();
+  for (const [token, u] of pendingUploads) if (u.expiresAt < now) pendingUploads.delete(token);
+}
 
 // Named keys → the KEYCODE_* strings the phone's pressKey() already handles.
 const KEY_MAP = {
@@ -228,6 +243,33 @@ const TOOLS = [
       required: ['deviceId'],
     },
   },
+  {
+    name: 'send_local_file',
+    description: 'Send a file from the computer where the MCP client runs (any local file path the user gives) to the phone — the right tool for files on disk, no base64 needed. Step 1: call this tool with the destination file name (and optional folder); it returns a one-time upload_url. Step 2: upload the raw bytes from the shell, e.g. `curl -sS -X POST -H "Content-Type: application/octet-stream" --data-binary @"/path/to/file" "<upload_url>"`. The curl response confirms the file was saved to /storage/emulated/0/<folder>/<name> on the phone. The URL works once, within 10 minutes. Max 18 MB.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string' },
+        name: { type: 'string', description: 'File name to save as on the phone, e.g. "photo.png"' },
+        folder: { type: 'string', description: 'Destination folder under /storage/emulated/0 (default "Download")' },
+      },
+      required: ['deviceId', 'name'],
+    },
+  },
+  {
+    name: 'send_file',
+    description: 'Send a small file to the device\'s shared storage with the content passed inline as base64. Saves to /storage/emulated/0/<folder>/<name> (folder defaults to Download). Max 18 MB — but for any file that exists on disk, prefer send_local_file (streams the bytes directly instead of routing base64 through the conversation).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string' },
+        name: { type: 'string', description: 'File name to save as, e.g. "photo.png"' },
+        data_base64: { type: 'string', description: 'File content, base64-encoded' },
+        folder: { type: 'string', description: 'Destination folder under /storage/emulated/0 (default "Download")' },
+      },
+      required: ['deviceId', 'name', 'data_base64'],
+    },
+  },
 ];
 
 function textResult(text, isError = false) {
@@ -281,7 +323,7 @@ function scrollGesture(direction, amount) {
   }
 }
 
-async function callTool(userId, name, args = {}) {
+async function callTool(userId, name, args = {}, ctx = {}) {
   const { deviceId } = args;
   const offline = () => textResult('Device is offline.', true);
 
@@ -415,18 +457,90 @@ async function callTool(userId, name, args = {}) {
       }
     }
 
+    case 'send_local_file': {
+      const fileName = String(args.name || '').replace(/[/\\]/g, '').trim();
+      if (!fileName) return textResult('name must be a plain file name (no slashes).', true);
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      const destFolder = confineToBase(
+        args.folder
+          ? (String(args.folder).startsWith('/') ? args.folder : `${PHONE_BASE}/${args.folder}`)
+          : `${PHONE_BASE}/Download`
+      );
+      pruneUploads();
+      const token = crypto.randomBytes(24).toString('base64url');
+      const dest = `${destFolder}/${fileName}`;
+      pendingUploads.set(token, { userId, deviceId, dest, expiresAt: Date.now() + UPLOAD_TTL_MS });
+      const uploadUrl = `${ctx.baseUrl}/mcp/upload/${token}`;
+      return textResult({
+        upload_url: uploadUrl,
+        saves_to: dest,
+        expires_in_seconds: UPLOAD_TTL_MS / 1000,
+        next_step: `POST the raw file bytes to upload_url, e.g.: curl -sS -X POST -H "Content-Type: application/octet-stream" --data-binary @"<local-file-path>" "${uploadUrl}" — the JSON response confirms the save on the phone.`,
+      });
+    }
+
+    case 'send_file': {
+      const name = String(args.name || '').replace(/[/\\]/g, '').trim();
+      if (!name) return textResult('name must be a plain file name (no slashes).', true);
+      let bytes;
+      try {
+        bytes = Buffer.from(args.data_base64, 'base64');
+      } catch {
+        return textResult('data_base64 is not valid base64.', true);
+      }
+      if (bytes.length === 0) return textResult('Decoded file is empty — check data_base64.', true);
+      if (bytes.length > MAX_SEND_FILE_BYTES) {
+        return textResult(`File is ${(bytes.length / 1048576).toFixed(1)} MB — max is ${MAX_SEND_FILE_BYTES / 1048576} MB.`, true);
+      }
+      const folder = confineToBase(
+        args.folder
+          ? (String(args.folder).startsWith('/') ? args.folder : `${PHONE_BASE}/${args.folder}`)
+          : `${PHONE_BASE}/Download`
+      );
+      try {
+        const dest = await signaling.uploadToPhone(userId, deviceId, `${folder}/${name}`, bytes);
+        return textResult(`Saved ${name} (${bytes.length} bytes) to ${dest} on the phone.`);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+
     default:
       return null; // unknown tool — caller returns a protocol-level error
   }
 }
 
 function setupMcpRoutes(app) {
+  // One-time upload target for send_local_file. Raw bytes in, no auth header —
+  // the unguessable single-use token (24 random bytes, 10-min TTL) is the
+  // credential, so a plain `curl --data-binary` works from any shell.
+  app.post('/mcp/upload/:token', express.raw({ type: () => true, limit: '20mb' }), async (req, res) => {
+    const upload = pendingUploads.get(req.params.token);
+    if (upload) pendingUploads.delete(req.params.token); // single use, even on failure
+    if (!upload || upload.expiresAt < Date.now()) {
+      return res.status(410).json({ ok: false, error: 'Upload link is invalid or expired — call the send_local_file tool again for a fresh one.' });
+    }
+    const bytes = req.body;
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+      return res.status(400).json({ ok: false, error: 'No file bytes received — send the raw file with Content-Type: application/octet-stream.' });
+    }
+    if (bytes.length > MAX_SEND_FILE_BYTES) {
+      return res.status(413).json({ ok: false, error: `File is ${(bytes.length / 1048576).toFixed(1)} MB — max is ${MAX_SEND_FILE_BYTES / 1048576} MB.` });
+    }
+    try {
+      const dest = await signaling.uploadToPhone(upload.userId, upload.deviceId, upload.dest, bytes);
+      res.json({ ok: true, saved: dest, bytes: bytes.length });
+    } catch (e) {
+      res.status(502).json({ ok: false, error: e.message });
+    }
+  });
+
   app.post('/mcp', async (req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer /, '');
     const payload = token && verifyToken(token);
+    const baseUrl = `${process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`}`.replace(/\/$/, '');
     if (!payload) {
-      const base = `${process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`}`.replace(/\/$/, '');
-      res.set('WWW-Authenticate', `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`);
+      res.set('WWW-Authenticate', `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`);
       return res.status(401).json({ error: 'unauthorized' });
     }
     const userId = payload.uid;
@@ -453,7 +567,7 @@ function setupMcpRoutes(app) {
         case 'tools/call': {
           const { name, arguments: args } = msg.params || {};
           if (!TOOLS.some((t) => t.name === name)) return replyError(-32602, `Unknown tool: ${name}`);
-          const result = await callTool(userId, name, args || {});
+          const result = await callTool(userId, name, args || {}, { baseUrl });
           return reply(result);
         }
 
