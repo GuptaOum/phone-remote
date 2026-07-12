@@ -15,9 +15,35 @@ const signaling = require('../services/signaling');
  * A 401 without a valid token points the client at the protected-resource
  * metadata per RFC 9728, so a compliant MCP client can find its way to the
  * authorization server on its own.
+ *
+ * All the "advanced" navigation tools (scroll, long_press, open_app_drawer,
+ * the rich press_key set, and the `screenshot: true` act-and-see option) are
+ * composed entirely from the phone's existing control primitives — no APK
+ * change is needed. See RemoteAccessibilityService.pressKey for the keycodes.
  */
 
 const PROTOCOL_VERSION = '2025-06-18';
+const SERVER_VERSION = '1.1.0';
+
+// Named keys → the KEYCODE_* strings the phone's pressKey() already handles.
+const KEY_MAP = {
+  back: 'KEYCODE_BACK',
+  home: 'KEYCODE_HOME',
+  recents: 'KEYCODE_APP_SWITCH',
+  enter: 'KEYCODE_ENTER',            // submits/newlines in the focused text field
+  delete: 'KEYCODE_DEL',             // backspace in the focused text field
+  notifications: 'KEYCODE_NOTIFICATION',
+  quick_settings: 'KEYCODE_QUICK_SETTINGS',
+  lock: 'KEYCODE_POWER',             // GLOBAL_ACTION_LOCK_SCREEN
+  volume_up: 'KEYCODE_VOLUME_UP',
+  volume_down: 'KEYCODE_VOLUME_DOWN',
+};
+const KEY_NAMES = Object.keys(KEY_MAP);
+
+// How long to let the UI settle before the auto-screenshot in act-and-see calls.
+const SCREENSHOT_SETTLE_MS = 850;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const TOOLS = [
   {
@@ -36,7 +62,7 @@ const TOOLS = [
   },
   {
     name: 'take_screenshot',
-    description: 'Capture and return the current screen of a device as a JPEG image. Requires the phone\'s Accessibility Service to be enabled.',
+    description: 'Capture and return the current screen of a device as a JPEG image. Requires the phone\'s Accessibility Service to be enabled. Call this first to see the screen before tapping.',
     inputSchema: {
       type: 'object',
       properties: { deviceId: { type: 'string', description: 'Device id from list_devices' } },
@@ -45,20 +71,36 @@ const TOOLS = [
   },
   {
     name: 'tap',
-    description: 'Tap the screen at a point. Coordinates are normalized 0.0-1.0 (fraction of screen width/height), not pixels — e.g. x=0.5, y=0.5 is the center of the screen. Use take_screenshot first to see where to tap.',
+    description: 'Tap the screen at a point. Coordinates are normalized 0.0-1.0 (fraction of screen width/height), not pixels — e.g. x=0.5, y=0.5 is the center. Set screenshot:true to get a fresh screenshot back after the tap so you can see the result in one call.',
     inputSchema: {
       type: 'object',
       properties: {
         deviceId: { type: 'string' },
         x: { type: 'number', minimum: 0, maximum: 1, description: 'Horizontal position, 0 = left edge, 1 = right edge' },
         y: { type: 'number', minimum: 0, maximum: 1, description: 'Vertical position, 0 = top edge, 1 = bottom edge' },
+        screenshot: { type: 'boolean', description: 'If true, return a fresh screenshot of the screen after tapping (default false)' },
+      },
+      required: ['deviceId', 'x', 'y'],
+    },
+  },
+  {
+    name: 'long_press',
+    description: 'Press and hold at a point — opens context menus, enters selection/edit mode, moves icons. Coordinates are normalized 0.0-1.0.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string' },
+        x: { type: 'number', minimum: 0, maximum: 1 },
+        y: { type: 'number', minimum: 0, maximum: 1 },
+        ms: { type: 'integer', minimum: 400, maximum: 3000, description: 'Hold duration in ms (default 700)' },
+        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default false)' },
       },
       required: ['deviceId', 'x', 'y'],
     },
   },
   {
     name: 'swipe',
-    description: 'Swipe from one point to another. Coordinates are normalized 0.0-1.0.',
+    description: 'Swipe from one point to another with precise coordinates (normalized 0.0-1.0). For simple list/page navigation prefer the `scroll` tool instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -68,29 +110,75 @@ const TOOLS = [
         x2: { type: 'number', minimum: 0, maximum: 1 },
         y2: { type: 'number', minimum: 0, maximum: 1 },
         ms: { type: 'integer', minimum: 50, maximum: 5000, description: 'Swipe duration in milliseconds (default 300)' },
+        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default false)' },
       },
       required: ['deviceId', 'x1', 'y1', 'x2', 'y2'],
     },
   },
   {
-    name: 'type_text',
-    description: 'Type text into the currently focused input field on the device.',
+    name: 'scroll',
+    description: 'Scroll the screen in a direction — the easy way to move through lists, feeds, and home-screen pages. direction is where the CONTENT moves: "down" reveals content further down the page, "up" goes back up, "left"/"right" flip pages.',
     inputSchema: {
       type: 'object',
-      properties: { deviceId: { type: 'string' }, text: { type: 'string' } },
+      properties: {
+        deviceId: { type: 'string' },
+        direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
+        amount: { type: 'number', minimum: 0.1, maximum: 0.9, description: 'Fraction of the screen to travel (default 0.6). Larger = scrolls further.' },
+        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default false)' },
+      },
+      required: ['deviceId', 'direction'],
+    },
+  },
+  {
+    name: 'type_text',
+    description: 'Type text into the currently focused input field (tap the field first). Set submit:true to press Enter after typing — use this to run a search once the query is typed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string' },
+        text: { type: 'string' },
+        submit: { type: 'boolean', description: 'Press Enter after typing, e.g. to execute a search (default false)' },
+        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default false)' },
+      },
       required: ['deviceId', 'text'],
     },
   },
   {
     name: 'press_key',
-    description: 'Press a system navigation key.',
+    description: 'Press a system key or button. back/home/recents navigate; enter submits and delete backspaces in a focused text field; notifications/quick_settings open those shades; lock locks the screen; volume_up/volume_down change media volume.',
     inputSchema: {
       type: 'object',
       properties: {
         deviceId: { type: 'string' },
-        key: { type: 'string', enum: ['back', 'home', 'recents'] },
+        key: { type: 'string', enum: KEY_NAMES },
+        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default false)' },
       },
       required: ['deviceId', 'key'],
+    },
+  },
+  {
+    name: 'open_app_drawer',
+    description: 'Go to the home screen and open the app drawer (swipe up from the bottom), where the app search bar lives. Follow with take_screenshot, then tap the search bar and type an app name to find and open any app.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string' },
+        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default true)' },
+      },
+      required: ['deviceId'],
+    },
+  },
+  {
+    name: 'wait',
+    description: 'Pause for a few seconds to let the screen finish loading or animating before the next action.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string' },
+        seconds: { type: 'number', minimum: 0.2, maximum: 15, description: 'How long to wait (default 1.5)' },
+        screenshot: { type: 'boolean', description: 'Return a screenshot after waiting (default false)' },
+      },
+      required: ['deviceId'],
     },
   },
   {
@@ -132,8 +220,39 @@ function textResult(text, isError = false) {
   return { content: [{ type: 'text', text: typeof text === 'string' ? text : JSON.stringify(text, null, 2) }], isError };
 }
 
+function imageResult(jpeg) {
+  return { content: [{ type: 'image', data: jpeg.toString('base64'), mimeType: 'image/jpeg' }] };
+}
+
+// Append a fresh screenshot to a result when the caller asked for act-and-see.
+async function maybeScreenshot(userId, deviceId, baseResult, want) {
+  if (!want || baseResult.isError) return baseResult;
+  await sleep(SCREENSHOT_SETTLE_MS);
+  try {
+    const jpeg = await signaling.captureScreenshot(userId, deviceId);
+    return { content: [...baseResult.content, { type: 'image', data: jpeg.toString('base64'), mimeType: 'image/jpeg' }], isError: false };
+  } catch (e) {
+    return { content: [...baseResult.content, { type: 'text', text: `(couldn't grab a screenshot afterwards: ${e.message})` }], isError: false };
+  }
+}
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// Directional scroll → a center-anchored swipe. direction = where content moves.
+function scrollGesture(direction, amount) {
+  const a = clamp(amount ?? 0.6, 0.1, 0.9);
+  switch (direction) {
+    case 'down':  return { x1: 0.5, y1: 0.75, x2: 0.5, y2: clamp(0.75 - a, 0.05, 0.95) };
+    case 'up':    return { x1: 0.5, y1: 0.25, x2: 0.5, y2: clamp(0.25 + a, 0.05, 0.95) };
+    case 'left':  return { x1: 0.75, y1: 0.5, x2: clamp(0.75 - a, 0.05, 0.95), y2: 0.5 };
+    case 'right': return { x1: 0.25, y1: 0.5, x2: clamp(0.25 + a, 0.05, 0.95), y2: 0.5 };
+    default: return null;
+  }
+}
+
 async function callTool(userId, name, args = {}) {
   const { deviceId } = args;
+  const offline = () => textResult('Device is offline.', true);
 
   switch (name) {
     case 'list_devices': {
@@ -158,43 +277,84 @@ async function callTool(userId, name, args = {}) {
     case 'take_screenshot': {
       try {
         const jpeg = await signaling.captureScreenshot(userId, deviceId);
-        return { content: [{ type: 'image', data: jpeg.toString('base64'), mimeType: 'image/jpeg' }] };
+        return imageResult(jpeg);
       } catch (e) {
         return textResult(e.message, true);
       }
     }
 
-    case 'tap':
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'tap', x: args.x, y: args.y })) {
-        return textResult('Device is offline.', true);
-      }
-      return textResult(`Tapped (${args.x}, ${args.y}).`);
+    case 'tap': {
+      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'tap', x: args.x, y: args.y })) return offline();
+      return maybeScreenshot(userId, deviceId, textResult(`Tapped (${args.x}, ${args.y}).`), args.screenshot);
+    }
 
-    case 'swipe':
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'swipe', x1: args.x1, y1: args.y1, x2: args.x2, y2: args.y2, ms: args.ms })) {
-        return textResult('Device is offline.', true);
-      }
-      return textResult('Swipe sent.');
+    case 'long_press': {
+      const ms = clamp(args.ms ?? 700, 400, 3000);
+      // A hold-in-place gesture: tiny 2px move over a long duration reads as a long press.
+      const ok = signaling.sendToPhone(userId, deviceId, {
+        type: 'control', action: 'swipe',
+        x1: args.x, y1: args.y, x2: clamp(args.x + 0.002, 0, 1), y2: clamp(args.y + 0.002, 0, 1), ms,
+      });
+      if (!ok) return offline();
+      return maybeScreenshot(userId, deviceId, textResult(`Long-pressed (${args.x}, ${args.y}) for ${ms}ms.`), args.screenshot);
+    }
 
-    case 'type_text':
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'text', value: args.text })) {
-        return textResult('Device is offline.', true);
-      }
-      return textResult('Text sent.');
+    case 'swipe': {
+      const ok = signaling.sendToPhone(userId, deviceId, {
+        type: 'control', action: 'swipe',
+        x1: args.x1, y1: args.y1, x2: args.x2, y2: args.y2, ms: args.ms,
+      });
+      if (!ok) return offline();
+      return maybeScreenshot(userId, deviceId, textResult('Swipe sent.'), args.screenshot);
+    }
 
-    case 'press_key':
-      if (!['back', 'home', 'recents'].includes(args.key)) return textResult('key must be back, home, or recents.', true);
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: args.key })) {
-        return textResult('Device is offline.', true);
+    case 'scroll': {
+      const g = scrollGesture(args.direction, args.amount);
+      if (!g) return textResult('direction must be up, down, left, or right.', true);
+      const ok = signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'swipe', ...g, ms: 260 });
+      if (!ok) return offline();
+      return maybeScreenshot(userId, deviceId, textResult(`Scrolled ${args.direction}.`), args.screenshot);
+    }
+
+    case 'type_text': {
+      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'text', value: args.text })) return offline();
+      if (args.submit) {
+        await sleep(150);
+        signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'keyevent', keycode: 'KEYCODE_ENTER' });
       }
-      return textResult(`Pressed ${args.key}.`);
+      return maybeScreenshot(userId, deviceId, textResult(args.submit ? 'Text typed and submitted.' : 'Text typed.'), args.screenshot);
+    }
+
+    case 'press_key': {
+      const keycode = KEY_MAP[args.key];
+      if (!keycode) return textResult(`key must be one of: ${KEY_NAMES.join(', ')}.`, true);
+      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'keyevent', keycode })) return offline();
+      return maybeScreenshot(userId, deviceId, textResult(`Pressed ${args.key}.`), args.screenshot);
+    }
+
+    case 'open_app_drawer': {
+      // Home first so the swipe reliably targets the launcher, then swipe up
+      // from the very bottom to open the app drawer (where app search lives).
+      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'keyevent', keycode: 'KEYCODE_HOME' })) return offline();
+      await sleep(400);
+      signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'swipe', x1: 0.5, y1: 0.92, x2: 0.5, y2: 0.25, ms: 250 });
+      const want = args.screenshot !== false; // defaults to true for this one
+      return maybeScreenshot(userId, deviceId, textResult('Opened the app drawer. Tap the search bar and type an app name to find it.'), want);
+    }
+
+    case 'wait': {
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      const secs = clamp(args.seconds ?? 1.5, 0.2, 15);
+      await sleep(secs * 1000);
+      return maybeScreenshot(userId, deviceId, textResult(`Waited ${secs}s.`), args.screenshot);
+    }
 
     case 'ring':
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'ring' })) return textResult('Device is offline.', true);
+      if (!signaling.sendToPhone(userId, deviceId, { type: 'ring' })) return offline();
       return textResult('Ringing device.');
 
     case 'flash_light':
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'flash', count: args.count ?? 3 })) return textResult('Device is offline.', true);
+      if (!signaling.sendToPhone(userId, deviceId, { type: 'flash', count: args.count ?? 3 })) return offline();
       return textResult('Flashing light.');
 
     case 'list_files': {
@@ -237,7 +397,7 @@ function setupMcpRoutes(app) {
           return reply({
             protocolVersion: PROTOCOL_VERSION,
             capabilities: { tools: {} },
-            serverInfo: { name: 'phone-remote', version: '1.0.0' },
+            serverInfo: { name: 'phone-remote', version: SERVER_VERSION },
           });
 
         case 'tools/list':
