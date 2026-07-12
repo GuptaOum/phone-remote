@@ -1,5 +1,9 @@
 const express = require('express');
 const crypto = require('crypto');
+const dns = require('dns');
+const net = require('net');
+const http = require('http');
+const https = require('https');
 const db = require('../services/db');
 const { verifyToken } = require('../middleware/auth');
 const signaling = require('../services/signaling');
@@ -270,6 +274,20 @@ const TOOLS = [
       required: ['deviceId', 'name', 'data_base64'],
     },
   },
+  {
+    name: 'send_url',
+    description: 'Download a file from a public http(s) URL and save it to the phone. The server fetches the bytes itself — they never pass through this conversation — so this is the cheapest way to put an online image or file on the phone (no base64, no tokens for the content). Saves to /storage/emulated/0/<folder>/<name>. Max 18 MB.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string' },
+        url: { type: 'string', description: 'Public http(s) URL of the file to download' },
+        name: { type: 'string', description: 'File name to save as on the phone (defaults to the name from the URL)' },
+        folder: { type: 'string', description: 'Destination folder under /storage/emulated/0 (default "Download")' },
+      },
+      required: ['deviceId', 'url'],
+    },
+  },
 ];
 
 function textResult(text, isError = false) {
@@ -309,6 +327,92 @@ function confineToBase(path) {
   }
   const abs = '/' + parts.join('/');
   return (abs === PHONE_BASE || abs.startsWith(PHONE_BASE + '/')) ? abs : PHONE_BASE;
+}
+
+// ── send_url: SSRF-safe server-side download ────────────────────────────────
+// Fetching an arbitrary URL server-side is dangerous — it could hit the EC2
+// instance-metadata endpoint (169.254.169.254 → IAM creds) or internal hosts.
+// We validate the *connect* IP (not just the hostname) so DNS rebinding can't
+// slip a public name that resolves to a private address past us.
+
+function isBlockedIp(ip) {
+  if (net.isIPv4(ip)) {
+    const n = ip.split('.').reduce((a, o) => ((a << 8) + (+o)) >>> 0, 0);
+    const inRange = (base, bits) => {
+      const b = base.split('.').reduce((a, o) => ((a << 8) + (+o)) >>> 0, 0);
+      const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+      return (n & mask) === (b & mask);
+    };
+    return inRange('0.0.0.0', 8) || inRange('10.0.0.0', 8) || inRange('100.64.0.0', 10) ||
+           inRange('127.0.0.0', 8) || inRange('169.254.0.0', 16) || inRange('172.16.0.0', 12) ||
+           inRange('192.168.0.0', 16) || inRange('192.0.0.0', 24) || inRange('198.18.0.0', 15);
+  }
+  if (net.isIPv6(ip)) {
+    const l = ip.toLowerCase();
+    if (l === '::1' || l === '::') return true;
+    if (l.startsWith('fe80') || l.startsWith('fc') || l.startsWith('fd')) return true; // link-local / unique-local
+    const m = l.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/); // IPv4-mapped
+    if (m) return isBlockedIp(m[1]);
+    return false;
+  }
+  return true; // unparseable → block
+}
+
+// Custom DNS resolver used as the socket `lookup` — the address it returns is
+// the one Node actually connects to, so validating here blocks rebinding.
+function safeLookup(hostname, options, callback) {
+  if (typeof options === 'function') { callback = options; options = {}; }
+  dns.lookup(hostname, { all: true, family: options.family || 0 }, (err, addresses) => {
+    if (err) return callback(err);
+    const safe = addresses.filter((a) => !isBlockedIp(a.address));
+    if (!safe.length) return callback(new Error('Host resolves only to private/loopback addresses'));
+    if (options.all) return callback(null, safe);
+    callback(null, safe[0].address, safe[0].family);
+  });
+}
+
+function downloadUrl(rawUrl, maxBytes, timeoutMs = 20000, redirectsLeft = 5) {
+  return new Promise((resolve, reject) => {
+    let url;
+    try { url = new URL(rawUrl); } catch { return reject(new Error('Invalid URL')); }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return reject(new Error('Only http(s) URLs are allowed'));
+    // IP-literal hosts never hit the custom lookup (nothing to resolve), so
+    // they must be checked here or 127.0.0.1 / 169.254.169.254 would slip past.
+    if (net.isIP(url.hostname) && isBlockedIp(url.hostname)) {
+      return reject(new Error('Refusing to fetch a private/loopback address'));
+    }
+    const mod = url.protocol === 'https:' ? https : http;
+    const req = mod.request(url, {
+      method: 'GET', lookup: safeLookup, timeout: timeoutMs,
+      headers: { 'user-agent': 'PhoneRemote/1.0', accept: '*/*' },
+    }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        if (redirectsLeft <= 0) return reject(new Error('Too many redirects'));
+        let next;
+        try { next = new URL(res.headers.location, url).href; } catch { return reject(new Error('Bad redirect target')); }
+        return resolve(downloadUrl(next, maxBytes, timeoutMs, redirectsLeft - 1));
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`Download failed: HTTP ${res.statusCode}`)); }
+      const len = Number(res.headers['content-length'] || 0);
+      if (len && len > maxBytes) { res.destroy(); return reject(new Error(`File is ${(len / 1048576).toFixed(1)} MB — max is ${maxBytes / 1048576} MB`)); }
+      const chunks = []; let total = 0;
+      res.on('data', (c) => {
+        total += c.length;
+        if (total > maxBytes) { res.destroy(); reject(new Error(`File exceeds the ${maxBytes / 1048576} MB limit`)); return; }
+        chunks.push(c);
+      });
+      res.on('end', () => {
+        let base = '';
+        try { base = decodeURIComponent(url.pathname.split('/').pop() || ''); } catch { base = url.pathname.split('/').pop() || ''; }
+        resolve({ buffer: Buffer.concat(chunks), urlName: base });
+      });
+      res.on('error', reject);
+    });
+    req.on('timeout', () => req.destroy(new Error('Download timed out')));
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 // Directional scroll → a center-anchored swipe. direction = where content moves.
@@ -500,6 +604,30 @@ async function callTool(userId, name, args = {}, ctx = {}) {
       try {
         const dest = await signaling.uploadToPhone(userId, deviceId, `${folder}/${name}`, bytes);
         return textResult(`Saved ${name} (${bytes.length} bytes) to ${dest} on the phone.`);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+
+    case 'send_url': {
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!args.url || !/^https?:\/\//i.test(String(args.url))) return textResult('Provide a valid http(s) URL.', true);
+      let fetched;
+      try {
+        fetched = await downloadUrl(String(args.url), MAX_SEND_FILE_BYTES);
+      } catch (e) {
+        return textResult(`Couldn't fetch that URL: ${e.message}`, true);
+      }
+      if (!fetched.buffer.length) return textResult('The downloaded file is empty.', true);
+      const name = String(args.name || fetched.urlName || 'file').replace(/[/\\]/g, '').trim() || 'file';
+      const folder = confineToBase(
+        args.folder
+          ? (String(args.folder).startsWith('/') ? args.folder : `${PHONE_BASE}/${args.folder}`)
+          : `${PHONE_BASE}/Download`
+      );
+      try {
+        const dest = await signaling.uploadToPhone(userId, deviceId, `${folder}/${name}`, fetched.buffer);
+        return textResult(`Downloaded ${fetched.buffer.length} bytes and saved to ${dest} on the phone.`);
       } catch (e) {
         return textResult(e.message, true);
       }
