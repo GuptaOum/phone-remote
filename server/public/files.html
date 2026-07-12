@@ -239,8 +239,11 @@
 <script src="/ws.js"></script>
 <script>
 // ── State ─────────────────────────────────────────────────────────
+// Android shared-storage root. The Phone Files browser is confined here —
+// the user can never navigate above it into system directories.
+const PHONE_BASE = '/storage/emulated/0';
 let pcPath      = sessionStorage.getItem('pcPath')    || '';
-let phonePath   = sessionStorage.getItem('phonePath') || '/storage/emulated/0';
+let phonePath   = confineToBase(sessionStorage.getItem('phonePath'));
 let pcFiles     = [];
 let phoneFiles  = [];
 let pcFileCount   = 0;  // count of non-dir files, cached on load
@@ -266,10 +269,27 @@ const retryCounts     = new Map(); // path → retry count, capped at 3
 function uid() { return Math.random().toString(36).slice(2); }
 
 function normalizePhonePath(path) {
-  const raw = (path || '/storage/emulated/0').replace(/\\/g, '/').trim();
+  const raw = (path || PHONE_BASE).replace(/\\/g, '/').trim();
   const collapsed = raw.replace(/\/+/g, '/');
-  if (!collapsed) return '/storage/emulated/0';
+  if (!collapsed) return PHONE_BASE;
   return collapsed.startsWith('/') ? collapsed : '/' + collapsed;
+}
+
+// Resolve . / .. and clamp the result to PHONE_BASE or a descendant.
+// Anything above or outside the base snaps back to the base — so the
+// "up" button and any stray path can never escape shared storage.
+function confineToBase(path) {
+  let raw = (path || PHONE_BASE).replace(/\\/g, '/').replace(/\/+/g, '/').trim();
+  if (!raw.startsWith('/')) raw = '/' + raw;
+  const parts = [];
+  for (const seg of raw.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { parts.pop(); continue; }
+    parts.push(seg);
+  }
+  const abs = '/' + parts.join('/');
+  // Segment-aware check avoids prefix collisions (e.g. /storage/emulated/0evil)
+  return (abs === PHONE_BASE || abs.startsWith(PHONE_BASE + '/')) ? abs : PHONE_BASE;
 }
 
 function joinPhonePath(base, name) {
@@ -503,18 +523,19 @@ async function pcDeleteSelected() {
 
 // ── Phone Files ───────────────────────────────────────────────────
 function loadPhone(path) {
-  phonePath = path;
-  sessionStorage.setItem('phonePath', path);
-  document.getElementById('phone-path').value = path;
+  phonePath = confineToBase(path); // never below the Android storage root
+  sessionStorage.setItem('phonePath', phonePath);
+  document.getElementById('phone-path').value = phonePath;
   phoneSelected.clear();
   updateSelBar('phone');
-  ws.send({ type: 'pf_list', path });
+  ws.send({ type: 'pf_list', path: phonePath });
 }
 
 function phoneUp() {
+  if (phonePath === PHONE_BASE) return; // already at the root — can't go higher
   const parts = phonePath.split('/').filter(Boolean);
   parts.pop();
-  loadPhone('/' + parts.join('/'));
+  loadPhone('/' + parts.join('/')); // confineToBase clamps back to base if needed
 }
 
 function renderPhoneList(entries) {
