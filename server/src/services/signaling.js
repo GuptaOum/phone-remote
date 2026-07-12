@@ -124,6 +124,40 @@ function requestFromPhone(userId, deviceId, buildMsg, timeoutMs = 15000) {
 }
 
 /**
+ * Push a file to the phone over the existing pf_upload protocol. Chunks are
+ * sent sequentially: each non-final chunk waits for the phone's
+ * pf_upload_chunk_ack, the final one for pf_upload_ok — same flow control the
+ * browser dashboard uses, so large files can't flood the WebSocket.
+ */
+async function uploadToPhone(userId, deviceId, destPath, buffer, timeoutMs = 30000) {
+  const phone = getPhoneSocket(userId, deviceId);
+  if (!phone) throw new Error('Device is offline');
+  const id = uuidv4();
+  const CHUNK = 64 * 1024;
+  const total = Math.ceil(buffer.length / CHUNK) || 1;
+  phone.send(j({ type: 'pf_upload_start', id, path: destPath, size: buffer.length, total }));
+  // The phone handles start and chunk on separate threads — give start a
+  // moment to register the destination path before the first chunk lands.
+  await new Promise((r) => setTimeout(r, 250));
+  for (let i = 0; i < total; i++) {
+    const done = i === total - 1;
+    const data = buffer.subarray(i * CHUNK, (i + 1) * CHUNK).toString('base64');
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingHttpRequests.delete(id);
+        reject(new Error('Phone did not acknowledge the upload in time'));
+      }, timeoutMs);
+      pendingHttpRequests.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
+      phone.send(j({ type: 'pf_upload_chunk', id, index: i, total, data, done }));
+    });
+  }
+  return destPath;
+}
+
+/**
  * Screenshot has no request-id in its binary reply — it's a broadcast to
  * whichever browsers are "watching" the device. So we register a fake
  * browser socket for the duration of one capture: it looks enough like a
@@ -485,5 +519,5 @@ const bcast = (targets, msg) => {
 
 module.exports = {
   setupSignaling, presence, revokeDevice,
-  sendToPhone, getLastLocation, getDeviceScreenSize, requestFromPhone, captureScreenshot,
+  sendToPhone, getLastLocation, getDeviceScreenSize, requestFromPhone, captureScreenshot, uploadToPhone,
 };
