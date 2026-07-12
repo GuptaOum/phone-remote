@@ -157,6 +157,20 @@ const TOOLS = [
     },
   },
   {
+    name: 'open_app',
+    description: 'Open an app on the device by name (e.g. "YouTube", "Settings", "WhatsApp") — matched against installed apps by label — or by exact package name. This is the fastest way to launch an app; prefer it over hunting through the app drawer.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string' },
+        name: { type: 'string', description: 'App name to search for, e.g. "YouTube". Case-insensitive, matches partial names.' },
+        package: { type: 'string', description: 'Exact package name (e.g. com.google.android.youtube), if you know it — overrides name.' },
+        screenshot: { type: 'boolean', description: 'Return a screenshot after launching (default true)' },
+      },
+      required: ['deviceId'],
+    },
+  },
+  {
     name: 'open_app_drawer',
     description: 'Go to the home screen and open the app drawer (swipe up from the bottom), where the app search bar lives. Follow with take_screenshot, then tap the search bar and type an app name to find and open any app.',
     inputSchema: {
@@ -347,6 +361,21 @@ async function callTool(userId, name, args = {}) {
       if (!keycode) return textResult(`key must be one of: ${KEY_NAMES.join(', ')}.`, true);
       if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'keyevent', keycode })) return offline();
       return maybeScreenshot(userId, deviceId, textResult(`Pressed ${args.key}.`), args.screenshot);
+    }
+
+    case 'open_app': {
+      if (!args.name && !args.package) return textResult('Provide an app name or package.', true);
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      try {
+        const reply = await signaling.requestFromPhone(userId, deviceId, (id) => ({
+          type: 'open_app', id, query: args.name || '', package: args.package || '',
+        }));
+        if (!reply.ok) return textResult(reply.error || 'Could not open the app.', true);
+        const base = textResult(`Opened ${reply.launched} (${reply.package}).`);
+        return maybeScreenshot(userId, deviceId, base, args.screenshot !== false);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
     }
 
     case 'open_app_drawer': {

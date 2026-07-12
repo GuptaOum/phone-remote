@@ -235,6 +235,10 @@ class ConnectionForegroundService : Service() {
                                 handleFlash(json.optInt("count", 3))
                                 return@post
                             }
+                            "open_app" -> {
+                                handleOpenApp(json)
+                                return@post
+                            }
                         }
                         onMessage?.invoke(text)
                     } catch (_: Exception) {}
@@ -376,14 +380,33 @@ class ConnectionForegroundService : Service() {
         } catch (_: Exception) {}
     }
 
+    // Android shared-storage root. All phone-file operations are confined here —
+    // an authoritative OS-level guard, independent of the browser's own check.
+    private val phoneBase = "/storage/emulated/0"
+
+    /** Resolves a path (handling ../symlinks) and returns the File only if it
+     *  lands inside phoneBase; otherwise null. Empty path → the base itself. */
+    private fun confinedFile(path: String): java.io.File? = try {
+        val base = java.io.File(phoneBase).canonicalFile
+        val f = java.io.File(path.ifEmpty { phoneBase }).canonicalFile
+        if (f.path == base.path || f.path.startsWith(base.path + java.io.File.separator)) f else null
+    } catch (_: Exception) { null }
+
+    private fun pfErr(id: String, msg: String) =
+        JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", msg) }.toString()
+
     private fun handlePhoneFiles(json: JSONObject) {
         val id = json.optString("id")
         Thread {
             try {
                 when (json.optString("type")) {
                     "pf_list" -> {
-                        val path = json.optString("path").ifEmpty { "/storage/emulated/0" }
-                        val dir = java.io.File(path)
+                        val dir = confinedFile(json.optString("path"))
+                        if (dir == null) {
+                            send(pfErr(id, "Access denied: outside shared storage"))
+                            return@Thread
+                        }
+                        val path = dir.path
                         if (!dir.exists()) {
                             send(JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", "Directory not found: $path") }.toString())
                             return@Thread
@@ -406,8 +429,11 @@ class ConnectionForegroundService : Service() {
                         }.toString())
                     }
                     "pf_download" -> {
-                        val path = json.optString("path")
-                        val file = java.io.File(path)
+                        val file = confinedFile(json.optString("path"))
+                        if (file == null) {
+                            send(pfErr(id, "Access denied: outside shared storage"))
+                            return@Thread
+                        }
                         if (!file.exists()) {
                             send(JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", "File not found") }.toString())
                             return@Thread
@@ -436,8 +462,13 @@ class ConnectionForegroundService : Service() {
                         }
                     }
                     "pf_upload_start" -> {
+                        val dest = confinedFile(json.optString("path"))
+                        if (dest == null) {
+                            send(pfErr(id, "Access denied: outside shared storage"))
+                            return@Thread
+                        }
                         synchronized(uploads) { uploads[id] = mutableListOf() }
-                        synchronized(uploadPaths) { uploadPaths[id] = json.optString("path") }
+                        synchronized(uploadPaths) { uploadPaths[id] = dest.path }
                     }
                     "pf_upload_chunk" -> {
                         val data = android.util.Base64.decode(json.optString("data"), android.util.Base64.DEFAULT)
@@ -468,14 +499,89 @@ class ConnectionForegroundService : Service() {
                         }
                     }
                     "pf_delete" -> {
-                        val path = json.optString("path")
-                        val f = java.io.File(path)
+                        val f = confinedFile(json.optString("path"))
+                        if (f == null || f.path == java.io.File(phoneBase).canonicalFile.path) {
+                            // Never allow deleting outside the base, or the base root itself
+                            send(pfErr(id, "Access denied"))
+                            return@Thread
+                        }
                         if (f.isDirectory) f.deleteRecursively() else f.delete()
-                        send(JSONObject().apply { put("type", "pf_delete_ok"); put("id", id); put("path", path) }.toString())
+                        send(JSONObject().apply { put("type", "pf_delete_ok"); put("id", id); put("path", f.path) }.toString())
                     }
                 }
             } catch (e: Exception) {
                 try { send(JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", e.message ?: "Unknown error") }.toString()) } catch (_: Exception) {}
+            }
+        }.start()
+    }
+
+    // Launch an app by fuzzy label match (e.g. "youtube") or exact package name.
+    private fun handleOpenApp(json: JSONObject) {
+        val id = json.optString("id")
+        val pkgArg = json.optString("package").trim()
+        val query = json.optString("query").trim()
+        Thread {
+            try {
+                val pm = packageManager
+                var pkg: String? = pkgArg.ifEmpty { null }
+                var label: String? = null
+
+                if (pkg == null && query.isNotEmpty()) {
+                    val mainIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                    val q = query.lowercase()
+                    val best = pm.queryIntentActivities(mainIntent, 0)
+                        .mapNotNull { ri ->
+                            val lbl = ri.loadLabel(pm)?.toString() ?: return@mapNotNull null
+                            val p = ri.activityInfo.packageName
+                            val l = lbl.lowercase()
+                            val score = when {
+                                l == q            -> 4
+                                l.startsWith(q)   -> 3
+                                l.contains(q)     -> 2
+                                p.lowercase().contains(q) -> 1
+                                else              -> 0
+                            }
+                            if (score > 0) Triple(score, lbl, p) else null
+                        }
+                        .maxByOrNull { it.first }
+                    if (best != null) { label = best.second; pkg = best.third }
+                }
+
+                if (pkg == null) {
+                    send(JSONObject().apply {
+                        put("type", "open_app_result"); put("id", id); put("ok", false)
+                        put("error", "No installed app matches \"$query\"")
+                    }.toString())
+                    return@Thread
+                }
+                val launch = pm.getLaunchIntentForPackage(pkg)
+                if (launch == null) {
+                    send(JSONObject().apply {
+                        put("type", "open_app_result"); put("id", id); put("ok", false)
+                        put("error", "\"$pkg\" has no launcher and can't be opened")
+                    }.toString())
+                    return@Thread
+                }
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // Launch via the AccessibilityService context when available —
+                // accessibility services are exempt from the background
+                // activity-start restrictions that block a plain Service on
+                // Android 10+, so this is the reliable path.
+                val ctx: Context = RemoteAccessibilityService.instance ?: this
+                handler.post {
+                    try { ctx.startActivity(launch) } catch (_: Exception) {
+                        try { startActivity(launch) } catch (_: Exception) {}
+                    }
+                }
+                send(JSONObject().apply {
+                    put("type", "open_app_result"); put("id", id); put("ok", true)
+                    put("launched", label ?: pkg); put("package", pkg)
+                }.toString())
+            } catch (e: Exception) {
+                send(JSONObject().apply {
+                    put("type", "open_app_result"); put("id", id); put("ok", false)
+                    put("error", e.message ?: "Launch failed")
+                }.toString())
             }
         }.start()
     }
