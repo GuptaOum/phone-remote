@@ -204,12 +204,12 @@ const TOOLS = [
   },
   {
     name: 'list_files',
-    description: 'List files and folders in a directory on the device\'s storage.',
+    description: 'List files and folders in a directory of the device\'s shared storage. Browsing is confined to /storage/emulated/0 (the Android storage root) and its subfolders; paths outside it are clamped to the root.',
     inputSchema: {
       type: 'object',
       properties: {
         deviceId: { type: 'string' },
-        path: { type: 'string', description: 'Absolute path, defaults to /storage/emulated/0' },
+        path: { type: 'string', description: 'Absolute path under /storage/emulated/0 (defaults to the root)' },
       },
       required: ['deviceId'],
     },
@@ -237,6 +237,23 @@ async function maybeScreenshot(userId, deviceId, baseResult, want) {
 }
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// Android shared-storage root. list_files is confined here — resolve . / ..
+// and snap anything above/outside back to the base, so the file tool can't
+// wander into system directories. Mirrors the browser's confineToBase().
+const PHONE_BASE = '/storage/emulated/0';
+function confineToBase(path) {
+  let raw = (path || PHONE_BASE).replace(/\\/g, '/').replace(/\/+/g, '/').trim();
+  if (!raw.startsWith('/')) raw = '/' + raw;
+  const parts = [];
+  for (const seg of raw.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { parts.pop(); continue; }
+    parts.push(seg);
+  }
+  const abs = '/' + parts.join('/');
+  return (abs === PHONE_BASE || abs.startsWith(PHONE_BASE + '/')) ? abs : PHONE_BASE;
+}
 
 // Directional scroll → a center-anchored swipe. direction = where content moves.
 function scrollGesture(direction, amount) {
@@ -359,8 +376,9 @@ async function callTool(userId, name, args = {}) {
 
     case 'list_files': {
       try {
+        const safePath = confineToBase(args.path);
         const reply = await signaling.requestFromPhone(userId, deviceId, (id) => ({
-          type: 'pf_list', id, path: args.path || '',
+          type: 'pf_list', id, path: safePath,
         }));
         return textResult(reply.entries.map((e) => ({ name: e.name, type: e.type, size: e.size, path: e.path })));
       } catch (e) {
