@@ -161,15 +161,13 @@ async function uploadToPhone(userId, deviceId, destPath, buffer, timeoutMs = 200
       const data = buffer.subarray(i * CHUNK, (i + 1) * CHUNK).toString('base64');
       // The phone may drop and re-register its socket between chunks (the app
       // and the background service both connect), so resolve the live socket
-      // fresh for every chunk instead of trusting the one captured at start.
-      const ws = getPhoneSocket(userId, deviceId);
-      if (!ws) {
-        throw new Error(`UPLOAD CANCELLED: the phone went offline at chunk ${i + 1}/${total}. Nothing was saved — retry when the device is back online.`);
-      }
-      await new Promise((resolve, reject) => {
+      // fresh for every attempt instead of trusting the one captured at start.
+      const attempt = () => new Promise((resolve, reject) => {
+        const ws = getPhoneSocket(userId, deviceId);
+        if (!ws) return reject(new Error('offline'));
         const timer = setTimeout(() => {
           pendingHttpRequests.delete(id);
-          reject(new Error(`UPLOAD CANCELLED: the phone did not acknowledge chunk ${i + 1}/${total} within ${timeoutMs / 1000}s (its connection likely dropped mid-transfer). Nothing was saved — retry the upload.`));
+          reject(new Error('ack timeout'));
         }, timeoutMs);
         pendingHttpRequests.set(id, {
           resolve: (v) => { clearTimeout(timer); resolve(v); },
@@ -177,6 +175,19 @@ async function uploadToPhone(userId, deviceId, destPath, buffer, timeoutMs = 200
         });
         ws.send(j({ type: 'pf_upload_chunk', id, index: i, total, data, done }));
       });
+      try {
+        await attempt();
+      } catch {
+        // The chunk (or its ack) died with a dropped socket. The phone
+        // dedupes by chunk index, so one re-send — after a beat for the
+        // reconnect to land — is safe and rescues the transfer.
+        await new Promise((r) => setTimeout(r, 4000));
+        try {
+          await attempt();
+        } catch {
+          throw new Error(`UPLOAD CANCELLED: the phone did not acknowledge chunk ${i + 1}/${total} even after a retry (connection dropped mid-transfer). Retry the upload when the connection is stable.`);
+        }
+      }
     }
   } catch (e) {
     // Best effort: tell the phone to drop its half-received buffer right away
@@ -222,21 +233,32 @@ function downloadFromPhone(userId, deviceId, path, { idleTimeoutMs = 20000, maxB
       watchId: deviceId,
       readyState: 1,
       send: (data, opts) => {
-        if (settled || (opts && opts.binary)) return;
-        let m;
-        try { m = JSON.parse(data); } catch { return; }
-        if (m.id !== id) return;
-        if (m.type === 'pf_error') return fail(m.error || 'Phone reported an error');
-        if (m.type !== 'pf_chunk') return;
-        const buf = Buffer.from(m.data || '', 'base64');
-        parts[m.index] = buf;
-        received += buf.length;
-        if (received > maxBytes) return fail(`File exceeds the ${Math.round(maxBytes / 1048576)} MB limit.`);
-        arm();
-        if (m.done) {
-          settled = true;
-          cleanup();
-          resolve(Buffer.concat(parts.map((p) => p || Buffer.alloc(0))));
+        try {
+          if (settled || (opts && opts.binary)) return;
+          let m;
+          try { m = JSON.parse(data); } catch { return; }
+          if (m.id !== id) return;
+          if (m.type === 'pf_error') return fail(m.error || 'Phone reported an error');
+          if (m.type !== 'pf_chunk') return;
+          const buf = Buffer.from(m.data || '', 'base64');
+          parts[m.index] = buf;
+          received += buf.length;
+          if (received > maxBytes) return fail(`File exceeds the ${Math.round(maxBytes / 1048576)} MB limit.`);
+          arm();
+          if (m.done) {
+            // A mid-stream reconnect can silently drop chunks — verify the
+            // sequence is complete before assembling, or Buffer.concat would
+            // hit the holes (and a corrupt file would be worse anyway).
+            const total = m.total || m.index + 1;
+            for (let i = 0; i < total; i++) {
+              if (!parts[i]) return fail(`DOWNLOAD FAILED: chunk ${i + 1}/${total} was lost in transit (connection blip mid-stream) — retry.`);
+            }
+            settled = true;
+            cleanup();
+            resolve(Buffer.concat(parts));
+          }
+        } catch (e) {
+          fail(`Download failed: ${e.message}`);
         }
       },
     };
@@ -329,10 +351,20 @@ function setupSignaling(wss, app) {
 
     ws.on('message', (raw, isBinary) => {
       // Binary frames = screen/camera/screenshot JPEGs — relay only to
-      // browsers of the same account watching this device. Zero parsing.
+      // browsers of the same account watching this device. Zero parsing
+      // beyond the 1-byte type marker.
       if (isBinary) {
         if (ws.authed && ws.role === 'phone') {
-          watchers().forEach((b) => { if (b.readyState === 1) b.send(raw, { binary: true }); });
+          const marker = raw[0];
+          watchers().forEach((b) => {
+            if (b.readyState !== 1) return;
+            // Live stream (0x01) and camera (0x02) frames are disposable: if
+            // a browser's socket is backed up, DROP the frame instead of
+            // queueing it — otherwise the backlog keeps playing long after
+            // the phone stopped streaming. Screenshots (0x03) always deliver.
+            if ((marker === 0x01 || marker === 0x02) && (b.bufferedAmount || 0) > 512 * 1024) return;
+            b.send(raw, { binary: true });
+          });
         }
         return;
       }
@@ -365,6 +397,7 @@ function setupSignaling(wss, app) {
 
           if (msg.role === 'phone') {
             ws.deviceId = msg.deviceId || 'default';
+            ws.agent = msg.agent || null; // 'service' = the authoritative background-service socket
             ws.screenW = msg.screenW || 1080;
             ws.screenH = msg.screenH || 1920;
             ws.model = msg.model || 'Android Device';
@@ -386,13 +419,18 @@ function setupSignaling(wss, app) {
 
               // Pool this socket. The same device legitimately holds several
               // live connections (app UI + background service) — never close
-              // the others. The first live socket stays primary; a newcomer
-              // only takes the slot if the current primary is dead.
+              // the others. Primary selection: the background SERVICE socket
+              // owns all control/file/camera handling, so a service socket
+              // always outranks the app's socket, and a newly-registered
+              // service socket takes over immediately (its registration just
+              // proved it's alive — no waiting for the heartbeat to clear a
+              // dead predecessor).
               let pool = a.phonePool.get(ws.deviceId);
               if (!pool) { pool = new Set(); a.phonePool.set(ws.deviceId, pool); }
               pool.add(ws);
               const cur = a.phones.get(ws.deviceId);
-              if (!cur || cur.readyState !== 1) a.phones.set(ws.deviceId, ws);
+              const curAlive = cur && cur.readyState === 1;
+              if (ws.agent === 'service' || !curAlive) a.phones.set(ws.deviceId, ws);
 
               db.upsertDevice({ id: ws.deviceId, userId: ws.userId, name: ws.deviceName, model: ws.model })
                 .catch((e) => console.error('upsertDevice failed:', e.message));
@@ -573,8 +611,10 @@ function setupSignaling(wss, app) {
         if (pool && pool.size === 0) a.phonePool.delete(ws.deviceId);
         if (a.phones.get(ws.deviceId) === ws) {
           // Primary closed — promote another live socket from the pool so the
-          // device stays online with no visible blip.
-          const next = pool && [...pool].find((s) => s.readyState === 1);
+          // device stays online with no visible blip. Prefer the service
+          // socket: it owns control/file/camera handling.
+          const alive = pool ? [...pool].filter((s) => s.readyState === 1) : [];
+          const next = alive.find((s) => s.agent === 'service') || alive[0];
           if (next) {
             a.phones.set(ws.deviceId, next);
             console.log(`📱 Phone socket failover user=${ws.userId.slice(0, 8)} device=${ws.deviceId.slice(0, 8)}`);

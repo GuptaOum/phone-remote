@@ -136,6 +136,10 @@ const alertEl        = document.getElementById('alert');
 
 let live    = false;
 let isFront = true;
+// After the user hits Stop, frames already in flight keep arriving for a
+// moment — ignore them so the view closes instantly instead of replaying
+// the backlog. Auto-resync (frame → setLive) resumes after the window.
+let suppressFramesUntil = 0;
 
 const ws = createWS(handleMsg, handleBinary);
 
@@ -171,6 +175,7 @@ function setLive(on) {
 function handleBinary(buffer) {
   const bytes = new Uint8Array(buffer);
   if (bytes[0] !== 0x02) return;  // not a camera frame
+  if (Date.now() < suppressFramesUntil) return;  // stale frames after Stop
   // Always sync live state — handles BFCache/reconnect scenarios
   setLive(true);
   createImageBitmap(new Blob([bytes.subarray(1)], { type: 'image/jpeg' }))
@@ -191,9 +196,9 @@ function handleBinary(buffer) {
     });
 }
 
-function startCamera(front) { isFront = front; ws.send({ type: 'camera_start', front }); }
+function startCamera(front) { suppressFramesUntil = 0; isFront = front; ws.send({ type: 'camera_start', front }); }
 function flipCamera()       { isFront = !isFront; ws.send({ type: 'camera_flip' }); }
-function stopCamera()       { ws.send({ type: 'camera_stop' }); setLive(false); }
+function stopCamera()       { ws.send({ type: 'camera_stop' }); setLive(false); suppressFramesUntil = Date.now() + 4000; }
 
 function showAlert(msg) {
   alertEl.textContent = msg;
