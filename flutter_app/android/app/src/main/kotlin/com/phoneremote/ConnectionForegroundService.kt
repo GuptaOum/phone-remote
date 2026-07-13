@@ -37,6 +37,7 @@ class ConnectionForegroundService : Service() {
     private var ws: WebSocket? = null
     private val uploads = mutableMapOf<String, MutableList<Byte>>()
     private val uploadPaths = mutableMapOf<String, String>()
+    private val uploadTouchedAt = mutableMapOf<String, Long>()  // guarded by synchronized(uploads)
     private val cancelledDownloads = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private var _cameraFront = true
     private var locationManager: LocationManager? = null
@@ -207,7 +208,7 @@ class ConnectionForegroundService : Service() {
                                 return@post
                             }
                             "pf_list", "pf_download", "pf_delete",
-                            "pf_upload_start", "pf_upload_chunk" -> {
+                            "pf_upload_start", "pf_upload_chunk", "pf_upload_cancel" -> {
                                 handlePhoneFiles(json)
                                 return@post
                             }
@@ -395,21 +396,57 @@ class ConnectionForegroundService : Service() {
     private fun pfErr(id: String, msg: String) =
         JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", msg) }.toString()
 
+    // Abandoned-upload cleanup. If the sender dies mid-upload the buffered
+    // chunks would sit in memory forever: a pf_upload_cancel frees them
+    // instantly, and this idle-TTL sweep is the safety net for the case where
+    // the cancel itself is lost in the disconnect.
+    private val uploadIdleTtlMs = 60_000L
+    private val uploadSweeper = object : Runnable {
+        override fun run() {
+            val cutoff = System.currentTimeMillis() - uploadIdleTtlMs
+            val more: Boolean
+            synchronized(uploads) {
+                val stale = uploadTouchedAt.filterValues { it < cutoff }.keys.toList()
+                stale.forEach { staleId ->
+                    uploads.remove(staleId)
+                    uploadTouchedAt.remove(staleId)
+                    synchronized(uploadPaths) { uploadPaths.remove(staleId) }
+                }
+                more = uploadTouchedAt.isNotEmpty()
+            }
+            if (more) handler.postDelayed(this, 30_000L)
+        }
+    }
+
+    private fun touchUpload(id: String) {
+        synchronized(uploads) { uploadTouchedAt[id] = System.currentTimeMillis() }
+        handler.removeCallbacks(uploadSweeper)
+        handler.postDelayed(uploadSweeper, 30_000L)
+    }
+
+    // Ordering matters for uploads: pf_upload_start and the first
+    // pf_upload_chunk used to run on independent threads, so a single-chunk
+    // upload could be processed before its start registered the destination
+    // path → "Invalid upload path". One worker keeps phone-file ops in strict
+    // arrival order; downloads get their own thread so a long transfer can't
+    // stall uploads/listing.
+    private val pfExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+
     private fun handlePhoneFiles(json: JSONObject) {
         val id = json.optString("id")
-        Thread {
+        val work = Runnable {
             try {
                 when (json.optString("type")) {
                     "pf_list" -> {
                         val dir = confinedFile(json.optString("path"))
                         if (dir == null) {
                             send(pfErr(id, "Access denied: outside shared storage"))
-                            return@Thread
+                            return@Runnable
                         }
                         val path = dir.path
                         if (!dir.exists()) {
                             send(JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", "Directory not found: $path") }.toString())
-                            return@Thread
+                            return@Runnable
                         }
                         val entries = org.json.JSONArray()
                         dir.listFiles()
@@ -432,11 +469,11 @@ class ConnectionForegroundService : Service() {
                         val file = confinedFile(json.optString("path"))
                         if (file == null) {
                             send(pfErr(id, "Access denied: outside shared storage"))
-                            return@Thread
+                            return@Runnable
                         }
                         if (!file.exists()) {
                             send(JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", "File not found") }.toString())
-                            return@Thread
+                            return@Runnable
                         }
                         val bytes = file.readBytes()
                         val chunkSize = 65536
@@ -445,12 +482,24 @@ class ConnectionForegroundService : Service() {
                                 put("type", "pf_chunk"); put("id", id)
                                 put("index", 0); put("total", 1); put("done", true); put("data", "")
                             }.toString())
-                            return@Thread
+                            return@Runnable
                         }
                         var offset = 0; var index = 0
                         val total = Math.ceil(bytes.size.toDouble() / chunkSize).toInt()
                         while (offset < bytes.size) {
-                            if (cancelledDownloads.remove(id)) return@Thread
+                            if (cancelledDownloads.remove(id)) return@Runnable
+                            // Backpressure: OkHttp's send() only queues — pushing all
+                            // chunks at once balloons the write queue and stalls/kills
+                            // the socket on big files. Let the queue drain first.
+                            var waitedMs = 0L
+                            while ((ws?.queueSize() ?: 0L) > 256 * 1024) {
+                                Thread.sleep(20)
+                                waitedMs += 20
+                                if (waitedMs > 15000) {
+                                    send(pfErr(id, "Download aborted: connection stalled"))
+                                    return@Runnable
+                                }
+                            }
                             val end = minOf(offset + chunkSize, bytes.size)
                             send(JSONObject().apply {
                                 put("type", "pf_chunk"); put("id", id)
@@ -465,14 +514,21 @@ class ConnectionForegroundService : Service() {
                         val dest = confinedFile(json.optString("path"))
                         if (dest == null) {
                             send(pfErr(id, "Access denied: outside shared storage"))
-                            return@Thread
+                            return@Runnable
                         }
                         synchronized(uploads) { uploads[id] = mutableListOf() }
                         synchronized(uploadPaths) { uploadPaths[id] = dest.path }
+                        touchUpload(id)
+                    }
+                    "pf_upload_cancel" -> {
+                        // Sender aborted (timeout/disconnect) — free the buffer now.
+                        synchronized(uploads) { uploads.remove(id); uploadTouchedAt.remove(id) }
+                        synchronized(uploadPaths) { uploadPaths.remove(id) }
                     }
                     "pf_upload_chunk" -> {
                         val data = android.util.Base64.decode(json.optString("data"), android.util.Base64.DEFAULT)
                         synchronized(uploads) { uploads.getOrPut(id) { mutableListOf() }.addAll(data.toList()) }
+                        touchUpload(id)
                         if (!json.optBoolean("done")) {
                             // Flow control: browser waits for this ack before sending the
                             // next chunk — prevents flooding the WebSocket on large files
@@ -485,12 +541,12 @@ class ConnectionForegroundService : Service() {
                         }
                         if (json.optBoolean("done")) {
                             val allBytes: ByteArray
-                            synchronized(uploads) { allBytes = uploads.remove(id)?.toByteArray() ?: byteArrayOf() }
+                            synchronized(uploads) { allBytes = uploads.remove(id)?.toByteArray() ?: byteArrayOf(); uploadTouchedAt.remove(id) }
                             val path: String
                             synchronized(uploadPaths) { path = uploadPaths.remove(id)?.trim() ?: "" }
                             if (path.isEmpty()) {
                                 send(JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", "Invalid upload path") }.toString())
-                                return@Thread
+                                return@Runnable
                             }
                             val file = java.io.File(path.replace('\\', '/'))
                             file.parentFile?.mkdirs()
@@ -503,7 +559,7 @@ class ConnectionForegroundService : Service() {
                         if (f == null || f.path == java.io.File(phoneBase).canonicalFile.path) {
                             // Never allow deleting outside the base, or the base root itself
                             send(pfErr(id, "Access denied"))
-                            return@Thread
+                            return@Runnable
                         }
                         if (f.isDirectory) f.deleteRecursively() else f.delete()
                         send(JSONObject().apply { put("type", "pf_delete_ok"); put("id", id); put("path", f.path) }.toString())
@@ -512,7 +568,9 @@ class ConnectionForegroundService : Service() {
             } catch (e: Exception) {
                 try { send(JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", e.message ?: "Unknown error") }.toString()) } catch (_: Exception) {}
             }
-        }.start()
+        }
+        // Downloads stream for a while — keep them off the ordered worker.
+        if (json.optString("type") == "pf_download") Thread(work).start() else pfExecutor.execute(work)
     }
 
     // Launch an app by fuzzy label match (e.g. "youtube") or exact package name.

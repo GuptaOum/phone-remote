@@ -1,5 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
+const sharp = require('sharp');
+const mime = require('mime-types');
 const dns = require('dns');
 const net = require('net');
 const http = require('http');
@@ -28,7 +30,7 @@ const signaling = require('../services/signaling');
  */
 
 const PROTOCOL_VERSION = '2025-06-18';
-const SERVER_VERSION = '1.3.0';
+const SERVER_VERSION = '1.5.0';
 
 // send_file: JSON body limit is 25 MB (index.js) and base64 inflates ~4/3,
 // so cap the decoded payload safely below that.
@@ -42,6 +44,17 @@ const pendingUploads = new Map(); // token → { userId, deviceId, dest, expires
 function pruneUploads() {
   const now = Date.now();
   for (const [token, u] of pendingUploads) if (u.expiresAt < now) pendingUploads.delete(token);
+}
+
+// get_file: the mirror image — the server pulls the file off the phone and
+// holds it briefly under a one-time token; the MCP client GETs the raw bytes
+// from /mcp/download/<token>, again bypassing the model's context window.
+const DOWNLOAD_TTL_MS = 10 * 60 * 1000;
+const MAX_GET_FILE_BYTES = 50 * 1024 * 1024;
+const pendingDownloads = new Map(); // token → { buffer, name, expiresAt }
+function pruneDownloads() {
+  const now = Date.now();
+  for (const [token, d] of pendingDownloads) if (d.expiresAt < now) pendingDownloads.delete(token);
 }
 
 // Named keys → the KEYCODE_* strings the phone's pressKey() already handles.
@@ -62,6 +75,15 @@ const KEY_NAMES = Object.keys(KEY_MAP);
 // How long to let the UI settle before the auto-screenshot in act-and-see calls.
 const SCREENSHOT_SETTLE_MS = 850;
 
+// The phone captures at full native resolution (JPEG q90) — far bigger than
+// the model can use, and each image lingers in the conversation, so a long
+// automation session fills the context until older screenshots get evicted.
+// Shrink server-side before returning: explicit take_screenshot keeps the
+// API's max useful long edge; act-and-see confirmation shots go leaner still.
+const SCREENSHOT_MAX_EDGE = 1568;
+const SCREENSHOT_ACT_MAX_EDGE = 1092;
+const SCREENSHOT_JPEG_QUALITY = 70;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const TOOLS = [
@@ -81,7 +103,7 @@ const TOOLS = [
   },
   {
     name: 'take_screenshot',
-    description: 'Capture and return the current screen of a device as a JPEG image. Requires the phone\'s Accessibility Service to be enabled. Call this first to see the screen before tapping.',
+    description: 'Capture and return the current screen of a device as a JPEG image. Requires the phone\'s Accessibility Service to be enabled. Call this first to see the screen before tapping. In long multi-step sessions, don\'t screenshot after every action — act with screenshot:false on intermediate steps and take one screenshot when you need to check state.',
     inputSchema: {
       type: 'object',
       properties: { deviceId: { type: 'string', description: 'Device id from list_devices' } },
@@ -97,7 +119,7 @@ const TOOLS = [
         deviceId: { type: 'string' },
         x: { type: 'number', minimum: 0, maximum: 1, description: 'Horizontal position, 0 = left edge, 1 = right edge' },
         y: { type: 'number', minimum: 0, maximum: 1, description: 'Vertical position, 0 = top edge, 1 = bottom edge' },
-        screenshot: { type: 'boolean', description: 'If true, return a fresh screenshot of the screen after tapping (default false)' },
+        screenshot: { type: 'boolean', description: 'If true, return a fresh screenshot of the screen after tapping (default false). In long sessions keep this false on intermediate steps and check state occasionally.' },
       },
       required: ['deviceId', 'x', 'y'],
     },
@@ -248,8 +270,20 @@ const TOOLS = [
     },
   },
   {
+    name: 'get_file',
+    description: 'Fetch a file FROM the phone. Step 1: call this tool with the file\'s absolute path (find it with list_files); the server pulls the file off the phone and returns a one-time download_url. Step 2: with a shell, `curl -sS -o "<local-path>" "<download_url>"`; without a shell (claude.ai chat), give the user the download_url to click — the browser saves the file. The URL works once, within 10 minutes. Max 50 MB.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string' },
+        path: { type: 'string', description: 'Absolute file path on the phone under /storage/emulated/0, e.g. /storage/emulated/0/Download/report.pdf (see list_files)' },
+      },
+      required: ['deviceId', 'path'],
+    },
+  },
+  {
     name: 'send_local_file',
-    description: 'Send a file from the computer where the MCP client runs (any local file path the user gives) to the phone — the right tool for files on disk, no base64 needed. Step 1: call this tool with the destination file name (and optional folder); it returns a one-time upload_url. Step 2: upload the raw bytes from the shell, e.g. `curl -sS -X POST -H "Content-Type: application/octet-stream" --data-binary @"/path/to/file" "<upload_url>"`. The curl response confirms the file was saved to /storage/emulated/0/<folder>/<name> on the phone. The URL works once, within 10 minutes. Max 18 MB.',
+    description: 'Send a file from the user\'s computer to the phone — the right tool for files on disk, no base64 needed. Step 1: call this tool with the destination file name (and optional folder); it returns a one-time upload_url. Step 2: with a shell, POST the raw bytes: `curl -sS -X POST -H "Content-Type: application/octet-stream" --data-binary @"/path/to/file" "<upload_url>"`; without a shell (claude.ai chat), give the user the upload_url to open — it shows a file-picker page that uploads straight to the phone. Saves to /storage/emulated/0/<folder>/<name>. The URL works once, within 10 minutes. Max 18 MB.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -298,15 +332,70 @@ function imageResult(jpeg) {
   return { content: [{ type: 'image', data: jpeg.toString('base64'), mimeType: 'image/jpeg' }] };
 }
 
+async function shrinkScreenshot(jpeg, maxEdge = SCREENSHOT_MAX_EDGE) {
+  try {
+    return await sharp(jpeg)
+      .resize(maxEdge, maxEdge, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: SCREENSHOT_JPEG_QUALITY, mozjpeg: true })
+      .toBuffer();
+  } catch {
+    return jpeg; // never fail a capture because of resizing
+  }
+}
+
+// Android throttles AccessibilityService.takeScreenshot to ~1/sec; a chain of
+// act-and-see calls can trip that intermittently, so retry once after a beat.
+async function captureScreenshotWithRetry(userId, deviceId) {
+  try {
+    return await signaling.captureScreenshot(userId, deviceId);
+  } catch (e) {
+    if (!/capture_failed/i.test(e.message)) throw e;
+    await sleep(700);
+    return signaling.captureScreenshot(userId, deviceId);
+  }
+}
+
+// A capture taken mid-animation (shade opening/closing), on a locked/off
+// screen, or over protected content comes back as a near-uniform frame the
+// model reads as "blank". Real UI always has texture, so a tiny per-channel
+// standard deviation is a reliable blank detector.
+async function looksBlank(jpeg) {
+  try {
+    const st = await sharp(jpeg).stats();
+    return st.channels.every((c) => c.stdev < 4);
+  } catch {
+    return false;
+  }
+}
+
+const BLANK_NOTE = '(warning: this screenshot appears blank/uniform. The screen may be off or locked, mid-animation, or showing content the device refuses to capture. Try press_key "home", or wait ~2s and take_screenshot again.)';
+
+// Capture and only accept a screenshot with real content on it: on a blank
+// frame, wait out the animation (and Android's 1-shot/sec throttle) and try
+// again, up to 3 attempts. If it's still blank, return it anyway with a note
+// telling the model what a blank frame means — never leave it guessing.
+async function captureVerifiedScreenshot(userId, deviceId) {
+  let jpeg;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(1200);
+    jpeg = await captureScreenshotWithRetry(userId, deviceId);
+    if (!(await looksBlank(jpeg))) return { jpeg };
+  }
+  return { jpeg, note: BLANK_NOTE };
+}
+
 // Append a fresh screenshot to a result when the caller asked for act-and-see.
 async function maybeScreenshot(userId, deviceId, baseResult, want) {
   if (!want || baseResult.isError) return baseResult;
   await sleep(SCREENSHOT_SETTLE_MS);
   try {
-    const jpeg = await signaling.captureScreenshot(userId, deviceId);
-    return { content: [...baseResult.content, { type: 'image', data: jpeg.toString('base64'), mimeType: 'image/jpeg' }], isError: false };
+    const { jpeg: raw, note } = await captureVerifiedScreenshot(userId, deviceId);
+    const jpeg = await shrinkScreenshot(raw, SCREENSHOT_ACT_MAX_EDGE);
+    const content = [...baseResult.content, { type: 'image', data: jpeg.toString('base64'), mimeType: 'image/jpeg' }];
+    if (note) content.push({ type: 'text', text: note });
+    return { content, isError: false };
   } catch (e) {
-    return { content: [...baseResult.content, { type: 'text', text: `(couldn't grab a screenshot afterwards: ${e.message})` }], isError: false };
+    return { content: [...baseResult.content, { type: 'text', text: `(action succeeded, but the confirmation screenshot failed: ${e.message}. Call take_screenshot to see the current screen.)` }], isError: false };
   }
 }
 
@@ -453,8 +542,10 @@ async function callTool(userId, name, args = {}, ctx = {}) {
 
     case 'take_screenshot': {
       try {
-        const jpeg = await signaling.captureScreenshot(userId, deviceId);
-        return imageResult(jpeg);
+        const { jpeg, note } = await captureVerifiedScreenshot(userId, deviceId);
+        const result = imageResult(await shrinkScreenshot(jpeg));
+        if (note) result.content.push({ type: 'text', text: note });
+        return result;
       } catch (e) {
         return textResult(e.message, true);
       }
@@ -561,6 +652,29 @@ async function callTool(userId, name, args = {}, ctx = {}) {
       }
     }
 
+    case 'get_file': {
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      const path = confineToBase(args.path);
+      try {
+        const buffer = await signaling.downloadFromPhone(userId, deviceId, path, { maxBytes: MAX_GET_FILE_BYTES });
+        if (!buffer.length) return textResult(`${path} is empty (0 bytes) — nothing to download.`, true);
+        pruneDownloads();
+        const token = crypto.randomBytes(24).toString('base64url');
+        const name = path.split('/').pop() || 'file';
+        pendingDownloads.set(token, { buffer, name, expiresAt: Date.now() + DOWNLOAD_TTL_MS });
+        const downloadUrl = `${ctx.baseUrl}/mcp/download/${token}`;
+        return textResult({
+          download_url: downloadUrl,
+          file: path,
+          bytes: buffer.length,
+          expires_in_seconds: DOWNLOAD_TTL_MS / 1000,
+          next_step: `With a shell: curl -sS -o "${name}" "${downloadUrl}". WITHOUT a shell (e.g. claude.ai chat): give the user the download_url to click — the browser saves the file. Either way the URL works once.`,
+        });
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+
     case 'send_local_file': {
       const fileName = String(args.name || '').replace(/[/\\]/g, '').trim();
       if (!fileName) return textResult('name must be a plain file name (no slashes).', true);
@@ -579,7 +693,7 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         upload_url: uploadUrl,
         saves_to: dest,
         expires_in_seconds: UPLOAD_TTL_MS / 1000,
-        next_step: `POST the raw file bytes to upload_url, e.g.: curl -sS -X POST -H "Content-Type: application/octet-stream" --data-binary @"<local-file-path>" "${uploadUrl}" — the JSON response confirms the save on the phone.`,
+        next_step: `With a shell: curl -sS -X POST -H "Content-Type: application/octet-stream" --data-binary @"<local-file-path>" "${uploadUrl}" — the JSON response confirms the save. WITHOUT a shell (e.g. claude.ai chat): give the user the upload_url to open in their browser — it shows a file picker that uploads straight to the phone.`,
       });
     }
 
@@ -661,6 +775,51 @@ function setupMcpRoutes(app) {
     } catch (e) {
       res.status(502).json({ ok: false, error: e.message });
     }
+  });
+
+  // Browser face of the same upload token — for MCP clients with no shell
+  // (claude.ai chat): opening the link shows a file picker that POSTs the
+  // bytes to this same URL. GET does NOT consume the token; only POST does.
+  app.get('/mcp/upload/:token', (req, res) => {
+    const upload = pendingUploads.get(req.params.token);
+    if (!upload || upload.expiresAt < Date.now()) {
+      return res.status(410).send('<h3>This upload link is invalid or already used.</h3><p>Ask for a fresh one (call send_local_file again).</p>');
+    }
+    const mins = Math.max(1, Math.round((upload.expiresAt - Date.now()) / 60000));
+    res.send(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Send file to phone</title>
+<body style="font-family:system-ui;max-width:480px;margin:48px auto;padding:0 16px;text-align:center;">
+<h2>📱 Send a file to your phone</h2>
+<p>Saves to <code>${upload.dest.replace(/</g, '&lt;')}</code><br><small>Link works once, expires in ~${mins} min. Max ${MAX_SEND_FILE_BYTES / 1048576} MB.</small></p>
+<input type="file" id="f" style="margin:16px 0;">
+<br><button id="go" style="padding:10px 28px;font-size:16px;cursor:pointer;">Upload</button>
+<p id="out"></p>
+<script>
+document.getElementById('go').onclick = async () => {
+  const file = document.getElementById('f').files[0];
+  const out = document.getElementById('out');
+  if (!file) { out.textContent = 'Pick a file first.'; return; }
+  out.textContent = 'Uploading ' + file.name + '…';
+  try {
+    const r = await fetch(location.href, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
+    const j = await r.json();
+    out.textContent = j.ok ? '✅ Saved to ' + j.saved + ' (' + j.bytes + ' bytes)' : '❌ ' + j.error;
+  } catch (e) { out.textContent = '❌ ' + e.message; }
+};
+</script></body>`);
+  });
+
+  // One-time download source for get_file — mirror of /mcp/upload above:
+  // the unguessable single-use token is the credential.
+  app.get('/mcp/download/:token', (req, res) => {
+    const d = pendingDownloads.get(req.params.token);
+    if (d) pendingDownloads.delete(req.params.token); // single use, even on failure
+    if (!d || d.expiresAt < Date.now()) {
+      return res.status(410).json({ ok: false, error: 'Download link is invalid or expired — call the get_file tool again for a fresh one.' });
+    }
+    res.setHeader('Content-Type', mime.lookup(d.name) || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${d.name.replace(/"/g, '')}"`);
+    res.send(d.buffer);
   });
 
   app.post('/mcp', async (req, res) => {

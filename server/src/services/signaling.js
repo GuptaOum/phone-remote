@@ -30,7 +30,11 @@ const accounts = new Map();
 function acct(userId) {
   let a = accounts.get(userId);
   if (!a) {
-    a = { phones: new Map(), browsers: new Set(), lastLocation: new Map() };
+    // phones = primary socket per device (all browser→phone traffic goes here);
+    // phonePool = ALL live sockets per device — the app UI and the background
+    // service each hold one, and closing "the other" caused an endless
+    // replace/reconnect fight that dropped transfers mid-flight.
+    a = { phones: new Map(), phonePool: new Map(), browsers: new Set(), lastLocation: new Map() };
     accounts.set(userId, a);
   }
   return a;
@@ -44,6 +48,18 @@ function cleanupAcct(userId) {
 function revokeDevice(userId, deviceId, reason = 'device_removed') {
   const a = accounts.get(userId);
   if (!a) return false;
+  // Close EVERY pooled socket for the device, not just the primary —
+  // otherwise a secondary connection would be promoted and the "removed"
+  // device would stay online.
+  const pool = a.phonePool?.get(deviceId);
+  if (pool) {
+    for (const s of pool) {
+      if (s === a.phones.get(deviceId)) continue; // primary handled below
+      try { s.send(j({ type: 'device_removed', reason })); } catch (_) {}
+      try { s.send(j({ type: '_auth_error', reason })); } catch (_) {}
+      try { s.close(4001, reason); } catch (_) {}
+    }
+  }
   const phone = a.phones.get(deviceId);
   if (!phone || phone.readyState !== 1) {
     a.lastLocation.delete(deviceId);
@@ -129,7 +145,7 @@ function requestFromPhone(userId, deviceId, buildMsg, timeoutMs = 15000) {
  * pf_upload_chunk_ack, the final one for pf_upload_ok — same flow control the
  * browser dashboard uses, so large files can't flood the WebSocket.
  */
-async function uploadToPhone(userId, deviceId, destPath, buffer, timeoutMs = 30000) {
+async function uploadToPhone(userId, deviceId, destPath, buffer, timeoutMs = 20000) {
   const phone = getPhoneSocket(userId, deviceId);
   if (!phone) throw new Error('Device is offline');
   const id = uuidv4();
@@ -139,22 +155,96 @@ async function uploadToPhone(userId, deviceId, destPath, buffer, timeoutMs = 300
   // The phone handles start and chunk on separate threads — give start a
   // moment to register the destination path before the first chunk lands.
   await new Promise((r) => setTimeout(r, 250));
-  for (let i = 0; i < total; i++) {
-    const done = i === total - 1;
-    const data = buffer.subarray(i * CHUNK, (i + 1) * CHUNK).toString('base64');
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pendingHttpRequests.delete(id);
-        reject(new Error('Phone did not acknowledge the upload in time'));
-      }, timeoutMs);
-      pendingHttpRequests.set(id, {
-        resolve: (v) => { clearTimeout(timer); resolve(v); },
-        reject: (e) => { clearTimeout(timer); reject(e); },
+  try {
+    for (let i = 0; i < total; i++) {
+      const done = i === total - 1;
+      const data = buffer.subarray(i * CHUNK, (i + 1) * CHUNK).toString('base64');
+      // The phone may drop and re-register its socket between chunks (the app
+      // and the background service both connect), so resolve the live socket
+      // fresh for every chunk instead of trusting the one captured at start.
+      const ws = getPhoneSocket(userId, deviceId);
+      if (!ws) {
+        throw new Error(`UPLOAD CANCELLED: the phone went offline at chunk ${i + 1}/${total}. Nothing was saved — retry when the device is back online.`);
+      }
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingHttpRequests.delete(id);
+          reject(new Error(`UPLOAD CANCELLED: the phone did not acknowledge chunk ${i + 1}/${total} within ${timeoutMs / 1000}s (its connection likely dropped mid-transfer). Nothing was saved — retry the upload.`));
+        }, timeoutMs);
+        pendingHttpRequests.set(id, {
+          resolve: (v) => { clearTimeout(timer); resolve(v); },
+          reject: (e) => { clearTimeout(timer); reject(e); },
+        });
+        ws.send(j({ type: 'pf_upload_chunk', id, index: i, total, data, done }));
       });
-      phone.send(j({ type: 'pf_upload_chunk', id, index: i, total, data, done }));
-    });
+    }
+  } catch (e) {
+    // Best effort: tell the phone to drop its half-received buffer right away
+    // (its idle-TTL sweep is the fallback if this doesn't get through).
+    try { getPhoneSocket(userId, deviceId)?.send(j({ type: 'pf_upload_cancel', id })); } catch (_) {}
+    throw e;
   }
   return destPath;
+}
+
+/**
+ * Pull a file from the phone over the existing pf_download protocol — the
+ * same fake-watcher trick as captureScreenshot below, but collecting the
+ * JSON pf_chunk stream instead of one binary frame. The phone-socket relay
+ * already acks each chunk (pf_chunk_ack), so flow control comes for free.
+ * No phone-side (Kotlin) changes needed.
+ */
+function downloadFromPhone(userId, deviceId, path, { idleTimeoutMs = 20000, maxBytes = 50 * 1024 * 1024 } = {}) {
+  const phone = getPhoneSocket(userId, deviceId);
+  if (!phone) return Promise.reject(new Error('Device is offline'));
+  const a = acct(userId);
+  const id = uuidv4();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const parts = [];
+    let received = 0;
+    let timer = null;
+    const fail = (message) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      // Best effort: stop the phone from streaming the rest.
+      try { getPhoneSocket(userId, deviceId)?.send(j({ type: 'pf_download_cancel', id })); } catch (_) {}
+      reject(new Error(message));
+    };
+    // Idle timeout, re-armed on every chunk — a big file is fine as long as
+    // data keeps flowing; silence means the transfer died.
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => fail(`DOWNLOAD CANCELLED: no data from the phone for ${idleTimeoutMs / 1000}s.`), idleTimeoutMs);
+    };
+    const fake = {
+      watchId: deviceId,
+      readyState: 1,
+      send: (data, opts) => {
+        if (settled || (opts && opts.binary)) return;
+        let m;
+        try { m = JSON.parse(data); } catch { return; }
+        if (m.id !== id) return;
+        if (m.type === 'pf_error') return fail(m.error || 'Phone reported an error');
+        if (m.type !== 'pf_chunk') return;
+        const buf = Buffer.from(m.data || '', 'base64');
+        parts[m.index] = buf;
+        received += buf.length;
+        if (received > maxBytes) return fail(`File exceeds the ${Math.round(maxBytes / 1048576)} MB limit.`);
+        arm();
+        if (m.done) {
+          settled = true;
+          cleanup();
+          resolve(Buffer.concat(parts.map((p) => p || Buffer.alloc(0))));
+        }
+      },
+    };
+    function cleanup() { clearTimeout(timer); a.browsers.delete(fake); }
+    a.browsers.add(fake);
+    arm();
+    phone.send(j({ type: 'pf_download', id, path }));
+  });
 }
 
 /**
@@ -294,10 +384,15 @@ function setupSignaling(wss, app) {
                 return;
               }
 
-              // Replace any stale connection for the same device
-              const old = a.phones.get(ws.deviceId);
-              if (old && old !== ws) { try { old.close(4000, 'replaced'); } catch {} }
-              a.phones.set(ws.deviceId, ws);
+              // Pool this socket. The same device legitimately holds several
+              // live connections (app UI + background service) — never close
+              // the others. The first live socket stays primary; a newcomer
+              // only takes the slot if the current primary is dead.
+              let pool = a.phonePool.get(ws.deviceId);
+              if (!pool) { pool = new Set(); a.phonePool.set(ws.deviceId, pool); }
+              pool.add(ws);
+              const cur = a.phones.get(ws.deviceId);
+              if (!cur || cur.readyState !== 1) a.phones.set(ws.deviceId, ws);
 
               db.upsertDevice({ id: ws.deviceId, userId: ws.userId, name: ws.deviceName, model: ws.model })
                 .catch((e) => console.error('upsertDevice failed:', e.message));
@@ -399,6 +494,7 @@ function setupSignaling(wss, app) {
         case 'pf_delete':
         case 'pf_upload_start':
         case 'pf_upload_chunk':
+        case 'pf_upload_cancel':
         case 'pf_download_cancel':
           relayToPhone(msg);
           break;
@@ -472,15 +568,24 @@ function setupSignaling(wss, app) {
       if (!a) return;
 
       if (ws.role === 'phone') {
-        // Only clear the slot if THIS ws is the active connection for the
-        // device — a replaced/stale socket closing must not kick the new one.
+        const pool = a.phonePool.get(ws.deviceId);
+        pool?.delete(ws);
+        if (pool && pool.size === 0) a.phonePool.delete(ws.deviceId);
         if (a.phones.get(ws.deviceId) === ws) {
-          a.phones.delete(ws.deviceId);
-          a.lastLocation.delete(ws.deviceId);
-          bcast(watchers(), { type: 'phone_disconnected', deviceId: ws.deviceId });
-          bcast([...a.browsers], { type: 'device_offline', deviceId: ws.deviceId });
-          db.touchDevice(ws.deviceId).catch(() => {});
-          console.log(`📱 Phone disconnected user=${ws.userId.slice(0, 8)} device=${ws.deviceId.slice(0, 8)}`);
+          // Primary closed — promote another live socket from the pool so the
+          // device stays online with no visible blip.
+          const next = pool && [...pool].find((s) => s.readyState === 1);
+          if (next) {
+            a.phones.set(ws.deviceId, next);
+            console.log(`📱 Phone socket failover user=${ws.userId.slice(0, 8)} device=${ws.deviceId.slice(0, 8)}`);
+          } else {
+            a.phones.delete(ws.deviceId);
+            a.lastLocation.delete(ws.deviceId);
+            bcast(watchers(), { type: 'phone_disconnected', deviceId: ws.deviceId });
+            bcast([...a.browsers], { type: 'device_offline', deviceId: ws.deviceId });
+            db.touchDevice(ws.deviceId).catch(() => {});
+            console.log(`📱 Phone disconnected user=${ws.userId.slice(0, 8)} device=${ws.deviceId.slice(0, 8)}`);
+          }
         }
       } else if (ws.role === 'browser') {
         a.browsers.delete(ws);
@@ -519,5 +624,5 @@ const bcast = (targets, msg) => {
 
 module.exports = {
   setupSignaling, presence, revokeDevice,
-  sendToPhone, getLastLocation, getDeviceScreenSize, requestFromPhone, captureScreenshot, uploadToPhone,
+  sendToPhone, getLastLocation, getDeviceScreenSize, requestFromPhone, captureScreenshot, uploadToPhone, downloadFromPhone,
 };
