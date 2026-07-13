@@ -36,6 +36,11 @@ const SERVER_VERSION = '1.5.0';
 // so cap the decoded payload safely below that.
 const MAX_SEND_FILE_BYTES = 18 * 1024 * 1024;
 
+// Raw-bytes paths (upload URL, send_url, get_file) never touch the model's
+// context or the JSON body limit — the phone streams chunks to/from disk, so
+// they can afford a much higher ceiling.
+const MAX_TRANSFER_BYTES = 100 * 1024 * 1024;
+
 // send_local_file: one-time upload URLs. The tool call reserves a token, the
 // MCP client then POSTs the raw file bytes to /mcp/upload/<token> — the file
 // never has to be base64'd through the model's context window.
@@ -50,7 +55,7 @@ function pruneUploads() {
 // holds it briefly under a one-time token; the MCP client GETs the raw bytes
 // from /mcp/download/<token>, again bypassing the model's context window.
 const DOWNLOAD_TTL_MS = 10 * 60 * 1000;
-const MAX_GET_FILE_BYTES = 50 * 1024 * 1024;
+const MAX_GET_FILE_BYTES = MAX_TRANSFER_BYTES;
 const pendingDownloads = new Map(); // token → { buffer, name, expiresAt }
 function pruneDownloads() {
   const now = Date.now();
@@ -271,7 +276,7 @@ const TOOLS = [
   },
   {
     name: 'get_file',
-    description: 'Fetch a file FROM the phone. Step 1: call this tool with the file\'s absolute path (find it with list_files); the server pulls the file off the phone and returns a one-time download_url. Step 2: with a shell, `curl -sS -o "<local-path>" "<download_url>"`; without a shell (claude.ai chat), give the user the download_url to click — the browser saves the file. The URL works once, within 10 minutes. Max 50 MB.',
+    description: 'Fetch a file FROM the phone. Step 1: call this tool with the file\'s absolute path (find it with list_files); the server pulls the file off the phone and returns a one-time download_url. Step 2: with a shell, `curl -sS -o "<local-path>" "<download_url>"`; without a shell (claude.ai chat), give the user the download_url to click — the browser saves the file. The URL works once, within 10 minutes. Max 100 MB.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -283,7 +288,7 @@ const TOOLS = [
   },
   {
     name: 'send_local_file',
-    description: 'Send a file from the user\'s computer to the phone — the right tool for files on disk, no base64 needed. Step 1: call this tool with the destination file name (and optional folder); it returns a one-time upload_url. Step 2: with a shell, POST the raw bytes: `curl -sS -X POST -H "Content-Type: application/octet-stream" --data-binary @"/path/to/file" "<upload_url>"`; without a shell (claude.ai chat), give the user the upload_url to open — it shows a file-picker page that uploads straight to the phone. Saves to /storage/emulated/0/<folder>/<name>. The URL works once, within 10 minutes. Max 18 MB.',
+    description: 'Send a file from the user\'s computer to the phone — the right tool for files on disk, no base64 needed. Step 1: call this tool with the destination file name (and optional folder); it returns a one-time upload_url. Step 2: with a shell, POST the raw bytes: `curl -sS -X POST -H "Content-Type: application/octet-stream" --data-binary @"/path/to/file" "<upload_url>"`; without a shell (claude.ai chat), give the user the upload_url to open — it shows a file-picker page that uploads straight to the phone. Saves to /storage/emulated/0/<folder>/<name>. The URL works once, within 10 minutes. Max 100 MB.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -310,7 +315,7 @@ const TOOLS = [
   },
   {
     name: 'send_url',
-    description: 'Download a file from a public http(s) URL and save it to the phone. The server fetches the bytes itself — they never pass through this conversation — so this is the cheapest way to put an online image or file on the phone (no base64, no tokens for the content). Saves to /storage/emulated/0/<folder>/<name>. Max 18 MB.',
+    description: 'Download a file from a public http(s) URL and save it to the phone. The server fetches the bytes itself — they never pass through this conversation — so this is the cheapest way to put an online image or file on the phone (no base64, no tokens for the content). Saves to /storage/emulated/0/<folder>/<name>. Max 100 MB.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -656,7 +661,19 @@ async function callTool(userId, name, args = {}, ctx = {}) {
       if (!signaling.presence.isOnline(userId, deviceId)) return offline();
       const path = confineToBase(args.path);
       try {
-        const buffer = await signaling.downloadFromPhone(userId, deviceId, path, { maxBytes: MAX_GET_FILE_BYTES });
+        let buffer;
+        try {
+          buffer = await signaling.downloadFromPhone(userId, deviceId, path, { maxBytes: MAX_GET_FILE_BYTES });
+        } catch (e) {
+          // "No data at all" usually means the request landed on a socket
+          // that had just died and the heartbeat hadn't cleared it yet.
+          // Wait out the zombie window (~30s from death) and try once more
+          // on whatever socket is primary by then.
+          if (!/no data from the phone|lost in transit/i.test(e.message)) throw e;
+          await sleep(10000);
+          if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+          buffer = await signaling.downloadFromPhone(userId, deviceId, path, { maxBytes: MAX_GET_FILE_BYTES });
+        }
         if (!buffer.length) return textResult(`${path} is empty (0 bytes) — nothing to download.`, true);
         pruneDownloads();
         const token = crypto.randomBytes(24).toString('base64url');
@@ -728,7 +745,7 @@ async function callTool(userId, name, args = {}, ctx = {}) {
       if (!args.url || !/^https?:\/\//i.test(String(args.url))) return textResult('Provide a valid http(s) URL.', true);
       let fetched;
       try {
-        fetched = await downloadUrl(String(args.url), MAX_SEND_FILE_BYTES);
+        fetched = await downloadUrl(String(args.url), MAX_TRANSFER_BYTES);
       } catch (e) {
         return textResult(`Couldn't fetch that URL: ${e.message}`, true);
       }
@@ -756,7 +773,7 @@ function setupMcpRoutes(app) {
   // One-time upload target for send_local_file. Raw bytes in, no auth header —
   // the unguessable single-use token (24 random bytes, 10-min TTL) is the
   // credential, so a plain `curl --data-binary` works from any shell.
-  app.post('/mcp/upload/:token', express.raw({ type: () => true, limit: '20mb' }), async (req, res) => {
+  app.post('/mcp/upload/:token', express.raw({ type: () => true, limit: '110mb' }), async (req, res) => {
     const upload = pendingUploads.get(req.params.token);
     if (upload) pendingUploads.delete(req.params.token); // single use, even on failure
     if (!upload || upload.expiresAt < Date.now()) {
@@ -766,12 +783,44 @@ function setupMcpRoutes(app) {
     if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
       return res.status(400).json({ ok: false, error: 'No file bytes received — send the raw file with Content-Type: application/octet-stream.' });
     }
-    if (bytes.length > MAX_SEND_FILE_BYTES) {
-      return res.status(413).json({ ok: false, error: `File is ${(bytes.length / 1048576).toFixed(1)} MB — max is ${MAX_SEND_FILE_BYTES / 1048576} MB.` });
+    if (bytes.length > MAX_TRANSFER_BYTES) {
+      return res.status(413).json({ ok: false, error: `File is ${(bytes.length / 1048576).toFixed(1)} MB — max is ${MAX_TRANSFER_BYTES / 1048576} MB.` });
     }
     try {
       const dest = await signaling.uploadToPhone(upload.userId, upload.deviceId, upload.dest, bytes);
       res.json({ ok: true, saved: dest, bytes: bytes.length });
+    } catch (e) {
+      res.status(502).json({ ok: false, error: e.message });
+    }
+  });
+
+  // Browser dashboard upload — the web app POSTs the whole file here in one
+  // request, and the server streams it to the phone with uploadToPhone (the
+  // same battle-tested per-chunk-ack + retry path MCP uses). This replaces
+  // the old browser→server→phone WS chunk relay, which doubled the round
+  // trips over the internet and died whenever the phone reconnected
+  // mid-transfer. Auth via ?token= (browsers can't set Authorization on a
+  // streamed fetch as easily; the JWT is the same one the WS uses).
+  app.post('/api/phone-files/upload', express.raw({ type: () => true, limit: '110mb' }), async (req, res) => {
+    const token = req.headers.authorization?.replace(/^Bearer /, '') || req.query.token;
+    const payload = token && verifyToken(token);
+    if (!payload) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    const deviceId = String(req.query.deviceId || '');
+    const dest = confineToBase(String(req.query.path || ''));
+    if (!deviceId) return res.status(400).json({ ok: false, error: 'deviceId required' });
+    if (!signaling.presence.isOnline(payload.uid, deviceId)) {
+      return res.status(503).json({ ok: false, error: 'Phone not connected' });
+    }
+    const bytes = req.body;
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+      return res.status(400).json({ ok: false, error: 'No file bytes received.' });
+    }
+    if (bytes.length > MAX_TRANSFER_BYTES) {
+      return res.status(413).json({ ok: false, error: `File is ${(bytes.length / 1048576).toFixed(1)} MB — max is ${MAX_TRANSFER_BYTES / 1048576} MB.` });
+    }
+    try {
+      const saved = await signaling.uploadToPhone(payload.uid, deviceId, dest, bytes);
+      res.json({ ok: true, saved, bytes: bytes.length });
     } catch (e) {
       res.status(502).json({ ok: false, error: e.message });
     }
@@ -790,7 +839,7 @@ function setupMcpRoutes(app) {
 <title>Send file to phone</title>
 <body style="font-family:system-ui;max-width:480px;margin:48px auto;padding:0 16px;text-align:center;">
 <h2>📱 Send a file to your phone</h2>
-<p>Saves to <code>${upload.dest.replace(/</g, '&lt;')}</code><br><small>Link works once, expires in ~${mins} min. Max ${MAX_SEND_FILE_BYTES / 1048576} MB.</small></p>
+<p>Saves to <code>${upload.dest.replace(/</g, '&lt;')}</code><br><small>Link works once, expires in ~${mins} min. Max ${MAX_TRANSFER_BYTES / 1048576} MB.</small></p>
 <input type="file" id="f" style="margin:16px 0;">
 <br><button id="go" style="padding:10px 28px;font-size:16px;cursor:pointer;">Upload</button>
 <p id="out"></p>

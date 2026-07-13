@@ -35,9 +35,14 @@ class ConnectionForegroundService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var client: OkHttpClient? = null
     private var ws: WebSocket? = null
-    private val uploads = mutableMapOf<String, MutableList<Byte>>()
-    private val uploadPaths = mutableMapOf<String, String>()
-    private val uploadTouchedAt = mutableMapOf<String, Long>()  // guarded by synchronized(uploads)
+    // Incoming uploads stream straight to a .part file on disk — buffering a
+    // big file in memory (the old MutableList<Byte>) crushed the heap and GC
+    // on 20MB+ transfers, stalling chunk acks past the sender's timeout.
+    private class UploadSession(val tmp: java.io.File, val finalPath: String, val stream: java.io.OutputStream) {
+        var nextIndex = 0  // next chunk index we expect — makes re-sends idempotent
+    }
+    private val uploadSessions = mutableMapOf<String, UploadSession>()
+    private val uploadTouchedAt = mutableMapOf<String, Long>()  // guarded by synchronized(uploadSessions)
     private val cancelledDownloads = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private var _cameraFront = true
     private var locationManager: LocationManager? = null
@@ -183,6 +188,11 @@ class ConnectionForegroundService : Service() {
                                 val reg = JSONObject().apply {
                                     put("type", "register")
                                     put("role", "phone")
+                                    // Marks this as THE authoritative connection — the
+                                    // background service owns control/file/camera handling,
+                                    // and the server routes all device traffic to it (the
+                                    // Flutter app's own socket is presence/UI only).
+                                    put("agent", "service")
                                     put("deviceId", deviceId)
                                     put("deviceName", model)
                                     put("screenW", screenW)
@@ -396,30 +406,32 @@ class ConnectionForegroundService : Service() {
     private fun pfErr(id: String, msg: String) =
         JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", msg) }.toString()
 
-    // Abandoned-upload cleanup. If the sender dies mid-upload the buffered
-    // chunks would sit in memory forever: a pf_upload_cancel frees them
-    // instantly, and this idle-TTL sweep is the safety net for the case where
-    // the cancel itself is lost in the disconnect.
+    private fun discardUpload(id: String) {
+        val sess = synchronized(uploadSessions) {
+            uploadTouchedAt.remove(id)
+            uploadSessions.remove(id)
+        } ?: return
+        try { sess.stream.close() } catch (_: Exception) {}
+        try { sess.tmp.delete() } catch (_: Exception) {}
+    }
+
+    // Abandoned-upload cleanup. If the sender dies mid-upload the open .part
+    // file would sit on disk forever: a pf_upload_cancel frees it instantly,
+    // and this idle-TTL sweep is the safety net for the case where the cancel
+    // itself is lost in the disconnect.
     private val uploadIdleTtlMs = 60_000L
     private val uploadSweeper = object : Runnable {
         override fun run() {
             val cutoff = System.currentTimeMillis() - uploadIdleTtlMs
-            val more: Boolean
-            synchronized(uploads) {
-                val stale = uploadTouchedAt.filterValues { it < cutoff }.keys.toList()
-                stale.forEach { staleId ->
-                    uploads.remove(staleId)
-                    uploadTouchedAt.remove(staleId)
-                    synchronized(uploadPaths) { uploadPaths.remove(staleId) }
-                }
-                more = uploadTouchedAt.isNotEmpty()
-            }
+            val stale = synchronized(uploadSessions) { uploadTouchedAt.filterValues { it < cutoff }.keys.toList() }
+            stale.forEach { discardUpload(it) }
+            val more = synchronized(uploadSessions) { uploadTouchedAt.isNotEmpty() }
             if (more) handler.postDelayed(this, 30_000L)
         }
     }
 
     private fun touchUpload(id: String) {
-        synchronized(uploads) { uploadTouchedAt[id] = System.currentTimeMillis() }
+        synchronized(uploadSessions) { uploadTouchedAt[id] = System.currentTimeMillis() }
         handler.removeCallbacks(uploadSweeper)
         handler.postDelayed(uploadSweeper, 30_000L)
     }
@@ -475,39 +487,52 @@ class ConnectionForegroundService : Service() {
                             send(JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", "File not found") }.toString())
                             return@Runnable
                         }
-                        val bytes = file.readBytes()
+                        // Stream from disk in 64KB reads — file.readBytes() held the
+                        // whole file in memory, which hurt on 20MB+ downloads.
                         val chunkSize = 65536
-                        if (bytes.isEmpty()) {
+                        val fileLen = file.length()
+                        if (fileLen == 0L) {
                             send(JSONObject().apply {
                                 put("type", "pf_chunk"); put("id", id)
                                 put("index", 0); put("total", 1); put("done", true); put("data", "")
                             }.toString())
                             return@Runnable
                         }
-                        var offset = 0; var index = 0
-                        val total = Math.ceil(bytes.size.toDouble() / chunkSize).toInt()
-                        while (offset < bytes.size) {
-                            if (cancelledDownloads.remove(id)) return@Runnable
-                            // Backpressure: OkHttp's send() only queues — pushing all
-                            // chunks at once balloons the write queue and stalls/kills
-                            // the socket on big files. Let the queue drain first.
-                            var waitedMs = 0L
-                            while ((ws?.queueSize() ?: 0L) > 256 * 1024) {
-                                Thread.sleep(20)
-                                waitedMs += 20
-                                if (waitedMs > 15000) {
-                                    send(pfErr(id, "Download aborted: connection stalled"))
-                                    return@Runnable
+                        val total = ((fileLen + chunkSize - 1) / chunkSize).toInt()
+                        var index = 0
+                        var sent = 0L
+                        java.io.FileInputStream(file).use { fis ->
+                            val buf = ByteArray(chunkSize)
+                            while (sent < fileLen) {
+                                if (cancelledDownloads.remove(id)) return@Runnable
+                                // Backpressure: OkHttp's send() only queues — pushing all
+                                // chunks at once balloons the write queue and stalls/kills
+                                // the socket on big files. Let the queue drain first.
+                                var waitedMs = 0L
+                                while ((ws?.queueSize() ?: 0L) > 256 * 1024) {
+                                    Thread.sleep(20)
+                                    waitedMs += 20
+                                    if (waitedMs > 15000) {
+                                        send(pfErr(id, "Download aborted: connection stalled"))
+                                        return@Runnable
+                                    }
                                 }
+                                var n = 0
+                                while (n < chunkSize) {
+                                    val r = fis.read(buf, n, chunkSize - n)
+                                    if (r < 0) break
+                                    n += r
+                                }
+                                if (n <= 0) break
+                                sent += n
+                                send(JSONObject().apply {
+                                    put("type", "pf_chunk"); put("id", id)
+                                    put("index", index); put("total", total)
+                                    put("done", sent >= fileLen)
+                                    put("data", android.util.Base64.encodeToString(if (n == chunkSize) buf else buf.copyOf(n), android.util.Base64.NO_WRAP))
+                                }.toString())
+                                index++
                             }
-                            val end = minOf(offset + chunkSize, bytes.size)
-                            send(JSONObject().apply {
-                                put("type", "pf_chunk"); put("id", id)
-                                put("index", index); put("total", total)
-                                put("done", end >= bytes.size)
-                                put("data", android.util.Base64.encodeToString(bytes.copyOfRange(offset, end), android.util.Base64.NO_WRAP))
-                            }.toString())
-                            offset = end; index++
                         }
                     }
                     "pf_upload_start" -> {
@@ -516,18 +541,40 @@ class ConnectionForegroundService : Service() {
                             send(pfErr(id, "Access denied: outside shared storage"))
                             return@Runnable
                         }
-                        synchronized(uploads) { uploads[id] = mutableListOf() }
-                        synchronized(uploadPaths) { uploadPaths[id] = dest.path }
+                        dest.parentFile?.mkdirs()
+                        val tmp = java.io.File(dest.path + ".part")
+                        val stream = java.io.BufferedOutputStream(java.io.FileOutputStream(tmp))
+                        discardUpload(id)  // replace any stale session for this id
+                        synchronized(uploadSessions) { uploadSessions[id] = UploadSession(tmp, dest.path, stream) }
                         touchUpload(id)
                     }
                     "pf_upload_cancel" -> {
-                        // Sender aborted (timeout/disconnect) — free the buffer now.
-                        synchronized(uploads) { uploads.remove(id); uploadTouchedAt.remove(id) }
-                        synchronized(uploadPaths) { uploadPaths.remove(id) }
+                        // Sender aborted (timeout/disconnect) — close and delete the .part now.
+                        discardUpload(id)
                     }
                     "pf_upload_chunk" -> {
+                        val sess = synchronized(uploadSessions) { uploadSessions[id] }
+                        if (sess == null) {
+                            send(JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", "Invalid upload path") }.toString())
+                            return@Runnable
+                        }
+                        val index = json.optInt("index")
+                        if (index < sess.nextIndex) {
+                            // Duplicate (the sender re-sent after a lost ack) — the bytes
+                            // are already on disk, so just re-ack without writing.
+                            send(JSONObject().apply {
+                                put("type", "pf_upload_chunk_ack"); put("id", id); put("index", index)
+                            }.toString())
+                            return@Runnable
+                        }
+                        if (index > sess.nextIndex) {
+                            discardUpload(id)
+                            send(JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", "Chunk ${index} arrived out of order (expected ${sess.nextIndex}) — restart the upload") }.toString())
+                            return@Runnable
+                        }
                         val data = android.util.Base64.decode(json.optString("data"), android.util.Base64.DEFAULT)
-                        synchronized(uploads) { uploads.getOrPut(id) { mutableListOf() }.addAll(data.toList()) }
+                        sess.stream.write(data)
+                        sess.nextIndex++
                         touchUpload(id)
                         if (!json.optBoolean("done")) {
                             // Flow control: browser waits for this ack before sending the
@@ -540,18 +587,16 @@ class ConnectionForegroundService : Service() {
                             }.toString())
                         }
                         if (json.optBoolean("done")) {
-                            val allBytes: ByteArray
-                            synchronized(uploads) { allBytes = uploads.remove(id)?.toByteArray() ?: byteArrayOf(); uploadTouchedAt.remove(id) }
-                            val path: String
-                            synchronized(uploadPaths) { path = uploadPaths.remove(id)?.trim() ?: "" }
-                            if (path.isEmpty()) {
-                                send(JSONObject().apply { put("type", "pf_error"); put("id", id); put("error", "Invalid upload path") }.toString())
-                                return@Runnable
+                            synchronized(uploadSessions) { uploadSessions.remove(id); uploadTouchedAt.remove(id) }
+                            sess.stream.close()
+                            val final = java.io.File(sess.finalPath)
+                            if (final.exists()) final.delete()
+                            if (!sess.tmp.renameTo(final)) {
+                                // Rename can fail across mounts — fall back to copy+delete.
+                                sess.tmp.copyTo(final, overwrite = true)
+                                sess.tmp.delete()
                             }
-                            val file = java.io.File(path.replace('\\', '/'))
-                            file.parentFile?.mkdirs()
-                            file.writeBytes(allBytes)
-                            send(JSONObject().apply { put("type", "pf_upload_ok"); put("id", id); put("path", path) }.toString())
+                            send(JSONObject().apply { put("type", "pf_upload_ok"); put("id", id); put("path", sess.finalPath) }.toString())
                         }
                     }
                     "pf_delete" -> {
@@ -709,6 +754,28 @@ class ConnectionForegroundService : Service() {
             send("""{"type":"screenshot_error","reason":"requires_android_12"}""")
             return
         }
+        // If the display timed out mid-session, a capture is just a black
+        // frame. Wake the screen first, give it a beat to light up, then
+        // capture — remote control shouldn't die because the screen dozed.
+        val pm = getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+        if (!pm.isInteractive) {
+            try {
+                @Suppress("DEPRECATION")
+                val wl = pm.newWakeLock(
+                    android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK
+                        or android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP
+                        or android.os.PowerManager.ON_AFTER_RELEASE,
+                    "phoneremote:screenshot"
+                )
+                wl.acquire(10_000)
+            } catch (_: Exception) {}
+            handler.postDelayed({ doCapture(svc) }, 800)
+            return
+        }
+        doCapture(svc)
+    }
+
+    private fun doCapture(svc: RemoteAccessibilityService) {
         svc.captureScreenshot { jpegBytes ->
             if (jpegBytes.isEmpty()) {
                 send("""{"type":"screenshot_error","reason":"capture_failed"}""")

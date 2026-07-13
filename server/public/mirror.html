@@ -307,6 +307,7 @@ function onStreamStopped() {
 }
 
 const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+let suppressFramesUntil = 0;
 
 // ── WebSocket ─────────────────────────────────────────────────────
 const ws = createWS(handleMsg, handleBinary);
@@ -366,6 +367,7 @@ function toggleStream() {
 }
 
 function startStream() {
+  suppressFramesUntil = 0;
   spin.style.display = 'block';
   setOverlay('Starting stream...', 'Grant screen permission on phone');
   streamBtn.style.display = 'none';
@@ -377,6 +379,9 @@ function stopStream() {
   setStreaming(false);
   showStopBtn(false);
   ws.send({ type: 'stream_stop' });
+  // Ignore in-flight frames for a moment so the view stops instantly
+  // instead of replaying the socket backlog.
+  suppressFramesUntil = Date.now() + 4000;
 }
 
 function showStopBtn(on) {
@@ -462,6 +467,7 @@ function handleBinary(buffer) {
     return;
   }
   if (bytes[0] !== 0x01) return;  // not a screen frame
+  if (Date.now() < suppressFramesUntil) return;  // stale frames after Stop
   // Always sync overlay state to actual frame arrival — covers BFCache restores
   // and any reconnect scenario where streaming flag may be stale.
   setStreaming(true);
