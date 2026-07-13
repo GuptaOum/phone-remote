@@ -366,7 +366,10 @@ function handleMsg(msg) {
 // ── Shared helpers ─────────────────────────────────────────────────
 function triggerDownload(url, name) {
   const a = document.createElement('a');
-  a.href = PR.urlWithToken(url); // <a download> can't send Authorization headers
+  // Server paths need ?token= (<a download> can't send Authorization headers),
+  // but blob: URLs (phone-file downloads) must be used verbatim — appending a
+  // query string makes the blob reference invalid and the save silently fails.
+  a.href = url.startsWith('blob:') ? url : PR.urlWithToken(url);
   a.download = name;
   document.body.appendChild(a);
   a.click();
@@ -638,7 +641,11 @@ async function phoneUpload(files) {
       if (err) { failed = err; break; }
     }
     hideToast();
-    if (failed) alert('Upload of ' + file.name + ' failed: ' + failed);
+    if (failed) {
+      // Tell the phone to drop its half-received buffer for this upload.
+      ws.send({ type: 'pf_upload_cancel', id });
+      alert('Upload of ' + file.name + ' CANCELLED: ' + failed);
+    }
   }
   loadPhone(phonePath);
 }
