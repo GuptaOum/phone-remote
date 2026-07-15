@@ -41,6 +41,7 @@ async function main() {
   app.get('/camera',    (_, res) => res.sendFile(path.join(PUBLIC, 'camera.html')));
   app.get('/files',     (_, res) => res.sendFile(path.join(PUBLIC, 'files.html')));
   app.get('/location',  (_, res) => res.sendFile(path.join(PUBLIC, 'location.html')));
+  app.get('/mcp-test',  (_, res) => res.sendFile(path.join(PUBLIC, 'mcp-test.html')));
 
   app.get('/health', (_, res) => res.json({ ok: true }));
 
