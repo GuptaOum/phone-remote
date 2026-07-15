@@ -590,7 +590,11 @@ function setupSignaling(wss, app) {
         // status snapshots. Both are answers to a specific MCP tool call — no
         // browser cares, so resolve the waiter and don't broadcast.
         case 'control_ack':
-        case 'device_status_result': {
+        case 'device_status_result':
+        case 'ui_tree_result':
+        case 'list_apps_result':
+        case 'open_url_result':
+        case 'notifications_result': {
           if (ws.role !== 'phone') return;
           const waiting = pendingHttpRequests.get(msg.id);
           if (waiting) {
