@@ -2,6 +2,8 @@ package com.phoneremote
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.os.Build
@@ -272,6 +274,28 @@ class RemoteAccessibilityService : AccessibilityService() {
         editFocusedText { cur, selStart, selEnd ->
             Pair(cur.substring(0, selStart) + text + cur.substring(selEnd), selStart + text.length)
         }
+
+    /**
+     * Types by putting the text on the clipboard and asking the focused field
+     * to paste it.
+     *
+     * ACTION_SET_TEXT (what typeText uses) is advisory — WhatsApp and others
+     * simply ignore it, so typing silently does nothing. Those apps do honour
+     * ACTION_PASTE, which goes through the normal input path. Kept as an
+     * explicit alternative rather than the default: pasting clobbers the
+     * user's clipboard, which is rude to do on every keystroke.
+     *
+     * @return true only if a focused field accepted the paste.
+     */
+    fun pasteText(text: String): Boolean {
+        val focused = rootInActiveWindow?.findFocus(
+            android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        return try {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("phone-remote", text))
+            focused.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_PASTE)
+        } catch (_: Exception) { false }
+    }
 
     // ── Screenshot via AccessibilityService (API 30+, no MediaProjection needed) ──
     @RequiresApi(Build.VERSION_CODES.S)
