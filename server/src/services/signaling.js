@@ -42,7 +42,10 @@ function acct(userId) {
 
 function cleanupAcct(userId) {
   const a = accounts.get(userId);
-  if (a && a.phones.size === 0 && a.browsers.size === 0) accounts.delete(userId);
+  // phonePool must be checked too: a socket mid-registration is already pooled
+  // but not yet primary, and dropping the account here would strand it under an
+  // object no lookup can reach.
+  if (a && a.phones.size === 0 && a.browsers.size === 0 && a.phonePool.size === 0) accounts.delete(userId);
 }
 
 function revokeDevice(userId, deviceId, reason = 'device_removed') {
@@ -95,8 +98,30 @@ const presence = {
 // browser is also watching.
 const pendingHttpRequests = new Map();
 
-function getPhoneSocket(userId, deviceId) {
-  const p = accounts.get(userId)?.phones.get(deviceId);
+/**
+ * A live socket for this device.
+ *
+ * With `cap`, returns a socket that advertised that capability — NOT merely
+ * the primary one. A phone holds several sockets at once (the Flutter app's
+ * and the background service's), and only the background service handles
+ * control/ui_tree/status and answers them. The app's socket registers without
+ * `caps` and can become primary, so anything that needs a reply must ask the
+ * socket that can actually produce one; asking "primary" is a coin flip.
+ *
+ * Returns null when no live socket can do it — the caller should treat that
+ * as unsupported rather than silently falling back to a socket that will
+ * never answer.
+ */
+function getPhoneSocket(userId, deviceId, cap = null) {
+  const a = accounts.get(userId);
+  if (!a) return null;
+  if (cap) {
+    for (const s of (a.phonePool.get(deviceId) || [])) {
+      if (s.readyState === 1 && Array.isArray(s.caps) && s.caps.includes(cap)) return s;
+    }
+    return null;
+  }
+  const p = a.phones.get(deviceId);
   return p?.readyState === 1 ? p : null;
 }
 
@@ -118,10 +143,9 @@ function getDeviceScreenSize(userId, deviceId) {
   return p ? { screenW: p.screenW, screenH: p.screenH } : null;
 }
 
-/** True if the connected build advertised a capability at register time. */
+/** True if ANY of the device's live sockets can handle this capability. */
 function deviceSupports(userId, deviceId, cap) {
-  const p = getPhoneSocket(userId, deviceId);
-  return !!p && Array.isArray(p.caps) && p.caps.includes(cap);
+  return !!getPhoneSocket(userId, deviceId, cap);
 }
 
 /**
@@ -144,7 +168,7 @@ async function controlPhone(userId, deviceId, msg, timeoutMs = 6000) {
     sendToPhone(userId, deviceId, msg);
     return { confirmed: false, ok: true };
   }
-  const reply = await requestFromPhone(userId, deviceId, (id) => ({ ...msg, id }), timeoutMs);
+  const reply = await requestFromPhone(userId, deviceId, (id) => ({ ...msg, id }), timeoutMs, 'control_ack');
   return { confirmed: true, ok: !!reply.ok, error: reply.error };
 }
 
@@ -152,8 +176,11 @@ async function controlPhone(userId, deviceId, msg, timeoutMs = 6000) {
  * Send a message to the phone and wait for its correlated reply (matched by
  * `id`). Used for pf_list / pf_delete, which already round-trip an id.
  */
-function requestFromPhone(userId, deviceId, buildMsg, timeoutMs = 15000) {
-  const phone = getPhoneSocket(userId, deviceId);
+function requestFromPhone(userId, deviceId, buildMsg, timeoutMs = 15000, cap = null) {
+  // With a cap, insist on a socket that can reply. Falling back to primary
+  // would send the request to the Flutter app's socket, which never answers
+  // these — the call would just time out with a misleading message.
+  const phone = getPhoneSocket(userId, deviceId, cap) || (cap ? null : getPhoneSocket(userId, deviceId));
   if (!phone) return Promise.reject(new Error('Device is offline'));
   const id = uuidv4();
   return new Promise((resolve, reject) => {
@@ -427,14 +454,32 @@ function setupSignaling(wss, app) {
 
           if (msg.role === 'phone') {
             ws.deviceId = msg.deviceId || 'default';
-            ws.agent = msg.agent || null; // 'service' = the authoritative background-service socket
-            ws.screenW = msg.screenW || 1080;
-            ws.screenH = msg.screenH || 1920;
-            ws.model = msg.model || 'Android Device';
-            ws.deviceName = msg.deviceName || ws.model;
-            // Feature flags from the APK. Absent on older builds, which is how
-            // we know to fall back to unconfirmed control commands.
-            ws.caps = Array.isArray(msg.caps) ? msg.caps : [];
+
+            // A phone sends MORE THAN ONE register over the SAME socket: the
+            // background service registers first (agent=service, caps, true
+            // screen metrics), then the Flutter UI registers again over that
+            // same connection with none of it. Treating the later, weaker
+            // register as authoritative silently erased everything the service
+            // said — caps went to [], so every capability tool reported "this
+            // build is too old" one second after the build had announced all
+            // seven, and the app's nav-bar-excluded height replaced the real
+            // one, skewing tap coordinates. So merge: a register may add
+            // information, never take it away.
+            const wasService = ws.agent === 'service';
+            if (msg.agent) ws.agent = msg.agent;
+            if (Array.isArray(msg.caps) && msg.caps.length) ws.caps = msg.caps;
+            if (!Array.isArray(ws.caps)) ws.caps = [];
+
+            // Screen metrics: the background service reads the true display
+            // bounds; the Flutter UI reports its own window, which excludes the
+            // navigation bar. Once the service has spoken, don't let the UI
+            // overwrite it.
+            if (msg.agent === 'service' || !wasService) {
+              ws.screenW = msg.screenW || ws.screenW || 1080;
+              ws.screenH = msg.screenH || ws.screenH || 1920;
+              ws.model = msg.model || ws.model || 'Android Device';
+              ws.deviceName = msg.deviceName || ws.deviceName || ws.model;
+            }
 
             // Revocation gate: a device removed from the dashboard may only
             // re-register with a token issued AFTER the removal (i.e. the
@@ -450,6 +495,17 @@ function setupSignaling(wss, app) {
                 return;
               }
 
+              // Re-resolve the account instead of using the one captured
+              // before this await. cleanupAcct drops an account the moment it
+              // has no phones and no browsers, which is exactly how it looks
+              // while we sit in this DB call: any socket closing in that gap
+              // deletes it from the map. Registering into the captured object
+              // would then file this socket under a ghost account nobody can
+              // look up — the socket stays open and healthy, but it is
+              // invisible to every lookup, so relays silently go nowhere and
+              // the device reads as offline while it is plainly connected.
+              const acc = acct(ws.userId);
+
               // Pool this socket. The same device legitimately holds several
               // live connections (app UI + background service) — never close
               // the others. Primary selection: the background SERVICE socket
@@ -458,12 +514,12 @@ function setupSignaling(wss, app) {
               // service socket takes over immediately (its registration just
               // proved it's alive — no waiting for the heartbeat to clear a
               // dead predecessor).
-              let pool = a.phonePool.get(ws.deviceId);
-              if (!pool) { pool = new Set(); a.phonePool.set(ws.deviceId, pool); }
+              let pool = acc.phonePool.get(ws.deviceId);
+              if (!pool) { pool = new Set(); acc.phonePool.set(ws.deviceId, pool); }
               pool.add(ws);
-              const cur = a.phones.get(ws.deviceId);
+              const cur = acc.phones.get(ws.deviceId);
               const curAlive = cur && cur.readyState === 1;
-              if (ws.agent === 'service' || !curAlive) a.phones.set(ws.deviceId, ws);
+              if (ws.agent === 'service' || !curAlive) acc.phones.set(ws.deviceId, ws);
 
               db.upsertDevice({ id: ws.deviceId, userId: ws.userId, name: ws.deviceName, model: ws.model })
                 .catch((e) => console.error('upsertDevice failed:', e.message));
@@ -477,8 +533,8 @@ function setupSignaling(wss, app) {
                 screenH: ws.screenH,
                 model: ws.model,
               });
-              bcast([...a.browsers], { type: 'device_online', deviceId: ws.deviceId, name: ws.deviceName, model: ws.model });
-              console.log(`📱 Phone connected  user=${ws.userId.slice(0, 8)} device=${ws.deviceId.slice(0, 8)} (${ws.model}, ${ws.screenW}×${ws.screenH})`);
+              bcast([...acc.browsers], { type: 'device_online', deviceId: ws.deviceId, name: ws.deviceName, model: ws.model });
+              console.log(`📱 Phone connected  user=${ws.userId.slice(0, 8)} device=${ws.deviceId.slice(0, 8)} agent=${ws.agent || 'app'} (${ws.model}, ${ws.screenW}×${ws.screenH}) caps=[${ws.caps.join(',') || 'none'}]`);
             }).catch((e) => console.error('register device check failed:', e.message));
           } else {
             ws.watchId = msg.deviceId || null;

@@ -454,40 +454,43 @@ class ConnectionForegroundService : Service() {
             put("type", "device_status_result")
             put("id", id)
         }
-        try {
-            val bm = getSystemService(BATTERY_SERVICE) as android.os.BatteryManager
-            o.put("battery", bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY))
-            o.put("charging", bm.isCharging)
+        // Each field is read independently: a single unavailable one (a missing
+        // permission, an OEM quirk) must not take the whole report down with it.
+        // The accessibility flag in particular is the one an agent most needs
+        // when things are already going wrong.
+        fun <T> field(name: String, read: () -> T) {
+            try { o.put(name, read() ?: JSONObject.NULL) } catch (_: Exception) { o.put(name, JSONObject.NULL) }
+        }
 
-            val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
-            o.put("screenOn", pm.isInteractive)
-
-            // The single most useful field: touch/type silently no-op without this.
-            o.put("accessibilityEnabled", RemoteAccessibilityService.instance != null)
-            o.put("notificationAccess", NotificationService.isGranted(this))
-            o.put("foregroundApp", RemoteAccessibilityService.instance?.foregroundPackage() ?: JSONObject.NULL)
-
+        field("battery") {
+            (getSystemService(BATTERY_SERVICE) as android.os.BatteryManager)
+                .getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        }
+        field("charging") { (getSystemService(BATTERY_SERVICE) as android.os.BatteryManager).isCharging }
+        field("screenOn") { (getSystemService(POWER_SERVICE) as android.os.PowerManager).isInteractive }
+        // The single most useful field: touch/type silently no-op without this.
+        field("accessibilityEnabled") { RemoteAccessibilityService.instance != null }
+        field("notificationAccess") { NotificationService.isGranted(this) }
+        field("foregroundApp") { RemoteAccessibilityService.instance?.foregroundPackage() }
+        field("network") {
             val cm = getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
-            o.put("network", when {
-                caps == null -> "none"
-                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
-                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
-                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            val nc = cm.getNetworkCapabilities(cm.activeNetwork)
+            when {
+                nc == null -> "none"
+                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
                 else -> "other"
-            })
-
-            o.put("screenW", screenW)
-            o.put("screenH", screenH)
-            o.put("model", model)
-            o.put("androidSdk", android.os.Build.VERSION.SDK_INT)
-
-            // Doze exemption: when false, the OS may throttle this service's
-            // socket in the background — the usual cause of a silent offline.
-            val powerMgr = getSystemService(POWER_SERVICE) as android.os.PowerManager
-            o.put("batteryOptimized", !powerMgr.isIgnoringBatteryOptimizations(packageName))
-        } catch (e: Exception) {
-            o.put("error", e.message ?: "status_failed")
+            }
+        }
+        field("screenW") { screenW }
+        field("screenH") { screenH }
+        field("model") { model }
+        field("androidSdk") { android.os.Build.VERSION.SDK_INT }
+        // Doze exemption: when false, the OS may throttle this service's
+        // socket in the background — the usual cause of a silent offline.
+        field("batteryOptimized") {
+            !(getSystemService(POWER_SERVICE) as android.os.PowerManager).isIgnoringBatteryOptimizations(packageName)
         }
         try { ws?.send(o.toString()) } catch (_: Exception) {}
     }

@@ -560,7 +560,16 @@ const WAIT_POLL_MS = 600;
 
 /** Read the phone's accessibility tree. Shared by get_ui_tree and wait_for. */
 function fetchUiTree(userId, deviceId, all = false, timeoutMs = 10000) {
-  return signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'ui_tree', id, all: !!all }), timeoutMs);
+  return signaling.requestFromPhone(
+    userId, deviceId, (id) => ({ type: 'ui_tree', id, all: !!all }), timeoutMs, 'ui_tree',
+  );
+}
+
+/** Ask the phone for its status. Shared by get_device_status/get_foreground_app. */
+function fetchDeviceStatus(userId, deviceId, timeoutMs = 8000) {
+  return signaling.requestFromPhone(
+    userId, deviceId, (id) => ({ type: 'device_status', id }), timeoutMs, 'device_status',
+  );
 }
 
 /** Does this tree satisfy the caller's condition? Exactly one of text/id/app. */
@@ -782,7 +791,7 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         return textResult('This phone build cannot list apps — update the app.', true);
       }
       try {
-        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'list_apps', id }), 15000);
+        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'list_apps', id }), 15000, 'list_apps');
         if (r.error) return textResult(`The phone could not list apps: ${r.error}`, true);
         let apps = r.apps || [];
         if (args.filter) {
@@ -803,7 +812,7 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         return textResult('This phone build cannot open URLs — update the app.', true);
       }
       try {
-        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'open_url', id, url: args.url }), 12000);
+        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'open_url', id, url: args.url }), 12000, 'open_url');
         if (!r.ok) return textResult(r.error || 'Could not open the URL.', true);
         return maybeScreenshot(userId, deviceId, textResult(`Opened ${args.url}`), args.screenshot !== false);
       } catch (e) {
@@ -817,7 +826,7 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         return textResult('This phone build cannot read notifications — update the app.', true);
       }
       try {
-        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'notifications', id }), 12000);
+        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'notifications', id }), 12000, 'notifications');
         if (r.error === 'notification_access_not_granted') {
           return textResult('Notification access has not been granted on the phone. Grant it at Settings → Notifications → Device & app notifications → Phone Remote → Allow notification access. This is a separate permission from the Accessibility Service.', true);
         }
@@ -935,7 +944,7 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         return textResult('This phone build is too old to report status — update the app.', true);
       }
       try {
-        const s = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'device_status', id }), 8000);
+        const s = await fetchDeviceStatus(userId, deviceId);
         if (s.error) return textResult(`The phone could not read its status: ${s.error}`, true);
         const status = {
           battery: `${s.battery}%${s.charging ? ' (charging)' : ''}`,
@@ -967,7 +976,7 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         return textResult('This phone build is too old to report the foreground app — update the app.', true);
       }
       try {
-        const s = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'device_status', id }), 8000);
+        const s = await fetchDeviceStatus(userId, deviceId);
         if (!s.accessibilityEnabled) return textResult("Cannot tell: the phone's Accessibility Service is off. Enable it at Settings → Accessibility → Phone Remote.", true);
         if (!s.foregroundApp) return textResult('No foreground app reported — the screen may be off or locked.', true);
         return textResult(s.foregroundApp);
