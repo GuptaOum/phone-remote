@@ -118,6 +118,36 @@ function getDeviceScreenSize(userId, deviceId) {
   return p ? { screenW: p.screenW, screenH: p.screenH } : null;
 }
 
+/** True if the connected build advertised a capability at register time. */
+function deviceSupports(userId, deviceId, cap) {
+  const p = getPhoneSocket(userId, deviceId);
+  return !!p && Array.isArray(p.caps) && p.caps.includes(cap);
+}
+
+/**
+ * Send a control command and wait for the phone to confirm it actually ran.
+ *
+ * sendToPhone only proves the bytes left this process: if accessibility was
+ * off, or Android refused the gesture, the command vanished and the caller
+ * still reported success. Builds advertising `control_ack` echo the outcome
+ * back, so a failure surfaces as a failure.
+ *
+ * Older builds don't ack — waiting on them would hang every call — so they
+ * fall back to fire-and-forget and say so via `confirmed: false`.
+ *
+ * @returns {Promise<{confirmed: boolean, ok: boolean, error?: string}>}
+ *   Rejects only when the device is offline.
+ */
+async function controlPhone(userId, deviceId, msg, timeoutMs = 6000) {
+  if (!getPhoneSocket(userId, deviceId)) throw new Error('Device is offline');
+  if (!deviceSupports(userId, deviceId, 'control_ack')) {
+    sendToPhone(userId, deviceId, msg);
+    return { confirmed: false, ok: true };
+  }
+  const reply = await requestFromPhone(userId, deviceId, (id) => ({ ...msg, id }), timeoutMs);
+  return { confirmed: true, ok: !!reply.ok, error: reply.error };
+}
+
 /**
  * Send a message to the phone and wait for its correlated reply (matched by
  * `id`). Used for pf_list / pf_delete, which already round-trip an id.
@@ -402,6 +432,9 @@ function setupSignaling(wss, app) {
             ws.screenH = msg.screenH || 1920;
             ws.model = msg.model || 'Android Device';
             ws.deviceName = msg.deviceName || ws.model;
+            // Feature flags from the APK. Absent on older builds, which is how
+            // we know to fall back to unconfirmed control commands.
+            ws.caps = Array.isArray(msg.caps) ? msg.caps : [];
 
             // Revocation gate: a device removed from the dashboard may only
             // re-register with a token issued AFTER the removal (i.e. the
@@ -553,6 +586,19 @@ function setupSignaling(wss, app) {
           }
           break;
         }
+        // Phone confirming a control command actually executed, and device
+        // status snapshots. Both are answers to a specific MCP tool call — no
+        // browser cares, so resolve the waiter and don't broadcast.
+        case 'control_ack':
+        case 'device_status_result': {
+          if (ws.role !== 'phone') return;
+          const waiting = pendingHttpRequests.get(msg.id);
+          if (waiting) {
+            pendingHttpRequests.delete(msg.id);
+            waiting.resolve(msg);
+          }
+          break;
+        }
         case 'pf_chunk': {
           if (ws.role !== 'phone') return;
           bcast(watchers(), msg);
@@ -664,5 +710,6 @@ const bcast = (targets, msg) => {
 
 module.exports = {
   setupSignaling, presence, revokeDevice,
-  sendToPhone, getLastLocation, getDeviceScreenSize, requestFromPhone, captureScreenshot, uploadToPhone, downloadFromPhone,
+  sendToPhone, controlPhone, deviceSupports,
+  getLastLocation, getDeviceScreenSize, requestFromPhone, captureScreenshot, uploadToPhone, downloadFromPhone,
 };

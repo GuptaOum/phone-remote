@@ -30,7 +30,7 @@ const signaling = require('../services/signaling');
  */
 
 const PROTOCOL_VERSION = '2025-06-18';
-const SERVER_VERSION = '1.5.0';
+const SERVER_VERSION = '1.6.0';
 
 // send_file: JSON body limit is 25 MB (index.js) and base64 inflates ~4/3,
 // so cap the decoded payload safely below that.
@@ -100,6 +100,24 @@ const TOOLS = [
   {
     name: 'get_location',
     description: 'Get the most recent known GPS location of a device. Returns the cached last fix — may be a few minutes old.',
+    inputSchema: {
+      type: 'object',
+      properties: { deviceId: { type: 'string', description: 'Device id from list_devices' } },
+      required: ['deviceId'],
+    },
+  },
+  {
+    name: 'get_device_status',
+    description: 'Check a device\'s health before acting on it: battery level, whether the screen is on, whether the Accessibility Service (which performs all taps and typing) is enabled, the current foreground app, and network type. Call this first when a tap or type seems to do nothing, or at the start of a session — it catches "accessibility is off" up front instead of after several silent no-ops.',
+    inputSchema: {
+      type: 'object',
+      properties: { deviceId: { type: 'string', description: 'Device id from list_devices' } },
+      required: ['deviceId'],
+    },
+  },
+  {
+    name: 'get_foreground_app',
+    description: 'Get the package name of the app currently on screen (e.g. com.whatsapp). A cheap way to confirm you are still in the right app after an action, without the cost of a full screenshot.',
     inputSchema: {
       type: 'object',
       properties: { deviceId: { type: 'string', description: 'Device id from list_devices' } },
@@ -404,6 +422,64 @@ async function maybeScreenshot(userId, deviceId, baseResult, want) {
   }
 }
 
+// Why a command didn't run, in terms the model can act on. The phone reports a
+// short code; each maps to the actual next step rather than a bare failure.
+const CONTROL_ERRORS = {
+  accessibility_not_enabled:
+    "Nothing happened: the phone's Accessibility Service is off, which is what performs taps and typing. Turn it on at Settings → Accessibility → Phone Remote. Until then every touch command will no-op.",
+  no_focused_text_field:
+    'Nothing was typed: no text field is focused. Tap the field first (tap with screenshot:true to confirm the cursor is in it), then type_text again.',
+  gesture_rejected_by_system:
+    'Android refused the gesture. The screen is likely off or locked, or a system dialog is capturing input. Take a screenshot to see the current screen; press_key "home" often clears it.',
+  screen_size_unknown:
+    'The phone has not reported its screen size yet, so the coordinates could not be resolved. Wait a second and retry.',
+  key_not_accepted: 'The phone did not accept that key press.',
+  unknown_action: 'The phone did not recognise that command — its app build is likely older than this server.',
+};
+
+// Appended when the phone is an older build with no ack support: the command
+// was sent, but claiming it "worked" would be the exact false success we're
+// trying to eliminate.
+const UNCONFIRMED_NOTE =
+  ' (Sent, but this phone build cannot confirm whether it actually ran — update the app for confirmed actions.)';
+
+/**
+ * Send a control command and hold the tool call until the phone confirms it
+ * executed. Replaces bare sendToPhone for anything a user would notice failing:
+ * sendToPhone only proved the bytes left the server, so a tap that never landed
+ * still reported "Tapped".
+ *
+ * @returns {Promise<{err: object|null, note: string}>} err is a ready-to-return
+ *   error result; when null the command genuinely ran.
+ */
+async function runControl(userId, deviceId, msg, timeoutMs) {
+  let verdict;
+  try {
+    verdict = await signaling.controlPhone(userId, deviceId, msg, timeoutMs);
+  } catch (e) {
+    const offlineNow = /offline/i.test(e.message);
+    return {
+      err: textResult(
+        offlineNow
+          ? 'Device is offline.'
+          : `The phone never confirmed the command (${e.message}). It may have dropped offline mid-command — the action may or may not have run. Take a screenshot to check before retrying.`,
+        true,
+      ),
+      note: '',
+    };
+  }
+  if (!verdict.ok) {
+    return {
+      err: textResult(
+        CONTROL_ERRORS[verdict.error] || `The phone could not run the command (${verdict.error || 'unknown reason'}).`,
+        true,
+      ),
+      note: '',
+    };
+  }
+  return { err: null, note: verdict.confirmed ? '' : UNCONFIRMED_NOTE };
+}
+
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // Android shared-storage root. list_files is confined here — resolve . / ..
@@ -557,52 +633,105 @@ async function callTool(userId, name, args = {}, ctx = {}) {
     }
 
     case 'tap': {
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'tap', x: args.x, y: args.y })) return offline();
-      return maybeScreenshot(userId, deviceId, textResult(`Tapped (${args.x}, ${args.y}).`), args.screenshot);
+      const r = await runControl(userId, deviceId, { type: 'control', action: 'tap', x: args.x, y: args.y });
+      if (r.err) return r.err;
+      return maybeScreenshot(userId, deviceId, textResult(`Tapped (${args.x}, ${args.y}).${r.note}`), args.screenshot);
     }
 
     case 'long_press': {
       const ms = clamp(args.ms ?? 700, 400, 3000);
       // A hold-in-place gesture: tiny 2px move over a long duration reads as a long press.
-      const ok = signaling.sendToPhone(userId, deviceId, {
+      const r = await runControl(userId, deviceId, {
         type: 'control', action: 'swipe',
         x1: args.x, y1: args.y, x2: clamp(args.x + 0.002, 0, 1), y2: clamp(args.y + 0.002, 0, 1), ms,
-      });
-      if (!ok) return offline();
-      return maybeScreenshot(userId, deviceId, textResult(`Long-pressed (${args.x}, ${args.y}) for ${ms}ms.`), args.screenshot);
+      }, ms + 5000); // the phone only acks once the hold finishes
+      if (r.err) return r.err;
+      return maybeScreenshot(userId, deviceId, textResult(`Long-pressed (${args.x}, ${args.y}) for ${ms}ms.${r.note}`), args.screenshot);
     }
 
     case 'swipe': {
-      const ok = signaling.sendToPhone(userId, deviceId, {
+      const r = await runControl(userId, deviceId, {
         type: 'control', action: 'swipe',
         x1: args.x1, y1: args.y1, x2: args.x2, y2: args.y2, ms: args.ms,
-      });
-      if (!ok) return offline();
-      return maybeScreenshot(userId, deviceId, textResult('Swipe sent.'), args.screenshot);
+      }, (args.ms || 300) + 5000);
+      if (r.err) return r.err;
+      return maybeScreenshot(userId, deviceId, textResult(`Swiped (${args.x1}, ${args.y1}) → (${args.x2}, ${args.y2}).${r.note}`), args.screenshot);
     }
 
     case 'scroll': {
       const g = scrollGesture(args.direction, args.amount);
       if (!g) return textResult('direction must be up, down, left, or right.', true);
-      const ok = signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'swipe', ...g, ms: 260 });
-      if (!ok) return offline();
-      return maybeScreenshot(userId, deviceId, textResult(`Scrolled ${args.direction}.`), args.screenshot);
+      const r = await runControl(userId, deviceId, { type: 'control', action: 'swipe', ...g, ms: 260 });
+      if (r.err) return r.err;
+      return maybeScreenshot(userId, deviceId, textResult(`Scrolled ${args.direction}.${r.note}`), args.screenshot);
     }
 
     case 'type_text': {
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'text', value: args.text })) return offline();
+      const r = await runControl(userId, deviceId, { type: 'control', action: 'text', value: args.text });
+      if (r.err) return r.err;
+      let submitted = '';
       if (args.submit) {
         await sleep(150);
-        signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'keyevent', keycode: 'KEYCODE_ENTER' });
+        const enter = await runControl(userId, deviceId, { type: 'control', action: 'keyevent', keycode: 'KEYCODE_ENTER' });
+        // The text landed even if Enter didn't — report the partial truth
+        // rather than failing the whole call.
+        submitted = enter.err ? ' (but Enter was not accepted — the text is typed but not submitted)' : ' and submitted';
       }
-      return maybeScreenshot(userId, deviceId, textResult(args.submit ? 'Text typed and submitted.' : 'Text typed.'), args.screenshot);
+      return maybeScreenshot(userId, deviceId, textResult(`Text typed${submitted}.${r.note}`), args.screenshot);
     }
 
     case 'press_key': {
       const keycode = KEY_MAP[args.key];
       if (!keycode) return textResult(`key must be one of: ${KEY_NAMES.join(', ')}.`, true);
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'keyevent', keycode })) return offline();
-      return maybeScreenshot(userId, deviceId, textResult(`Pressed ${args.key}.`), args.screenshot);
+      const r = await runControl(userId, deviceId, { type: 'control', action: 'keyevent', keycode });
+      if (r.err) return r.err;
+      return maybeScreenshot(userId, deviceId, textResult(`Pressed ${args.key}.${r.note}`), args.screenshot);
+    }
+
+    case 'get_device_status': {
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'device_status')) {
+        return textResult('This phone build is too old to report status — update the app.', true);
+      }
+      try {
+        const s = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'device_status', id }), 8000);
+        if (s.error) return textResult(`The phone could not read its status: ${s.error}`, true);
+        const status = {
+          battery: `${s.battery}%${s.charging ? ' (charging)' : ''}`,
+          screenOn: s.screenOn,
+          accessibilityEnabled: s.accessibilityEnabled,
+          foregroundApp: s.foregroundApp ?? 'unknown',
+          network: s.network,
+          screen: `${s.screenW}×${s.screenH}`,
+          model: s.model,
+          androidSdk: s.androidSdk,
+          batteryOptimized: s.batteryOptimized,
+        };
+        const warnings = [];
+        if (!s.accessibilityEnabled) warnings.push('Accessibility Service is OFF — taps, swipes and typing will silently do nothing until it is enabled at Settings → Accessibility → Phone Remote.');
+        if (!s.screenOn) warnings.push('The screen is off — screenshots will look blank. press_key "home" wakes it.');
+        if (s.batteryOptimized) warnings.push('Battery optimization is ON for this app — Android may throttle or kill the connection in the background. Exempt it in the app for a stable link.');
+        const result = textResult(status);
+        if (warnings.length) result.content.push({ type: 'text', text: warnings.join('\n') });
+        return result;
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+
+    case 'get_foreground_app': {
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'device_status')) {
+        return textResult('This phone build is too old to report the foreground app — update the app.', true);
+      }
+      try {
+        const s = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'device_status', id }), 8000);
+        if (!s.accessibilityEnabled) return textResult("Cannot tell: the phone's Accessibility Service is off. Enable it at Settings → Accessibility → Phone Remote.", true);
+        if (!s.foregroundApp) return textResult('No foreground app reported — the screen may be off or locked.', true);
+        return textResult(s.foregroundApp);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
     }
 
     case 'open_app': {
@@ -623,11 +752,13 @@ async function callTool(userId, name, args = {}, ctx = {}) {
     case 'open_app_drawer': {
       // Home first so the swipe reliably targets the launcher, then swipe up
       // from the very bottom to open the app drawer (where app search lives).
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'keyevent', keycode: 'KEYCODE_HOME' })) return offline();
+      const home = await runControl(userId, deviceId, { type: 'control', action: 'keyevent', keycode: 'KEYCODE_HOME' });
+      if (home.err) return home.err;
       await sleep(400);
-      signaling.sendToPhone(userId, deviceId, { type: 'control', action: 'swipe', x1: 0.5, y1: 0.92, x2: 0.5, y2: 0.25, ms: 250 });
+      const up = await runControl(userId, deviceId, { type: 'control', action: 'swipe', x1: 0.5, y1: 0.92, x2: 0.5, y2: 0.25, ms: 250 });
+      if (up.err) return up.err;
       const want = args.screenshot !== false; // defaults to true for this one
-      return maybeScreenshot(userId, deviceId, textResult('Opened the app drawer. Tap the search bar and type an app name to find it.'), want);
+      return maybeScreenshot(userId, deviceId, textResult(`Opened the app drawer. Tap the search bar and type an app name to find it.${up.note}`), want);
     }
 
     case 'wait': {
