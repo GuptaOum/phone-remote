@@ -431,7 +431,11 @@ class ConnectionForegroundService : Service() {
             return
         }
         try {
-            val (nodes, truncated) = svc.uiTree(json.optBoolean("all", false), screenW.toFloat(), screenH.toFloat())
+            val (nodes, truncated) = svc.uiTree(
+                json.optBoolean("all", false),
+                if (json.has("filter")) json.optString("filter") else null,
+                screenW.toFloat(), screenH.toFloat(),
+            )
             out.put("package", svc.foregroundPackage() ?: JSONObject.NULL)
             out.put("nodes", nodes)
             if (truncated) out.put("truncated", true)
