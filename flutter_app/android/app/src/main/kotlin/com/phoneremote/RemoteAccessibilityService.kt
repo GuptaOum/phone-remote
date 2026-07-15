@@ -44,6 +44,82 @@ class RemoteAccessibilityService : AccessibilityService() {
     /** Package name of whatever is on screen right now, or null if unknown. */
     fun foregroundPackage(): String? = rootInActiveWindow?.packageName?.toString()
 
+    // ── UI tree ───────────────────────────────────────────────────────────
+    // Android already describes the screen as a structured tree; reading it
+    // beats guessing coordinates off a screenshot. Each node carries its own
+    // normalized centre so the existing tap tool can act on it directly.
+
+    /** Payload guard — a pathological tree (long chat list) would otherwise
+     *  produce a huge frame. Truncation is reported to the caller. */
+    private val maxTreeNodes = 250
+
+    /**
+     * Flattens the visible accessibility tree.
+     * @param includeAll false = only nodes an agent can act on or read.
+     * @param sw/sh true screen size, passed in: the service's own
+     *   displayMetrics excludes the nav bar and would skew every centre.
+     * @return [nodes, truncated]
+     */
+    fun uiTree(includeAll: Boolean, sw: Float, sh: Float): Pair<org.json.JSONArray, Boolean> {
+        val arr = org.json.JSONArray()
+        val root = rootInActiveWindow ?: return Pair(arr, false)
+        if (sw <= 0f || sh <= 0f) return Pair(arr, false)
+        val truncated = walkNode(root, arr, includeAll, sw, sh)
+        return Pair(arr, truncated)
+    }
+
+    /** @return true if the node cap was hit and the walk stopped early. */
+    private fun walkNode(
+        node: android.view.accessibility.AccessibilityNodeInfo?,
+        arr: org.json.JSONArray,
+        includeAll: Boolean,
+        sw: Float,
+        sh: Float
+    ): Boolean {
+        if (node == null) return false
+        if (arr.length() >= maxTreeNodes) return true
+
+        val text = node.text?.toString()?.trim()
+        val desc = node.contentDescription?.toString()?.trim()
+        val vid = node.viewIdResourceName
+        // Layout containers carry no text and do nothing — including them would
+        // bury the handful of nodes that matter in structural noise.
+        val actionable = node.isClickable || node.isEditable || node.isCheckable || node.isScrollable
+        val readable = !text.isNullOrEmpty() || !desc.isNullOrEmpty()
+
+        if ((includeAll || actionable || readable) && node.isVisibleToUser) {
+            val r = android.graphics.Rect()
+            node.getBoundsInScreen(r)
+            if (r.width() > 0 && r.height() > 0) {
+                val o = JSONObject()
+                o.put("i", arr.length())
+                if (!text.isNullOrEmpty()) o.put("text", text.take(200))
+                if (!desc.isNullOrEmpty()) o.put("desc", desc.take(200))
+                if (!vid.isNullOrEmpty()) o.put("id", vid.substringAfter("id/", vid))
+                o.put("cls", node.className?.toString()?.substringAfterLast('.') ?: "")
+                o.put("x", round3(r.exactCenterX() / sw))
+                o.put("y", round3(r.exactCenterY() / sh))
+                // Compact flags: every byte here is repeated per node.
+                val f = StringBuilder()
+                if (node.isClickable) f.append('c')
+                if (node.isEditable) f.append('e')
+                if (node.isScrollable) f.append('s')
+                if (node.isCheckable) f.append('k')
+                if (node.isChecked) f.append('K')
+                if (node.isFocused) f.append('f')
+                if (!node.isEnabled) f.append('d')
+                if (f.isNotEmpty()) o.put("f", f.toString())
+                arr.put(o)
+            }
+        }
+        for (i in 0 until node.childCount) {
+            if (walkNode(node.getChild(i), arr, includeAll, sw, sh)) return true
+        }
+        return false
+    }
+
+    private fun round3(v: Float): Double = Math.round(v * 1000.0) / 1000.0
+
     /**
      * Dispatches a gesture and reports whether the system actually ran it.
      * Android can refuse a gesture outright (dispatchGesture returns false) or

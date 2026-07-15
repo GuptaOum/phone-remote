@@ -201,7 +201,10 @@ class ConnectionForegroundService : Service() {
                                     // Tells the server this build confirms control
                                     // commands and can report device status. Older
                                     // builds omit it and keep the fire-and-forget path.
-                                    put("caps", org.json.JSONArray(listOf("control_ack", "device_status")))
+                                    put("caps", org.json.JSONArray(listOf(
+                                        "control_ack", "device_status", "ui_tree",
+                                        "list_apps", "open_url", "notifications",
+                                    )))
                                 }
                                 webSocket.send(reg.toString())
                                 startLocationUpdates()
@@ -256,6 +259,22 @@ class ConnectionForegroundService : Service() {
                             }
                             "device_status" -> {
                                 handleDeviceStatus(json)
+                                return@post
+                            }
+                            "ui_tree" -> {
+                                handleUiTree(json)
+                                return@post
+                            }
+                            "list_apps" -> {
+                                handleListApps(json)
+                                return@post
+                            }
+                            "open_url" -> {
+                                handleOpenUrl(json)
+                                return@post
+                            }
+                            "notifications" -> {
+                                handleNotifications(json)
                                 return@post
                             }
                         }
@@ -369,6 +388,60 @@ class ConnectionForegroundService : Service() {
     }
 
     /**
+     * Reads notifications — active ones plus a short history, since the useful
+     * ones (an OTP) are often gone by the time an agent asks.
+     */
+    private fun handleNotifications(json: JSONObject) {
+        val id = json.optString("id")
+        if (id.isEmpty()) return
+        val out = JSONObject().apply { put("type", "notifications_result"); put("id", id) }
+        try {
+            if (!NotificationService.isGranted(this)) {
+                out.put("error", "notification_access_not_granted")
+            } else {
+                val svc = NotificationService.instance
+                // Granted but unbound happens briefly after the grant, or if the
+                // system hasn't rebound us yet — history still has what we saw.
+                out.put("active", svc?.active() ?: org.json.JSONArray())
+                out.put("recent", NotificationService.snapshot())
+                if (svc == null) out.put("note", "listener_not_bound")
+            }
+        } catch (e: Exception) {
+            out.put("error", e.message ?: "notifications_failed")
+        }
+        try { ws?.send(out.toString()) } catch (_: Exception) {}
+    }
+
+    /**
+     * Reads the screen as structured data instead of pixels. Runs on the main
+     * thread: AccessibilityNodeInfo must be touched from the thread that owns
+     * the service, and onMessage already posts here.
+     */
+    private fun handleUiTree(json: JSONObject) {
+        val id = json.optString("id")
+        if (id.isEmpty()) return
+        val out = JSONObject().apply {
+            put("type", "ui_tree_result")
+            put("id", id)
+        }
+        val svc = RemoteAccessibilityService.instance
+        if (svc == null) {
+            out.put("error", "accessibility_not_enabled")
+            try { ws?.send(out.toString()) } catch (_: Exception) {}
+            return
+        }
+        try {
+            val (nodes, truncated) = svc.uiTree(json.optBoolean("all", false), screenW.toFloat(), screenH.toFloat())
+            out.put("package", svc.foregroundPackage() ?: JSONObject.NULL)
+            out.put("nodes", nodes)
+            if (truncated) out.put("truncated", true)
+        } catch (e: Exception) {
+            out.put("error", e.message ?: "ui_tree_failed")
+        }
+        try { ws?.send(out.toString()) } catch (_: Exception) {}
+    }
+
+    /**
      * Snapshot of what an agent needs to know before it acts: whether touch
      * injection will work at all, whether anyone can see the screen, and how
      * much battery/connectivity is left to work with. Answers "why did my tap
@@ -391,6 +464,7 @@ class ConnectionForegroundService : Service() {
 
             // The single most useful field: touch/type silently no-op without this.
             o.put("accessibilityEnabled", RemoteAccessibilityService.instance != null)
+            o.put("notificationAccess", NotificationService.isGranted(this))
             o.put("foregroundApp", RemoteAccessibilityService.instance?.foregroundPackage() ?: JSONObject.NULL)
 
             val cm = getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
@@ -715,6 +789,79 @@ class ConnectionForegroundService : Service() {
         }
         // Downloads stream for a while — keep them off the ordered worker.
         if (json.optString("type") == "pf_download") Thread(work).start() else pfExecutor.execute(work)
+    }
+
+    // Everything the launcher would show. Lets an agent discover what's
+    // actually installed instead of guessing package names at open_app.
+    private fun handleListApps(json: JSONObject) {
+        val id = json.optString("id")
+        if (id.isEmpty()) return
+        Thread {
+            val out = JSONObject().apply { put("type", "list_apps_result"); put("id", id) }
+            try {
+                val pm = packageManager
+                val mainIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                val apps = pm.queryIntentActivities(mainIntent, 0)
+                    .mapNotNull { ri ->
+                        val lbl = ri.loadLabel(pm)?.toString() ?: return@mapNotNull null
+                        Pair(lbl, ri.activityInfo.packageName)
+                    }
+                    .distinctBy { it.second }
+                    .sortedBy { it.first.lowercase() }
+                val arr = org.json.JSONArray()
+                apps.forEach { (lbl, pkg) ->
+                    arr.put(JSONObject().apply { put("name", lbl); put("package", pkg) })
+                }
+                out.put("apps", arr)
+            } catch (e: Exception) {
+                out.put("error", e.message ?: "list_apps_failed")
+            }
+            send(out.toString())
+        }.start()
+    }
+
+    // Schemes that would let a caller reach into this app's own files or
+    // fabricate an arbitrary component target. Everything else (https, tel,
+    // mailto, geo, and app deep links like whatsapp://) is fair game.
+    private val blockedUrlSchemes = setOf("file", "content", "intent", "javascript", "data", "android-app")
+
+    /**
+     * Opens a URL or app deep link. Often lets an agent skip the UI entirely —
+     * jumping straight to a chat or a settings page beats tapping through
+     * several screens and can't mis-tap.
+     */
+    private fun handleOpenUrl(json: JSONObject) {
+        val id = json.optString("id")
+        val url = json.optString("url").trim()
+        val fail = { msg: String ->
+            send(JSONObject().apply {
+                put("type", "open_url_result"); put("id", id); put("ok", false); put("error", msg)
+            }.toString())
+        }
+        try {
+            val uri = android.net.Uri.parse(url)
+            val scheme = uri.scheme?.lowercase()
+            if (scheme.isNullOrEmpty()) { fail("URL has no scheme (try https://…)"); return }
+            if (scheme in blockedUrlSchemes) { fail("Scheme \"$scheme\" is not allowed"); return }
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            if (packageManager.resolveActivity(intent, 0) == null) {
+                fail("No installed app can open \"$scheme\" links")
+                return
+            }
+            // Same rationale as handleOpenApp: the accessibility service context
+            // is exempt from Android 10+ background activity-start limits.
+            val ctx: Context = RemoteAccessibilityService.instance ?: this
+            handler.post {
+                try { ctx.startActivity(intent) } catch (_: Exception) {
+                    try { startActivity(intent) } catch (_: Exception) {}
+                }
+            }
+            send(JSONObject().apply {
+                put("type", "open_url_result"); put("id", id); put("ok", true); put("url", url)
+            }.toString())
+        } catch (e: Exception) {
+            fail(e.message ?: "Could not open the URL")
+        }
     }
 
     // Launch an app by fuzzy label match (e.g. "youtube") or exact package name.

@@ -30,7 +30,7 @@ const signaling = require('../services/signaling');
  */
 
 const PROTOCOL_VERSION = '2025-06-18';
-const SERVER_VERSION = '1.6.0';
+const SERVER_VERSION = '1.8.0';
 
 // send_file: JSON body limit is 25 MB (index.js) and base64 inflates ~4/3,
 // so cap the decoded payload safely below that.
@@ -121,6 +121,73 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: { deviceId: { type: 'string', description: 'Device id from list_devices' } },
+      required: ['deviceId'],
+    },
+  },
+  {
+    name: 'get_ui_tree',
+    description: 'Read the screen as structured data instead of an image: every visible text, button and input field, with the normalized x/y you can pass straight to tap. PREFER THIS OVER take_screenshot for finding and acting on things — it is far cheaper, has no capture throttle, and gives exact coordinates instead of estimates from pixels. Use take_screenshot only when you need to see something genuinely visual (an image, a layout problem, a CAPTCHA). Each node has: i (index), text, desc (accessibility label), id (resource id), cls (widget class), x/y (normalized centre — pass to tap), f (flags: c=clickable, e=editable/text field, s=scrollable, k=checkable, K=checked, f=focused, d=disabled).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string', description: 'Device id from list_devices' },
+        all: { type: 'boolean', description: 'Include layout containers with no text or action (default false). Leave false unless the tree looks incomplete — it adds a lot of noise.' },
+      },
+      required: ['deviceId'],
+    },
+  },
+  {
+    name: 'wait_for',
+    description: 'Wait until something appears on screen, then return. Polls the UI tree, so it returns the moment the condition is met instead of guessing a sleep duration like wait does. Use after any action that triggers loading, navigation or an animation. Give exactly one of text, id, or app.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string', description: 'Device id from list_devices' },
+        text: { type: 'string', description: 'Wait until this text (or accessibility label) appears — case-insensitive substring match' },
+        id: { type: 'string', description: 'Wait until a view with this resource id appears, e.g. "send_button"' },
+        app: { type: 'string', description: 'Wait until this package is in the foreground, e.g. "com.whatsapp"' },
+        gone: { type: 'boolean', description: 'Invert: wait until the thing DISAPPEARS instead (e.g. a loading spinner). Default false.' },
+        timeout: { type: 'number', description: 'Seconds to wait before giving up (default 10, max 60)' },
+        screenshot: { type: 'boolean', description: 'If true, return a screenshot once the condition is met (default false)' },
+      },
+      required: ['deviceId'],
+    },
+  },
+  {
+    name: 'list_apps',
+    description: 'List every app installed on the phone, with display name and package name. Use this when you are unsure what an app is called or whether it is installed, rather than guessing a package name at open_app.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string', description: 'Device id from list_devices' },
+        filter: { type: 'string', description: 'Optional case-insensitive substring to match against the name or package' },
+      },
+      required: ['deviceId'],
+    },
+  },
+  {
+    name: 'open_url',
+    description: 'Open a URL or app deep link on the phone (https://…, tel:, mailto:, geo:, or an app scheme like whatsapp://). Often the most reliable way to get somewhere: a deep link jumps straight to the target screen instead of tapping through several, so it cannot mis-tap. Prefer it over open_app + navigation when a link for the destination exists.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string', description: 'Device id from list_devices' },
+        url: { type: 'string', description: 'The URL or deep link to open' },
+        screenshot: { type: 'boolean', description: 'If true, return a screenshot after opening (default true)' },
+      },
+      required: ['deviceId', 'url'],
+    },
+  },
+  {
+    name: 'read_notifications',
+    description: 'Read the phone\'s notifications — currently showing ones plus a short history of recent ones. This is how you get an OTP / 2FA code, a delivery confirmation, or an incoming message. Requires a separate one-time user grant on the phone (Settings → Notifications → Device & app notifications → Phone Remote), which is NOT the same as the Accessibility grant.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deviceId: { type: 'string', description: 'Device id from list_devices' },
+        filter: { type: 'string', description: 'Optional case-insensitive substring to match against the package, title or body — e.g. "whatsapp" or "code"' },
+        limit: { type: 'number', description: 'Max notifications to return (default 20)' },
+      },
       required: ['deviceId'],
     },
   },
@@ -480,6 +547,26 @@ async function runControl(userId, deviceId, msg, timeoutMs) {
   return { err: null, note: verdict.confirmed ? '' : UNCONFIRMED_NOTE };
 }
 
+// How often wait_for re-reads the tree. A tree read is cheap (text, no capture
+// throttle), so this can be far tighter than a screenshot poll would allow.
+const WAIT_POLL_MS = 600;
+
+/** Read the phone's accessibility tree. Shared by get_ui_tree and wait_for. */
+function fetchUiTree(userId, deviceId, all = false, timeoutMs = 10000) {
+  return signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'ui_tree', id, all: !!all }), timeoutMs);
+}
+
+/** Does this tree satisfy the caller's condition? Exactly one of text/id/app. */
+function treeMatches(tree, { text, id, app }) {
+  if (app) return String(tree.package || '').toLowerCase().includes(app.toLowerCase());
+  const nodes = tree.nodes || [];
+  if (id) return nodes.some((n) => String(n.id || '').toLowerCase().includes(id.toLowerCase()));
+  const needle = String(text).toLowerCase();
+  // Match the accessibility label too — plenty of buttons are icon-only and
+  // carry their name in contentDescription rather than text.
+  return nodes.some((n) => `${n.text || ''} ${n.desc || ''}`.toLowerCase().includes(needle));
+}
+
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // Android shared-storage root. list_files is confined here — resolve . / ..
@@ -621,6 +708,147 @@ async function callTool(userId, name, args = {}, ctx = {}) {
       return textResult({ lat: loc.lat, lng: loc.lng, accuracy: loc.accuracy, altitude: loc.altitude, at: new Date(loc.timestamp).toISOString() });
     }
 
+    case 'get_ui_tree': {
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'ui_tree')) {
+        return textResult('This phone build cannot read the UI tree — update the app.', true);
+      }
+      try {
+        const t = await fetchUiTree(userId, deviceId, args.all);
+        if (t.error) return textResult(CONTROL_ERRORS[t.error] || t.error, true);
+        const nodes = t.nodes || [];
+        if (!nodes.length) {
+          return textResult('The screen reported no readable elements. It is probably off or locked, or showing content that blocks accessibility. Try press_key "home", or take_screenshot to look.', true);
+        }
+        const out = { app: t.package, nodes };
+        if (t.truncated) out.note = `Truncated: only the first ${nodes.length} elements are listed. Scroll or narrow the screen to see the rest.`;
+        return textResult(out);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+
+    case 'wait_for': {
+      const given = ['text', 'id', 'app'].filter((k) => args[k]);
+      if (given.length !== 1) return textResult('Give exactly one of text, id, or app.', true);
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'ui_tree')) {
+        return textResult('This phone build cannot wait on screen state — update the app. (The dumb wait tool still works.)', true);
+      }
+      const timeoutMs = clamp(args.timeout ?? 10, 1, 60) * 1000;
+      const want = !args.gone; // false => wait for it to disappear
+      const what = args.text ? `"${args.text}"` : args.id ? `id "${args.id}"` : `app ${args.app}`;
+      const started = Date.now();
+      let last = null;
+      while (Date.now() - started < timeoutMs) {
+        try {
+          const t = await fetchUiTree(userId, deviceId, false, 8000);
+          // A hard error (accessibility off) will never resolve itself — fail
+          // now rather than burning the whole timeout on it.
+          if (t.error) return textResult(CONTROL_ERRORS[t.error] || t.error, true);
+          last = t;
+          if (treeMatches(t, args) === want) {
+            const secs = ((Date.now() - started) / 1000).toFixed(1);
+            return maybeScreenshot(
+              userId, deviceId,
+              textResult(`${what} ${want ? 'appeared' : 'disappeared'} after ${secs}s.`),
+              args.screenshot,
+            );
+          }
+        } catch (_) {
+          // Transient: the phone can miss a poll mid-transition. Keep trying
+          // until the deadline rather than failing the whole wait.
+        }
+        await sleep(WAIT_POLL_MS);
+      }
+      // Say what IS on screen — a bare timeout leaves the model guessing.
+      const seen = (last?.nodes || []).map((n) => n.text || n.desc).filter(Boolean).slice(0, 8);
+      const hint = last
+        ? ` Currently in ${last.package || 'an unknown app'}; visible: ${seen.length ? seen.join(' | ') : '(nothing readable)'}.`
+        : ' The phone never returned a readable screen.';
+      return textResult(`Timed out after ${timeoutMs / 1000}s waiting for ${what} to ${want ? 'appear' : 'disappear'}.${hint}`, true);
+    }
+
+    case 'list_apps': {
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'list_apps')) {
+        return textResult('This phone build cannot list apps — update the app.', true);
+      }
+      try {
+        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'list_apps', id }), 15000);
+        if (r.error) return textResult(`The phone could not list apps: ${r.error}`, true);
+        let apps = r.apps || [];
+        if (args.filter) {
+          const f = String(args.filter).toLowerCase();
+          apps = apps.filter((a) => `${a.name} ${a.package}`.toLowerCase().includes(f));
+          if (!apps.length) return textResult(`No installed app matches "${args.filter}".`, true);
+        }
+        return textResult(apps);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+
+    case 'open_url': {
+      if (!args.url) return textResult('A url is required.', true);
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'open_url')) {
+        return textResult('This phone build cannot open URLs — update the app.', true);
+      }
+      try {
+        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'open_url', id, url: args.url }), 12000);
+        if (!r.ok) return textResult(r.error || 'Could not open the URL.', true);
+        return maybeScreenshot(userId, deviceId, textResult(`Opened ${args.url}`), args.screenshot !== false);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+
+    case 'read_notifications': {
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'notifications')) {
+        return textResult('This phone build cannot read notifications — update the app.', true);
+      }
+      try {
+        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'notifications', id }), 12000);
+        if (r.error === 'notification_access_not_granted') {
+          return textResult('Notification access has not been granted on the phone. Grant it at Settings → Notifications → Device & app notifications → Phone Remote → Allow notification access. This is a separate permission from the Accessibility Service.', true);
+        }
+        if (r.error) return textResult(`The phone could not read notifications: ${r.error}`, true);
+        // Merge active + recent, newest first, de-duped: an active notification
+        // is usually also in history, and the model shouldn't see it twice.
+        const seen = new Set();
+        const all = [...(r.active || []).map((n) => ({ ...n, active: true })), ...(r.recent || [])]
+          .sort((a, b) => (b.postedAt || 0) - (a.postedAt || 0))
+          .filter((n) => {
+            const k = `${n.package}|${n.title}|${n.text}|${n.postedAt}`;
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+          });
+        let list = all;
+        if (args.filter) {
+          const f = String(args.filter).toLowerCase();
+          list = list.filter((n) => `${n.package} ${n.title || ''} ${n.text || ''}`.toLowerCase().includes(f));
+        }
+        list = list.slice(0, clamp(args.limit ?? 20, 1, 50));
+        if (!list.length) {
+          return textResult(args.filter
+            ? `No notifications match "${args.filter}". (${all.length} total seen.)`
+            : 'No notifications. Note that history only covers what arrived while the app was running.');
+        }
+        return textResult(list.map((n) => ({
+          app: n.package,
+          title: n.title,
+          text: n.text,
+          at: n.postedAt ? new Date(n.postedAt).toISOString() : undefined,
+          showing: !!n.active,
+        })));
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+
     case 'take_screenshot': {
       try {
         const { jpeg, note } = await captureVerifiedScreenshot(userId, deviceId);
@@ -700,6 +928,7 @@ async function callTool(userId, name, args = {}, ctx = {}) {
           battery: `${s.battery}%${s.charging ? ' (charging)' : ''}`,
           screenOn: s.screenOn,
           accessibilityEnabled: s.accessibilityEnabled,
+          notificationAccess: s.notificationAccess,
           foregroundApp: s.foregroundApp ?? 'unknown',
           network: s.network,
           screen: `${s.screenW}×${s.screenH}`,
