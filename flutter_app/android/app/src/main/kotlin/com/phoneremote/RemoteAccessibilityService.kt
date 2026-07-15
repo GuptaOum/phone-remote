@@ -8,6 +8,8 @@ import android.os.Build
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import androidx.annotation.RequiresApi
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
@@ -60,8 +62,8 @@ class RemoteAccessibilityService : AccessibilityService() {
      *   displayMetrics excludes the nav bar and would skew every centre.
      * @return [nodes, truncated]
      */
-    fun uiTree(includeAll: Boolean, sw: Float, sh: Float): Pair<org.json.JSONArray, Boolean> {
-        val arr = org.json.JSONArray()
+    fun uiTree(includeAll: Boolean, sw: Float, sh: Float): Pair<JSONArray, Boolean> {
+        val arr = JSONArray()
         val root = rootInActiveWindow ?: return Pair(arr, false)
         if (sw <= 0f || sh <= 0f) return Pair(arr, false)
         val truncated = walkNode(root, arr, includeAll, sw, sh)
@@ -71,7 +73,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     /** @return true if the node cap was hit and the walk stopped early. */
     private fun walkNode(
         node: android.view.accessibility.AccessibilityNodeInfo?,
-        arr: org.json.JSONArray,
+        arr: JSONArray,
         includeAll: Boolean,
         sw: Float,
         sh: Float
