@@ -41,29 +41,58 @@ class RemoteAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
 
+    /** Package name of whatever is on screen right now, or null if unknown. */
+    fun foregroundPackage(): String? = rootInActiveWindow?.packageName?.toString()
+
+    /**
+     * Dispatches a gesture and reports whether the system actually ran it.
+     * Android can refuse a gesture outright (dispatchGesture returns false) or
+     * cancel it mid-flight — both are silent failures unless we listen, which
+     * is how a tap that never landed used to still be reported as a success.
+     */
+    private fun dispatchGestureWithResult(
+        gesture: GestureDescription,
+        onResult: ((Boolean) -> Unit)?
+    ) {
+        if (onResult == null) {
+            dispatchGesture(gesture, null, null)
+            return
+        }
+        var reported = false
+        val report = { ok: Boolean -> if (!reported) { reported = true; onResult(ok) } }
+        val cb = object : AccessibilityService.GestureResultCallback() {
+            override fun onCompleted(d: GestureDescription?) { report(true) }
+            override fun onCancelled(d: GestureDescription?) { report(false) }
+        }
+        // A false return means the gesture was never queued, so neither
+        // callback will ever fire — report the failure here or the caller hangs.
+        if (!dispatchGesture(gesture, cb, null)) report(false)
+    }
+
     // ── Tap ──────────────────────────────────────────────────────────────
-    fun tap(x: Float, y: Float) {
+    fun tap(x: Float, y: Float, onResult: ((Boolean) -> Unit)? = null) {
         val path = Path().apply { moveTo(x, y) }
         val stroke = GestureDescription.StrokeDescription(path, 0, 50)
-        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        dispatchGestureWithResult(GestureDescription.Builder().addStroke(stroke).build(), onResult)
     }
 
     // ── Swipe ─────────────────────────────────────────────────────────────
-    fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long) {
+    fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long, onResult: ((Boolean) -> Unit)? = null) {
         val path = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
         val stroke = GestureDescription.StrokeDescription(path, 0, durationMs.coerceAtLeast(50))
-        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        dispatchGestureWithResult(GestureDescription.Builder().addStroke(stroke).build(), onResult)
     }
 
     // ── Scroll ────────────────────────────────────────────────────────────
-    fun scroll(x: Float, y: Float, deltaY: Float) {
+    fun scroll(x: Float, y: Float, deltaY: Float, onResult: ((Boolean) -> Unit)? = null) {
         val dist = (deltaY * 600).coerceIn(-800f, 800f)
-        swipe(x, y, x, y - dist, 200)
+        swipe(x, y, x, y - dist, 200, onResult)
     }
 
     // ── System keys ───────────────────────────────────────────────────────
-    fun pressKey(keycode: String) {
-        when (keycode) {
+    /** @return true only if the key actually took effect. */
+    fun pressKey(keycode: String): Boolean {
+        return when (keycode) {
             "KEYCODE_BACK"       -> performGlobalAction(GLOBAL_ACTION_BACK)
             "KEYCODE_HOME"       -> performGlobalAction(GLOBAL_ACTION_HOME)
             "KEYCODE_APP_SWITCH" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
@@ -75,6 +104,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                     android.media.AudioManager.ADJUST_RAISE,
                     android.media.AudioManager.FLAG_SHOW_UI
                 )
+                true
             }
             "KEYCODE_VOLUME_DOWN" -> {
                 val audio = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
@@ -83,12 +113,13 @@ class RemoteAccessibilityService : AccessibilityService() {
                     android.media.AudioManager.ADJUST_LOWER,
                     android.media.AudioManager.FLAG_SHOW_UI
                 )
+                true
             }
             "KEYCODE_NOTIFICATION"   -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
             "KEYCODE_QUICK_SETTINGS" -> performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
             "KEYCODE_DPAD_LEFT", "KEYCODE_DPAD_RIGHT" -> {
                 val focused = rootInActiveWindow?.findFocus(
-                    android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return
+                    android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
                 val cur = focused.text?.toString() ?: ""
                 val sel = if (keycode == "KEYCODE_DPAD_LEFT")
                     focused.textSelectionStart.let { if (it < 0) cur.length else it.coerceAtMost(cur.length) }
@@ -105,7 +136,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             }
             "KEYCODE_DPAD_UP", "KEYCODE_DPAD_DOWN" -> {
                 val focused = rootInActiveWindow?.findFocus(
-                    android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return
+                    android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
                 val args = Bundle()
                 args.putInt(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT,
                     android.view.accessibility.AccessibilityNodeInfo.MOVEMENT_GRANULARITY_LINE)
@@ -129,12 +160,14 @@ class RemoteAccessibilityService : AccessibilityService() {
             "KEYCODE_ENTER" -> editFocusedText { cur, selStart, selEnd ->
                 Pair(cur.substring(0, selStart) + "\n" + cur.substring(selEnd), selStart + 1)
             }
+            else -> false
         }
     }
 
-    private fun editFocusedText(transform: (String, Int, Int) -> Pair<String, Int>) {
+    /** @return true only if a focused text field accepted the edit. */
+    private fun editFocusedText(transform: (String, Int, Int) -> Pair<String, Int>): Boolean {
         val focused = rootInActiveWindow?.findFocus(
-            android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return
+            android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
         val showingHint = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
             focused.isShowingHintText
         val cur = if (showingHint) "" else (focused.text?.toString() ?: "")
@@ -145,19 +178,22 @@ class RemoteAccessibilityService : AccessibilityService() {
         textArgs.putCharSequence(
             android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
             newText)
-        focused.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, textArgs)
+        val ok = focused.performAction(
+            android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, textArgs)
         val selArgs = Bundle()
         selArgs.putInt(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, newCursor)
         selArgs.putInt(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, newCursor)
+        // Cursor placement is cosmetic — the edit itself is what succeeded or not.
         focused.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_SELECTION, selArgs)
+        return ok
     }
 
     // ── Type text ─────────────────────────────────────────────────────────
-    fun typeText(text: String) {
+    /** @return true only if a focused text field accepted the text. */
+    fun typeText(text: String): Boolean =
         editFocusedText { cur, selStart, selEnd ->
             Pair(cur.substring(0, selStart) + text + cur.substring(selEnd), selStart + text.length)
         }
-    }
 
     // ── Screenshot via AccessibilityService (API 30+, no MediaProjection needed) ──
     @RequiresApi(Build.VERSION_CODES.S)

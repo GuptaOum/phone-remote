@@ -198,6 +198,10 @@ class ConnectionForegroundService : Service() {
                                     put("screenW", screenW)
                                     put("screenH", screenH)
                                     put("model", model)
+                                    // Tells the server this build confirms control
+                                    // commands and can report device status. Older
+                                    // builds omit it and keep the fire-and-forget path.
+                                    put("caps", org.json.JSONArray(listOf("control_ack", "device_status")))
                                 }
                                 webSocket.send(reg.toString())
                                 startLocationUpdates()
@@ -248,6 +252,10 @@ class ConnectionForegroundService : Service() {
                             }
                             "open_app" -> {
                                 handleOpenApp(json)
+                                return@post
+                            }
+                            "device_status" -> {
+                                handleDeviceStatus(json)
                                 return@post
                             }
                         }
@@ -360,35 +368,126 @@ class ConnectionForegroundService : Service() {
         locationManager = null
     }
 
-    private fun handleControl(json: JSONObject) {
-        val svc = RemoteAccessibilityService.instance ?: return
-        val w = screenW.toFloat().takeIf { it > 0 } ?: return
-        val h = screenH.toFloat().takeIf { it > 0 } ?: return
+    /**
+     * Snapshot of what an agent needs to know before it acts: whether touch
+     * injection will work at all, whether anyone can see the screen, and how
+     * much battery/connectivity is left to work with. Answers "why did my tap
+     * do nothing" up front instead of after a failed screenshot round-trip.
+     */
+    private fun handleDeviceStatus(json: JSONObject) {
+        val id = json.optString("id")
+        if (id.isEmpty()) return
+        val o = JSONObject().apply {
+            put("type", "device_status_result")
+            put("id", id)
+        }
         try {
-            when (json.optString("action")) {
+            val bm = getSystemService(BATTERY_SERVICE) as android.os.BatteryManager
+            o.put("battery", bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY))
+            o.put("charging", bm.isCharging)
+
+            val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+            o.put("screenOn", pm.isInteractive)
+
+            // The single most useful field: touch/type silently no-op without this.
+            o.put("accessibilityEnabled", RemoteAccessibilityService.instance != null)
+            o.put("foregroundApp", RemoteAccessibilityService.instance?.foregroundPackage() ?: JSONObject.NULL)
+
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+            o.put("network", when {
+                caps == null -> "none"
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+                else -> "other"
+            })
+
+            o.put("screenW", screenW)
+            o.put("screenH", screenH)
+            o.put("model", model)
+            o.put("androidSdk", android.os.Build.VERSION.SDK_INT)
+
+            // Doze exemption: when false, the OS may throttle this service's
+            // socket in the background — the usual cause of a silent offline.
+            val powerMgr = getSystemService(POWER_SERVICE) as android.os.PowerManager
+            o.put("batteryOptimized", !powerMgr.isIgnoringBatteryOptimizations(packageName))
+        } catch (e: Exception) {
+            o.put("error", e.message ?: "status_failed")
+        }
+        try { ws?.send(o.toString()) } catch (_: Exception) {}
+    }
+
+    /**
+     * Reports the outcome of a control command back to the server, which is
+     * waiting on this exact id. Silent on commands sent without an id (the
+     * browser dashboard doesn't correlate) so old senders are unaffected.
+     */
+    private fun controlAck(id: String, action: String, ok: Boolean, error: String? = null) {
+        if (id.isEmpty()) return
+        val o = JSONObject().apply {
+            put("type", "control_ack")
+            put("id", id)
+            put("action", action)
+            put("ok", ok)
+            if (!ok && error != null) put("error", error)
+        }
+        try { ws?.send(o.toString()) } catch (_: Exception) {}
+    }
+
+    private fun handleControl(json: JSONObject) {
+        val id = json.optString("id")
+        val action = json.optString("action")
+        // Every early return below used to be a silent no-op: the command
+        // vanished and the caller was still told it succeeded. Each one now
+        // reports why nothing happened.
+        val svc = RemoteAccessibilityService.instance
+        if (svc == null) {
+            controlAck(id, action, false, "accessibility_not_enabled")
+            return
+        }
+        val w = screenW.toFloat()
+        val h = screenH.toFloat()
+        if (w <= 0f || h <= 0f) {
+            controlAck(id, action, false, "screen_size_unknown")
+            return
+        }
+        val gestureAck = { ok: Boolean ->
+            controlAck(id, action, ok, "gesture_rejected_by_system")
+        }
+        try {
+            when (action) {
                 "tap"      -> svc.tap(
                     (json.getDouble("x") * w).toFloat(),
-                    (json.getDouble("y") * h).toFloat()
+                    (json.getDouble("y") * h).toFloat(),
+                    gestureAck
                 )
                 "swipe"    -> svc.swipe(
                     (json.getDouble("x1") * w).toFloat(),
                     (json.getDouble("y1") * h).toFloat(),
                     (json.getDouble("x2") * w).toFloat(),
                     (json.getDouble("y2") * h).toFloat(),
-                    json.optInt("ms", 300).toLong()
+                    json.optInt("ms", 300).toLong(),
+                    gestureAck
                 )
                 "scroll"   -> svc.scroll(
                     (json.getDouble("x") * w).toFloat(),
                     (json.getDouble("y") * h).toFloat(),
-                    (json.getDouble("dy") * h).toFloat()
+                    (json.getDouble("dy") * h).toFloat(),
+                    gestureAck
                 )
-                "keyevent" -> svc.pressKey(json.optString("keycode", "KEYCODE_BACK"))
-                "text"     -> svc.typeText(json.optString("value", ""))
-                "back"     -> svc.pressKey("KEYCODE_BACK")
-                "home"     -> svc.pressKey("KEYCODE_HOME")
-                "recents"  -> svc.pressKey("KEYCODE_APP_SWITCH")
+                "keyevent" -> controlAck(id, action,
+                    svc.pressKey(json.optString("keycode", "KEYCODE_BACK")), "key_not_accepted")
+                "text"     -> controlAck(id, action,
+                    svc.typeText(json.optString("value", "")), "no_focused_text_field")
+                "back"     -> controlAck(id, action, svc.pressKey("KEYCODE_BACK"), "key_not_accepted")
+                "home"     -> controlAck(id, action, svc.pressKey("KEYCODE_HOME"), "key_not_accepted")
+                "recents"  -> controlAck(id, action, svc.pressKey("KEYCODE_APP_SWITCH"), "key_not_accepted")
+                else       -> controlAck(id, action, false, "unknown_action")
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            controlAck(id, action, false, e.message ?: "exception")
+        }
     }
 
     // Android shared-storage root. All phone-file operations are confined here —
