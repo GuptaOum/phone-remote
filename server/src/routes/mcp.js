@@ -30,7 +30,7 @@ const signaling = require('../services/signaling');
  */
 
 const PROTOCOL_VERSION = '2025-06-18';
-const SERVER_VERSION = '1.8.0';
+const SERVER_VERSION = '1.9.0';
 
 // send_file: JSON body limit is 25 MB (index.js) and base64 inflates ~4/3,
 // so cap the decoded payload safely below that.
@@ -262,12 +262,17 @@ const TOOLS = [
   },
   {
     name: 'type_text',
-    description: 'Type text into the currently focused input field (tap the field first). Set submit:true to press Enter after typing — use this to run a search once the query is typed.',
+    description: 'Type text into the currently focused input field (tap the field first). Set submit:true to press Enter after typing — use this to run a search once the query is typed. IF TYPING REPORTS SUCCESS BUT THE TEXT DOES NOT APPEAR (WhatsApp and some other apps ignore the standard method), retry with method:"paste".',
     inputSchema: {
       type: 'object',
       properties: {
         deviceId: { type: 'string' },
         text: { type: 'string' },
+        method: {
+          type: 'string',
+          enum: ['set', 'paste'],
+          description: 'How to enter the text. "set" (default) writes it directly. "paste" puts it on the phone\'s clipboard and pastes it — slower and it overwrites the clipboard, but it works in apps that ignore the direct method. Use "paste" as the fallback when "set" appears to do nothing.',
+        },
         submit: { type: 'boolean', description: 'Press Enter after typing, e.g. to execute a search (default false)' },
         screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default false)' },
       },
@@ -501,6 +506,8 @@ const CONTROL_ERRORS = {
   screen_size_unknown:
     'The phone has not reported its screen size yet, so the coordinates could not be resolved. Wait a second and retry.',
   key_not_accepted: 'The phone did not accept that key press.',
+  paste_rejected:
+    'The focused field refused the paste. Make sure a text field is focused (tap it first). If it is, the app may block pasting — try type_text without method:"paste".',
   unknown_action: 'The phone did not recognise that command — its app build is likely older than this server.',
 };
 
@@ -895,7 +902,13 @@ async function callTool(userId, name, args = {}, ctx = {}) {
     }
 
     case 'type_text': {
-      const r = await runControl(userId, deviceId, { type: 'control', action: 'text', value: args.text });
+      const paste = args.method === 'paste';
+      if (paste && !signaling.deviceSupports(userId, deviceId, 'paste')) {
+        return textResult('This phone build does not support paste-typing — update the app, or call type_text without method:"paste".', true);
+      }
+      const r = await runControl(userId, deviceId, {
+        type: 'control', action: paste ? 'paste' : 'text', value: args.text,
+      });
       if (r.err) return r.err;
       let submitted = '';
       if (args.submit) {
@@ -905,7 +918,7 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         // rather than failing the whole call.
         submitted = enter.err ? ' (but Enter was not accepted — the text is typed but not submitted)' : ' and submitted';
       }
-      return maybeScreenshot(userId, deviceId, textResult(`Text typed${submitted}.${r.note}`), args.screenshot);
+      return maybeScreenshot(userId, deviceId, textResult(`Text ${paste ? 'pasted' : 'typed'}${submitted}.${r.note}`), args.screenshot);
     }
 
     case 'press_key': {

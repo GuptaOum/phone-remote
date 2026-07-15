@@ -203,7 +203,7 @@ class ConnectionForegroundService : Service() {
                                     // builds omit it and keep the fire-and-forget path.
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
-                                        "list_apps", "open_url", "notifications",
+                                        "list_apps", "open_url", "notifications", "paste",
                                     )))
                                 }
                                 webSocket.send(reg.toString())
@@ -554,6 +554,8 @@ class ConnectionForegroundService : Service() {
                     svc.pressKey(json.optString("keycode", "KEYCODE_BACK")), "key_not_accepted")
                 "text"     -> controlAck(id, action,
                     svc.typeText(json.optString("value", "")), "no_focused_text_field")
+                "paste"    -> controlAck(id, action,
+                    svc.pasteText(json.optString("value", "")), "paste_rejected")
                 "back"     -> controlAck(id, action, svc.pressKey("KEYCODE_BACK"), "key_not_accepted")
                 "home"     -> controlAck(id, action, svc.pressKey("KEYCODE_HOME"), "key_not_accepted")
                 "recents"  -> controlAck(id, action, svc.pressKey("KEYCODE_APP_SWITCH"), "key_not_accepted")
