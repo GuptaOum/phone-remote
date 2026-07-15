@@ -60,15 +60,21 @@ class RemoteAccessibilityService : AccessibilityService() {
     /**
      * Flattens the visible accessibility tree.
      * @param includeAll false = only nodes an agent can act on or read.
+     * @param filter when non-null, only nodes whose text/desc/id/class contain
+     *   this (case-insensitive) are included. Applied here, on the phone —
+     *   a non-matching node is never boxed into JSON or written to the socket,
+     *   not just trimmed after the fact. A chat screen otherwise ships back
+     *   every visible message bubble just to report one button's coordinates.
      * @param sw/sh true screen size, passed in: the service's own
      *   displayMetrics excludes the nav bar and would skew every centre.
      * @return [nodes, truncated]
      */
-    fun uiTree(includeAll: Boolean, sw: Float, sh: Float): Pair<JSONArray, Boolean> {
+    fun uiTree(includeAll: Boolean, filter: String?, sw: Float, sh: Float): Pair<JSONArray, Boolean> {
         val arr = JSONArray()
         val root = rootInActiveWindow ?: return Pair(arr, false)
         if (sw <= 0f || sh <= 0f) return Pair(arr, false)
-        val truncated = walkNode(root, arr, includeAll, sw, sh)
+        val needle = filter?.trim()?.takeIf { it.isNotEmpty() }?.lowercase()
+        val truncated = walkNode(root, arr, includeAll, needle, sw, sh)
         return Pair(arr, truncated)
     }
 
@@ -77,6 +83,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         node: android.view.accessibility.AccessibilityNodeInfo?,
         arr: JSONArray,
         includeAll: Boolean,
+        needle: String?,
         sw: Float,
         sh: Float
     ): Boolean {
@@ -86,12 +93,18 @@ class RemoteAccessibilityService : AccessibilityService() {
         val text = node.text?.toString()?.trim()
         val desc = node.contentDescription?.toString()?.trim()
         val vid = node.viewIdResourceName
+        val cls = node.className?.toString()?.substringAfterLast('.') ?: ""
         // Layout containers carry no text and do nothing — including them would
         // bury the handful of nodes that matter in structural noise.
         val actionable = node.isClickable || node.isEditable || node.isCheckable || node.isScrollable
         val readable = !text.isNullOrEmpty() || !desc.isNullOrEmpty()
+        val matchesFilter = needle == null ||
+            text?.lowercase()?.contains(needle) == true ||
+            desc?.lowercase()?.contains(needle) == true ||
+            vid?.lowercase()?.contains(needle) == true ||
+            cls.lowercase().contains(needle)
 
-        if ((includeAll || actionable || readable) && node.isVisibleToUser) {
+        if ((includeAll || actionable || readable) && matchesFilter && node.isVisibleToUser) {
             val r = android.graphics.Rect()
             node.getBoundsInScreen(r)
             if (r.width() > 0 && r.height() > 0) {
@@ -100,7 +113,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                 if (!text.isNullOrEmpty()) o.put("text", text.take(200))
                 if (!desc.isNullOrEmpty()) o.put("desc", desc.take(200))
                 if (!vid.isNullOrEmpty()) o.put("id", vid.substringAfter("id/", vid))
-                o.put("cls", node.className?.toString()?.substringAfterLast('.') ?: "")
+                o.put("cls", cls)
                 o.put("x", round3(r.exactCenterX() / sw))
                 o.put("y", round3(r.exactCenterY() / sh))
                 // Compact flags: every byte here is repeated per node.
@@ -117,7 +130,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             }
         }
         for (i in 0 until node.childCount) {
-            if (walkNode(node.getChild(i), arr, includeAll, sw, sh)) return true
+            if (walkNode(node.getChild(i), arr, includeAll, needle, sw, sh)) return true
         }
         return false
     }

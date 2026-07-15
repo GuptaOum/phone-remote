@@ -30,7 +30,7 @@ const signaling = require('../services/signaling');
  */
 
 const PROTOCOL_VERSION = '2025-06-18';
-const SERVER_VERSION = '1.9.0';
+const SERVER_VERSION = '2.0.0';
 
 // send_file: JSON body limit is 25 MB (index.js) and base64 inflates ~4/3,
 // so cap the decoded payload safely below that.
@@ -132,6 +132,7 @@ const TOOLS = [
       properties: {
         deviceId: { type: 'string', description: 'Device id from list_devices' },
         all: { type: 'boolean', description: 'Include layout containers with no text or action (default false). Leave false unless the tree looks incomplete — it adds a lot of noise.' },
+        filter: { type: 'string', description: 'Only return elements whose text, accessibility label, resource id, or widget class contains this (case-insensitive substring match). ALWAYS set this when you already know what you are looking for — e.g. filter:"send" to find a send button — instead of reading the whole screen. A chat or feed screen can carry many message bubbles; without a filter every one of them comes back just to report one button\'s coordinates. Omit only when you genuinely need to see everything on screen.' },
       },
       required: ['deviceId'],
     },
@@ -559,9 +560,11 @@ async function runControl(userId, deviceId, msg, timeoutMs) {
 const WAIT_POLL_MS = 600;
 
 /** Read the phone's accessibility tree. Shared by get_ui_tree and wait_for. */
-function fetchUiTree(userId, deviceId, all = false, timeoutMs = 10000) {
+function fetchUiTree(userId, deviceId, all = false, timeoutMs = 10000, filter = null) {
   return signaling.requestFromPhone(
-    userId, deviceId, (id) => ({ type: 'ui_tree', id, all: !!all }), timeoutMs, 'ui_tree',
+    userId, deviceId,
+    (id) => ({ type: 'ui_tree', id, all: !!all, ...(filter ? { filter } : {}) }),
+    timeoutMs, 'ui_tree',
   );
 }
 
@@ -730,14 +733,16 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         return textResult('This phone build cannot read the UI tree — update the app.', true);
       }
       try {
-        const t = await fetchUiTree(userId, deviceId, args.all);
+        const t = await fetchUiTree(userId, deviceId, args.all, 10000, args.filter);
         if (t.error) return textResult(CONTROL_ERRORS[t.error] || t.error, true);
         const nodes = t.nodes || [];
         if (!nodes.length) {
-          return textResult('The screen reported no readable elements. It is probably off or locked, or showing content that blocks accessibility. Try press_key "home", or take_screenshot to look.', true);
+          return textResult(args.filter
+            ? `No elements matched "${args.filter}". Try a different substring, or call get_ui_tree without filter to see everything currently on screen.`
+            : 'The screen reported no readable elements. It is probably off or locked, or showing content that blocks accessibility. Try press_key "home", or take_screenshot to look.', true);
         }
         const out = { app: t.package, nodes };
-        if (t.truncated) out.note = `Truncated: only the first ${nodes.length} elements are listed. Scroll or narrow the screen to see the rest.`;
+        if (t.truncated) out.note = `Truncated: only the first ${nodes.length} elements are listed. Scroll, or add filter to narrow the search.`;
         return textResult(out);
       } catch (e) {
         return textResult(e.message, true);
