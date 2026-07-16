@@ -1258,6 +1258,25 @@ document.getElementById('go').onclick = async () => {
     res.send(d.buffer);
   });
 
+  // Streamable HTTP transport (2025-06-18): this server answers in single-
+  // JSON-response mode only — no server-initiated SSE stream, no session
+  // deletion to track. The spec requires a server that doesn't offer those
+  // to say so explicitly with 405, not let the request fall through to a
+  // generic 404. Cursor's MCP client probes GET /mcp for that SSE stream
+  // right after connecting; a plain 404 there reads to it as the session
+  // having been invalidated, so it tears the connection down and retries
+  // until it gives up, even though auth and the POST calls all succeeded.
+  app.get('/mcp', (req, res) => {
+    res.set('Allow', 'POST').status(405).json({
+      jsonrpc: '2.0', error: { code: -32000, message: 'Method Not Allowed: this server does not support server-initiated SSE.' },
+    });
+  });
+  app.delete('/mcp', (req, res) => {
+    res.set('Allow', 'POST').status(405).json({
+      jsonrpc: '2.0', error: { code: -32000, message: 'Method Not Allowed: this server has no session to delete (single-request mode).' },
+    });
+  });
+
   app.post('/mcp', async (req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer /, '');
     const payload = token && verifyToken(token);
