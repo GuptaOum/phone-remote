@@ -1,0 +1,23 @@
+services:
+  app:
+    build:
+      context: ./server
+    image: phone-remote-server:latest
+    container_name: phone-remote
+    restart: unless-stopped
+    # nginx already proxies to 127.0.0.1:3000 — binding here to the exact
+    # same address means switching from PM2 to this container needs no
+    # nginx change at all.
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - ./server/.env
+    environment:
+      # Without this, files.js falls back to the container's own home dir
+      # (/root/PhoneRemote), which is ephemeral — every rebuild would silently
+      # lose every account's PC<->phone file storage.
+      - FILE_DIR=/app/filestore
+    volumes:
+      - ./server/data:/app/data
+      # Reuses the existing production directory in place — no data migration.
+      - /home/ubuntu/PhoneRemote:/app/filestore
