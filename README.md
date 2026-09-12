@@ -10,6 +10,37 @@ I built this project primarily to explore and learn how MCP servers work under t
 - **Advanced File Management:** Fully integrated file system access. You can ask the LLM to list all files in your `Downloads` directory, and it will fetch the file details. You can even instruct the LLM to download or upload specific files directly through the LLM call itself!
 - **MCP Integration:** Exposes all phone capabilities as a set of standardized tools via an MCP server, so any compatible AI client (like Claude Desktop) can connect and start controlling the phone.
 
+## Architecture & Data Flow
+
+Here is a high-level overview of how commands flow from the AI agent down to the physical Android device hardware:
+
+```mermaid
+flowchart LR
+    subgraph Client [AI Environment]
+        LLM[Claude / AI Agent]
+    end
+
+    subgraph NodeServer [Node.js Backend]
+        MCP[MCP Server Interface]
+        Relay[WebSocket Signaling]
+        MCP <-->|JSON-RPC| Relay
+    end
+
+    subgraph Android [Android Device]
+        ForeService[Foreground Service]
+        A11y[Accessibility Service\nTouch & Type]
+        Media[MediaProjection\nScreen Capture]
+        Files[File System Manager]
+        
+        ForeService --> A11y
+        ForeService --> Media
+        ForeService --> Files
+    end
+
+    LLM <-->|Tool Calls / Results| MCP
+    Relay <-->|WebSockets / Binary JPEGs| ForeService
+```
+
 ## How it works
 
 The project consists of a Node.js signaling server and an Android companion app (built in Flutter & Kotlin). The Node.js server acts as an MCP server, exposing tools like `take_screenshot`, `tap`, `swipe`, `list_files`, `download_file`, and `type_text`. 
