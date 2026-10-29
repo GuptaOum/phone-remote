@@ -53,7 +53,7 @@ function startZip(res, filename) {
 
 function setupFileRoutes(app) {
   const r = express.Router();
-  r.use(requireAuth); // every file route is scoped to the authenticated user
+  r.use('/files', requireAuth); // only file routes require this auth
 
   r.get('/files', (req, res, next) => {
     try {

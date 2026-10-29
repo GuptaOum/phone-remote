@@ -1258,6 +1258,46 @@ document.getElementById('go').onclick = async () => {
     res.send(d.buffer);
   });
 
+  // Internal endpoint for FastMCP Python companion service
+  app.post('/api/internal/call-tool', async (req, res) => {
+    try {
+      // 1. Strict loopback IP check: only local processes (FastMCP) can call this
+      const clientIp = req.socket.remoteAddress;
+      const isLoopback = clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === '::ffff:127.0.0.1';
+      if (!isLoopback) {
+        return res.status(403).json({ error: 'Access denied: loopback only' });
+      }
+
+      // 2. Validate internal bridge secret
+      const expectedSecret = process.env.INTERNAL_BRIDGE_SECRET || 'phone-remote-internal-bridge-secret-key-2026';
+      const providedSecret = req.headers['x-internal-secret'];
+      if (providedSecret !== expectedSecret) {
+        return res.status(401).json({ error: 'Unauthorized: invalid bridge secret' });
+      }
+
+      // 3. User identification & multi-tenant scoping
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.replace(/^Bearer /, '') || req.body?.token;
+      let userId = null;
+      if (token) {
+        const payload = verifyToken(token);
+        if (payload) userId = payload.uid;
+      }
+      if (!userId) {
+        // Fallback to default owner UUID if running in single-user FastMCP mode
+        userId = process.env.DEFAULT_USER_ID || '19d75c7c-b737-49c6-a3f8-4fe3e70d5b13';
+      }
+
+      const { name, args } = req.body || {};
+      const baseUrl = `${process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`}`.replace(/\/$/, '');
+      const result = await callTool(userId, name, args || {}, { baseUrl });
+      res.json(result);
+    } catch (err) {
+      console.error('Internal call-tool error:', err);
+      res.status(500).json({ content: [{ type: 'text', text: `Internal error: ${err.message}` }], isError: true });
+    }
+  });
+
   // Streamable HTTP transport (2025-06-18): this server answers in single-
   // JSON-response mode only — no server-initiated SSE stream, no session
   // deletion to track. The spec requires a server that doesn't offer those
