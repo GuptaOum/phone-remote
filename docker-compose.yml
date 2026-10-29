@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: phone-remote-app:latest
+    image: oumgupta/phone-remote-app:latest
     container_name: phone-remote-app
     restart: unless-stopped
     # Nginx proxies 443 → 127.0.0.1:3000 (React Frontend + Express Backend)
@@ -22,7 +22,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.mcp
-    image: phone-remote-mcp:latest
+    image: oumgupta/phone-remote-mcp:latest
     container_name: phone-remote-mcp
     restart: unless-stopped
     # Nginx proxies /sse & /messages/ → 127.0.0.1:8001 (FastMCP Python Server)
