@@ -4,7 +4,7 @@ Just like Claude Computer Use / Dispatch allows an LLM to control a laptop, **Ph
 
 ---
 
-## ⚡ Highlights
+##  Highlights
 - **FastMCP Python Architecture:** Powered by an ultra-lean 162-line [FastMCP](https://github.com/jlowin/fastmcp) Python server (`fastmcp_server.py`), replacing  1,270+ lines of manual JSON-RPC boilerplate (**87.3% code reduction**).
 - **26 Standardized Tools:** 100% feature coverage spanning gestures, structured UI tree analysis, notifications/OTPs, system keys, apps, hardware, and raw file transfers.
 - **Structured UI Perception (`get_ui_tree`):** Reads the Android accessibility node tree into structured text with normalized coordinates (0.0–1.0) so agents can target elements with zero pixel hallucinations and minimal latency.
@@ -59,7 +59,7 @@ flowchart LR
 
 ---
 
-## 🛠️ Complete MCP Tool Suite (26 Tools)
+##  Complete MCP Tool Suite (26 Tools)
 
 All coordinates are normalized from `0.0` to `1.0` (fraction of screen width and height):
 
@@ -107,7 +107,7 @@ All coordinates are normalized from `0.0` to `1.0` (fraction of screen width and
 
 ---
 
-## 🔌 Connecting MCP Clients
+##  Connecting MCP Clients
 
 ### 1. Antigravity Configuration
 In your `~/.gemini/config/mcp_config.json`:
@@ -141,7 +141,7 @@ In your `claude_desktop_config.json`:
 
 ---
 
-## 🔒 Security & Defense-in-Depth
+##  Security & Defense-in-Depth
 
 - **Perimeter Gate:** The internal bridge `/api/internal/*` is blocked with `403 Forbidden` at Nginx.
 - **Loopback Enforcement:** Node.js verifies that tool dispatch calls originate strictly from loopback (`127.0.0.1` / `::1`).
@@ -150,7 +150,7 @@ In your `claude_desktop_config.json`:
 
 ---
 
-## 📱 Android Client Requirements
+##  Android Client Requirements
 
 The Android companion client utilizes native APIs without requiring root:
 - **`RemoteAccessibilityService`:** Injects touch events and dispatches key events.
