@@ -5,7 +5,7 @@ Just like Claude Computer Use / Dispatch allows an LLM to control a laptop, **Ph
 ---
 
 ## ⚡ Highlights
-- **FastMCP Python Architecture:** Powered by an ultra-lean 162-line [FastMCP](https://github.com/jlowin/fastmcp) Python server (`fastmcp_server.py`), replacing 1,270+ lines of manual JSON-RPC boilerplate (**87.3% code reduction**).
+- **FastMCP Python Architecture:** Powered by an ultra-lean 162-line [FastMCP](https://github.com/jlowin/fastmcp) Python server (`fastmcp_server.py`), replacing  1,270+ lines of manual JSON-RPC boilerplate (**87.3% code reduction**).
 - **26 Standardized Tools:** 100% feature coverage spanning gestures, structured UI tree analysis, notifications/OTPs, system keys, apps, hardware, and raw file transfers.
 - **Structured UI Perception (`get_ui_tree`):** Reads the Android accessibility node tree into structured text with normalized coordinates (0.0–1.0) so agents can target elements with zero pixel hallucinations and minimal latency.
 - **Dual Transport & Live Dashboard:** Supports SSE streaming (`/sse`) for modern MCP agents alongside an interactive web mirror & dashboard.
