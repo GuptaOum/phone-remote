@@ -1,4 +1,22 @@
 services:
+  # 1. Reverse Proxy (Nginx with SSL termination & WebSocket routing)
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    image: oumgupta/phone-remote-nginx:latest
+    container_name: phone-remote-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - app
+      - mcp
+
+  # 2. Web Frontend (React + Vite) & Express Node.js Backend
   app:
     build:
       context: .
@@ -6,7 +24,8 @@ services:
     image: oumgupta/phone-remote-app:latest
     container_name: phone-remote-app
     restart: unless-stopped
-    # Nginx proxies 443 → 127.0.0.1:3000 (React Frontend + Express Backend)
+    expose:
+      - "3000"
     ports:
       - "127.0.0.1:3000:3000"
     env_file:
@@ -18,6 +37,7 @@ services:
       - ./server/data:/app/server/data
       - /home/ubuntu/PhoneRemote:/app/filestore
 
+  # 3. FastMCP Python Server (AI Agent Tool Endpoint)
   mcp:
     build:
       context: .
@@ -25,7 +45,8 @@ services:
     image: oumgupta/phone-remote-mcp:latest
     container_name: phone-remote-mcp
     restart: unless-stopped
-    # Nginx proxies /sse & /messages/ → 127.0.0.1:8001 (FastMCP Python Server)
+    expose:
+      - "8001"
     ports:
       - "127.0.0.1:8001:8001"
     env_file:
