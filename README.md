@@ -16,43 +16,45 @@ Just like Claude Computer Use / Dispatch allows an LLM to control a laptop, **Ph
 ## 🏛️ Architecture & Data Flow
 
 ```mermaid
-flowchart TD
-    subgraph Clients ["AI Clients & Browsers"]
-        Agent["Antigravity / Claude / Cursor<br/>(MCP Clients)"]
-        Browser["Web Browser<br/>(Live Mirror & Dashboard)"]
+flowchart LR
+    subgraph Clients [" AI Clients & Users "]
+        direction TB
+        Agent["🤖 AI Agent<br/>(Antigravity / Claude / Cursor)"]
+        Browser["💻 Web Browser<br/>(Live Mirror & Dashboard)"]
     end
 
-    subgraph ReverseProxy ["Nginx Reverse Proxy (:443 SSL)"]
-        Nginx["Nginx (:443)"]
+    subgraph Gateway [" Security Gateway "]
+        direction TB
+        Nginx["🌐 Nginx Reverse Proxy (:443)<br/>SSL Termination & Route Isolation"]
     end
 
-    subgraph EC2Server ["EC2 Backend Services"]
-        FastMCP["FastMCP Server (:8001)<br/>Python 3.12 (SSE /messages/)"]
-        Node["Node.js Express (:3000)<br/>Signaling & Internal Bridge"]
-        DB[(SQLite Database<br/>Users & Devices)]
+    subgraph Backend [" AWS EC2 Host "]
+        direction TB
+        FastMCP["⚡ FastMCP Server (:8001)<br/>Python 3.12 (SSE Protocol)"]
+        Node["🟢 Node.js Core (:3000)<br/>WebSocket Relay & Internal Bridge"]
+        DB[("🗄️ SQLite DB<br/>Users & Devices")]
+        FastMCP -->|"127.0.0.1 + Secret"| Node
+        Node <--> DB
     end
 
-    subgraph AndroidDevice ["Android Phone"]
-        ForeService["Foreground Service"]
-        A11y["Accessibility Service<br/>(Taps, Swipes, Typing, Keys)"]
-        Media["MediaProjection<br/>(Screen & Visuals)"]
-        Files["Storage Provider<br/>(/storage/emulated/0)"]
+    subgraph Phone [" Android Hardware "]
+        direction TB
+        App["📱 Companion App<br/>Foreground Service"]
+        A11y["👆 Accessibility Service<br/>(Taps, Swipes, Type, Keys)"]
+        Media["📷 MediaProjection<br/>(Screen Frame Capture)"]
+        Files["📁 Storage Provider<br/>(File Transfers)"]
+        App --- A11y
+        App --- Media
+        App --- Files
     end
 
-    Agent -->|"SSE Stream /sse<br/>POST /messages/"| Nginx
-    Browser -->|"HTTPS /dashboard<br/>WebSockets /ws"| Nginx
+    Agent -->|"SSE Stream /sse"| Nginx
+    Browser -->|"HTTPS & WS"| Nginx
 
-    Nginx -->|"Proxy /sse & /messages/"| FastMCP
+    Nginx -->|"Proxy /sse"| FastMCP
     Nginx -->|"Proxy Web & WS"| Node
-    Nginx -.->|"Block /api/internal/ (403)"| FastMCP
 
-    FastMCP -->|"127.0.0.1 + X-Internal-Secret<br/>POST /api/internal/call-tool"| Node
-    Node <-->|"Multi-tenant Scoping"| DB
-    Node <-->|"Encrypted WebSockets"| ForeService
-
-    ForeService --> A11y
-    ForeService --> Media
-    ForeService --> Files
+    Node <===>|"Encrypted WebSocket Relay"| App
 ```
 
 ---
