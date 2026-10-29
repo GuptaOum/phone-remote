@@ -159,5 +159,4 @@ The Android companion client utilizes native APIs without requiring root:
 
 ---
 
-## 📄 License
-MIT License
+
