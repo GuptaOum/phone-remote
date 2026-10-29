@@ -3,6 +3,7 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const cors = require('cors');
+const fs = require('fs');
 const path = require('path');
 const QRCode = require('qrcode');
 
@@ -29,19 +30,38 @@ async function main() {
   app.use(express.json({ limit: '25mb' })); // MCP send_file carries base64 file data in the JSON-RPC body
   app.use(express.urlencoded({ extended: false })); // OAuth token exchange uses form-encoded bodies
   app.use(logger);
-  app.use(express.static(path.join(__dirname, '../public')));
 
-  // Page routes — auth is enforced client-side (redirect to /login without a
-  // token) and server-side on every API call and WebSocket message.
+  // Serve static files from React build if present, otherwise legacy public
+  const clientCandidates = [
+    path.join(__dirname, '../../client/dist'),
+    path.join(__dirname, '../dist'),
+    path.join(__dirname, '../client/dist'),
+  ];
+  const CLIENT_DIST = clientCandidates.find((p) => fs.existsSync(path.join(p, 'index.html')));
   const PUBLIC = path.join(__dirname, '../public');
-  app.get('/',          (_, res) => res.redirect('/dashboard'));
-  app.get('/login',     (_, res) => res.sendFile(path.join(PUBLIC, 'login.html')));
-  app.get('/dashboard', (_, res) => res.sendFile(path.join(PUBLIC, 'dashboard.html')));
-  app.get('/mirror',    (_, res) => res.sendFile(path.join(PUBLIC, 'mirror.html')));
-  app.get('/camera',    (_, res) => res.sendFile(path.join(PUBLIC, 'camera.html')));
-  app.get('/files',     (_, res) => res.sendFile(path.join(PUBLIC, 'files.html')));
-  app.get('/location',  (_, res) => res.sendFile(path.join(PUBLIC, 'location.html')));
-  app.get('/mcp-test',  (_, res) => res.sendFile(path.join(PUBLIC, 'mcp-test.html')));
+
+  if (CLIENT_DIST) {
+    console.log(`🚀 Serving React + Vite SPA from: ${CLIENT_DIST}`);
+    app.use(express.static(CLIENT_DIST));
+  }
+  app.use(express.static(PUBLIC));
+
+  // Page routes
+  if (CLIENT_DIST) {
+    const spaIndex = path.join(CLIENT_DIST, 'index.html');
+    app.get(['/', '/login', '/dashboard', '/mirror', '/camera', '/files', '/location', '/mcp-test'], (_, res) => {
+      res.sendFile(spaIndex);
+    });
+  } else {
+    app.get('/',          (_, res) => res.redirect('/dashboard'));
+    app.get('/login',     (_, res) => res.sendFile(path.join(PUBLIC, 'login.html')));
+    app.get('/dashboard', (_, res) => res.sendFile(path.join(PUBLIC, 'dashboard.html')));
+    app.get('/mirror',    (_, res) => res.sendFile(path.join(PUBLIC, 'mirror.html')));
+    app.get('/camera',    (_, res) => res.sendFile(path.join(PUBLIC, 'camera.html')));
+    app.get('/files',     (_, res) => res.sendFile(path.join(PUBLIC, 'files.html')));
+    app.get('/location',  (_, res) => res.sendFile(path.join(PUBLIC, 'location.html')));
+    app.get('/mcp-test',  (_, res) => res.sendFile(path.join(PUBLIC, 'mcp-test.html')));
+  }
 
   app.get('/health', (_, res) => res.json({ ok: true }));
 
@@ -56,6 +76,16 @@ async function main() {
   setupSignaling(wss, app);
   setupOAuthRoutes(app);
   setupMcpRoutes(app);
+
+  // SPA fallback for client-side routing on page refresh
+  if (CLIENT_DIST) {
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api') || req.path.startsWith('/mcp') || req.path.startsWith('/oauth') || req.path.startsWith('/ws')) {
+        return next();
+      }
+      res.sendFile(path.join(CLIENT_DIST, 'index.html'));
+    });
+  }
 
   app.use(errorHandler);
 
