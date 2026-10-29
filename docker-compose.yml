@@ -1,23 +1,37 @@
 services:
   app:
     build:
-      context: ./server
-    image: phone-remote-server:latest
-    container_name: phone-remote
+      context: .
+      dockerfile: Dockerfile
+    image: phone-remote-app:latest
+    container_name: phone-remote-app
     restart: unless-stopped
-    # nginx already proxies to 127.0.0.1:3000 — binding here to the exact
-    # same address means switching from PM2 to this container needs no
-    # nginx change at all.
+    # Nginx proxies 443 → 127.0.0.1:3000 (React Frontend + Express Backend)
     ports:
       - "127.0.0.1:3000:3000"
     env_file:
       - ./server/.env
     environment:
-      # Without this, files.js falls back to the container's own home dir
-      # (/root/PhoneRemote), which is ephemeral — every rebuild would silently
-      # lose every account's PC<->phone file storage.
+      - PORT=3000
       - FILE_DIR=/app/filestore
     volumes:
-      - ./server/data:/app/data
-      # Reuses the existing production directory in place — no data migration.
+      - ./server/data:/app/server/data
       - /home/ubuntu/PhoneRemote:/app/filestore
+
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    image: phone-remote-mcp:latest
+    container_name: phone-remote-mcp
+    restart: unless-stopped
+    # Nginx proxies /sse & /messages/ → 127.0.0.1:8001 (FastMCP Python Server)
+    ports:
+      - "127.0.0.1:8001:8001"
+    env_file:
+      - ./server/.env
+    environment:
+      - MCP_PORT=8001
+      - BACKEND_URL=http://app:3000
+    depends_on:
+      - app
