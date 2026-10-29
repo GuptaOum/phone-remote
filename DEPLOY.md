@@ -51,7 +51,7 @@ Estimated cost: ~$26/mo (t3.micro + Elastic IP + RDS t4g.micro + Route 53).
 
 ## 1. RDS PostgreSQL
 
-1. RDS → Create database → PostgreSQL → **db.t4g.micro**, 20 GB gp3.
+1. RDS → Create database → PostgreSQL → **db.t4g.micro**,  20 GB gp3.
 2. Same VPC as the EC2 instance you'll create; Public access **No**.
 3. Create a database named `phoneremote`, note the master user/password.
 4. Security group: allow inbound `5432` **only from the EC2 security group**.
