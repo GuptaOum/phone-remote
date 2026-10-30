@@ -98,7 +98,13 @@ export default function LocationPage() {
       if (msg.type === 'location') {
         setLocData(msg);
         updateMapMarker(msg);
-      } else if (msg.type === 'phone_disconnected') {
+      } else if (msg.type === 'phone_connected') {
+        // The mount-time request is dropped if the socket wasn't registered yet.
+        sendRaw({ type: 'get_location' });
+      } else if (
+        msg.type === 'phone_disconnected' ||
+        (msg.type === 'device_offline' && (!msg.deviceId || msg.deviceId === selectedDeviceId))
+      ) {
         setLocData(null);
         if (markerRef.current) {
           markerRef.current.remove();
@@ -113,7 +119,7 @@ export default function LocationPage() {
         }
       }
     });
-  }, [addListener]);
+  }, [addListener, sendRaw, selectedDeviceId]);
 
   if (!selectedDeviceId) {
     return (

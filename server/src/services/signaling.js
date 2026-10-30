@@ -34,7 +34,12 @@ function acct(userId) {
     // phonePool = ALL live sockets per device — the app UI and the background
     // service each hold one, and closing "the other" caused an endless
     // replace/reconnect fight that dropped transfers mid-flight.
-    a = { phones: new Map(), phonePool: new Map(), browsers: new Set(), lastLocation: new Map() };
+    // media: deviceId → what the phone is capturing, as far as the server knows.
+    // downloadOwners: pf_download id → the browser that asked for it.
+    a = {
+      phones: new Map(), phonePool: new Map(), browsers: new Set(), lastLocation: new Map(),
+      media: new Map(), downloadOwners: new Map(),
+    };
     accounts.set(userId, a);
   }
   return a;
@@ -45,7 +50,88 @@ function cleanupAcct(userId) {
   // phonePool must be checked too: a socket mid-registration is already pooled
   // but not yet primary, and dropping the account here would strand it under an
   // object no lookup can reach.
-  if (a && a.phones.size === 0 && a.browsers.size === 0 && a.phonePool.size === 0) accounts.delete(userId);
+  if (a && a.phones.size === 0 && a.browsers.size === 0 && a.phonePool.size === 0) {
+    for (const m of a.media.values()) clearTimeout(m.idleTimer);
+    accounts.delete(userId);
+  }
+}
+
+/** Primary live socket for a device, promoting a live pooled one if the primary died. */
+function livePhone(a, deviceId) {
+  if (!a || !deviceId) return null;
+  const p = a.phones.get(deviceId);
+  if (p?.readyState === 1) return p;
+  for (const s of a.phonePool.get(deviceId) || []) {
+    if (s.readyState === 1) {
+      a.phones.set(deviceId, s);
+      return s;
+    }
+  }
+  return null;
+}
+
+// ── Screen / camera ownership ───────────────────────────────────────────────
+// Capture on the phone is shared by every tab watching the device. Each
+// browser socket records whether IT wants the stream (wantsStream /
+// wantsCamera); the phone is only told to stop once no live watcher wants it.
+// A tab that closes or refreshes gets IDLE_STOP_GRACE_MS to come back and
+// re-claim the stream before the phone is stopped.
+const START_PENDING_MS = 15000;
+const IDLE_STOP_GRACE_MS = 10000;
+const STOP_FRAME_GRACE_MS = 3000;
+
+function mediaState(a, deviceId) {
+  let m = a.media.get(deviceId);
+  if (!m) {
+    m = {
+      stream: 'off', streamAt: 0, streamOnAt: 0, streamStopAt: 0,
+      camera: 'off', cameraAt: 0, cameraStopAt: 0, cameraFront: true,
+      idleTimer: null,
+    };
+    a.media.set(deviceId, m);
+  }
+  return m;
+}
+
+function viewersOf(a, deviceId) {
+  return [...a.browsers].filter((b) => b.role === 'browser' && b.watchId === deviceId && b.readyState === 1);
+}
+
+function scheduleIdleCheck(userId, deviceId) {
+  const a = accounts.get(userId);
+  if (!a || !deviceId) return;
+  const m = mediaState(a, deviceId);
+  clearTimeout(m.idleTimer);
+  m.idleTimer = setTimeout(() => {
+    m.idleTimer = null;
+    const acc = accounts.get(userId);
+    const phone = livePhone(acc, deviceId);
+    if (!phone) return;
+    const viewers = viewersOf(acc, deviceId);
+    if (m.stream !== 'off' && !viewers.some((b) => b.wantsStream)) {
+      m.stream = 'off';
+      m.streamStopAt = Date.now();
+      phone.send(j({ type: 'stream_stop' }));
+      console.log(`🛑 Auto-stopped screen stream (no viewers) user=${userId.slice(0, 8)} device=${deviceId.slice(0, 8)}`);
+    }
+    if (m.camera !== 'off' && !viewers.some((b) => b.wantsCamera)) {
+      m.camera = 'off';
+      m.cameraStopAt = Date.now();
+      phone.send(j({ type: 'camera_stop' }));
+      console.log(`🛑 Auto-stopped camera (no viewers) user=${userId.slice(0, 8)} device=${deviceId.slice(0, 8)}`);
+    }
+  }, IDLE_STOP_GRACE_MS);
+}
+
+/** Cancel phone→browser downloads this browser socket was receiving. */
+function cancelOwnedDownloads(a, ws, deviceId = ws.watchId) {
+  if (!ws.downloads) return;
+  for (const id of ws.downloads) {
+    if (a.downloadOwners.get(id) !== ws) continue;
+    a.downloadOwners.delete(id);
+    try { livePhone(a, deviceId)?.send(j({ type: 'pf_download_cancel', id })); } catch (_) {}
+  }
+  ws.downloads.clear();
 }
 
 function revokeDevice(userId, deviceId, reason = 'device_removed') {
@@ -83,7 +169,7 @@ function revokeDevice(userId, deviceId, reason = 'device_removed') {
 // Live presence — used by GET /api/devices
 const presence = {
   isOnline(userId, deviceId) {
-    return accounts.get(userId)?.phones.has(deviceId) || false;
+    return !!livePhone(accounts.get(userId), deviceId);
   },
 };
 
@@ -121,8 +207,7 @@ function getPhoneSocket(userId, deviceId, cap = null) {
     }
     return null;
   }
-  const p = a.phones.get(deviceId);
-  return p?.readyState === 1 ? p : null;
+  return livePhone(a, deviceId);
 }
 
 /** Fire-and-forget control command (tap/swipe/text/ring/flash/...). */
@@ -399,24 +484,31 @@ function setupSignaling(wss, app) {
     // The phone THIS browser is controlling
     const myPhone = () => {
       if (!ws.userId || !ws.watchId) return null;
-      const a = accounts.get(ws.userId);
-      if (!a) return null;
-      let p = a.phones.get(ws.watchId);
-      if (p?.readyState === 1) return p;
-      const pool = a.phonePool?.get(ws.watchId);
-      if (pool) {
-        for (const s of pool) {
-          if (s.readyState === 1) {
-            a.phones.set(ws.watchId, s);
-            return s;
-          }
-        }
-      }
-      return null;
+      return livePhone(accounts.get(ws.userId), ws.watchId);
     };
 
     const relayToPhone = (msg) => { if (ws.role === 'browser') myPhone()?.send(j(msg)); };
     const relayToWatchers = (msg) => { if (ws.role === 'phone') bcast(watchers(), msg); };
+
+    // Phone → server: frames prove capture is running even if the server
+    // never saw stream_started (server restart, older app build). Adopt that
+    // state so the idle check can stop it when nobody is watching.
+    const syncMediaFromFrame = (marker) => {
+      const a = accounts.get(ws.userId);
+      if (!a || !ws.deviceId) return;
+      const m = mediaState(a, ws.deviceId);
+      const now = Date.now();
+      if (marker === 0x01 && m.stream !== 'on' && now - m.streamStopAt > STOP_FRAME_GRACE_MS) {
+        const wasOff = m.stream === 'off';
+        m.stream = 'on';
+        m.streamOnAt = now;
+        if (wasOff) scheduleIdleCheck(ws.userId, ws.deviceId);
+      } else if (marker === 0x02 && m.camera !== 'on' && now - m.cameraStopAt > STOP_FRAME_GRACE_MS) {
+        const wasOff = m.camera === 'off';
+        m.camera = 'on';
+        if (wasOff) scheduleIdleCheck(ws.userId, ws.deviceId);
+      }
+    };
 
     ws.on('message', (raw, isBinary) => {
       // Binary frames = screen/camera/screenshot JPEGs — relay only to
@@ -425,12 +517,16 @@ function setupSignaling(wss, app) {
       if (isBinary) {
         if (ws.authed && ws.role === 'phone') {
           const marker = raw[0];
+          if (marker === 0x01 || marker === 0x02) syncMediaFromFrame(marker);
           watchers().forEach((b) => {
             if (b.readyState !== 1) return;
-            // Live stream (0x01) and camera (0x02) frames are disposable: if
-            // a browser's socket is backed up, DROP the frame instead of
-            // queueing it — otherwise the backlog keeps playing long after
-            // the phone stopped streaming. Screenshots (0x03) always deliver.
+            // Screen (0x01) and camera (0x02) frames only go to tabs that asked
+            // for them; screenshots (0x03) go to every watcher (MCP included).
+            if (marker === 0x01 && !b.wantsStream) return;
+            if (marker === 0x02 && !b.wantsCamera) return;
+            // Live frames are disposable: if a browser's socket is backed up,
+            // DROP the frame instead of queueing it — otherwise the backlog
+            // keeps playing long after the phone stopped streaming.
             if ((marker === 0x01 || marker === 0x02) && (b.bufferedAmount || 0) > 512 * 1024) return;
             b.send(raw, { binary: true });
           });
@@ -533,6 +629,12 @@ function setupSignaling(wss, app) {
               const curAlive = cur && cur.readyState === 1;
               if (ws.agent === 'service' || !curAlive) acc.phones.set(ws.deviceId, ws);
 
+              // The Flutter UI re-registers over the same socket. Announcing
+              // again would make every watching tab treat it as a reconnect
+              // and re-send stream_start, restarting capture on the phone.
+              if (ws.announced) return;
+              ws.announced = true;
+
               db.upsertDevice({ id: ws.deviceId, userId: ws.userId, name: ws.deviceName, model: ws.model })
                 .catch((e) => console.error('upsertDevice failed:', e.message));
 
@@ -549,15 +651,19 @@ function setupSignaling(wss, app) {
               console.log(`📱 Phone connected  user=${ws.userId.slice(0, 8)} device=${ws.deviceId.slice(0, 8)} agent=${ws.agent || 'app'} (${ws.model}, ${ws.screenW}×${ws.screenH}) caps=[${ws.caps.join(',') || 'none'}]`);
             }).catch((e) => console.error('register device check failed:', e.message));
           } else {
+            const prevWatch = ws.watchId;
             ws.watchId = msg.deviceId || null;
-            a.browsers.add(ws);
-            let p = ws.watchId && a.phones.get(ws.watchId);
-            if (!p || p.readyState !== 1) {
-              const pool = ws.watchId && a.phonePool?.get(ws.watchId);
-              p = pool ? [...pool].find((s) => s.readyState === 1) : null;
-              if (p) a.phones.set(ws.watchId, p);
+            if (prevWatch !== ws.watchId) {
+              ws.wantsStream = false;
+              ws.wantsCamera = false;
+              if (prevWatch) {
+                cancelOwnedDownloads(a, ws, prevWatch);
+                scheduleIdleCheck(ws.userId, prevWatch);
+              }
             }
-            if (p && p.readyState === 1) {
+            a.browsers.add(ws);
+            const p = livePhone(a, ws.watchId);
+            if (p) {
               ws.send(j({
                 type: 'phone_connected',
                 deviceId: p.deviceId,
@@ -597,15 +703,59 @@ function setupSignaling(wss, app) {
           break;
 
         // ── Phone → watchers status events ────────────────────────────────
-        case 'camera_stopped':
-        case 'camera_streaming':
-        case 'stream_started':
+        case 'stream_started': {
+          if (ws.role !== 'phone') return;
+          const a = acct(ws.userId);
+          const m = mediaState(a, ws.deviceId);
+          m.stream = 'on';
+          m.streamOnAt = Date.now();
+          relayToWatchers({ type: 'stream_started' });
+          scheduleIdleCheck(ws.userId, ws.deviceId);
+          break;
+        }
         case 'stream_stopped':
-          relayToWatchers({ type: msg.type });
+        case 'stream_error': {
+          if (ws.role !== 'phone') return;
+          const a = acct(ws.userId);
+          const m = mediaState(a, ws.deviceId);
+          const now = Date.now();
+          // A stop→start in quick succession: the phone's reply to the stop
+          // arrives after the browser already asked to start again. Passing
+          // it on would kill the stream the user just restarted.
+          const staleStop = msg.type === 'stream_stopped' && m.streamStopAt && (
+            (m.stream === 'starting' && m.streamAt > m.streamStopAt) ||
+            (m.stream === 'on' && m.streamAt > m.streamStopAt && now - m.streamOnAt < 2000)
+          );
+          if (staleStop) break;
+          m.stream = 'off';
+          m.streamStopAt = now;
+          viewersOf(a, ws.deviceId).forEach((b) => { b.wantsStream = false; });
+          relayToWatchers(msg.type === 'stream_error'
+            ? { type: 'stream_error', reason: msg.reason || 'failed' }
+            : { type: 'stream_stopped' });
           break;
-        case 'camera_error':
-          relayToWatchers({ type: 'camera_error', reason: msg.reason });
+        }
+        case 'camera_streaming': {
+          if (ws.role !== 'phone') return;
+          const m = mediaState(acct(ws.userId), ws.deviceId);
+          m.camera = 'on';
+          relayToWatchers({ type: 'camera_streaming', front: m.cameraFront });
+          scheduleIdleCheck(ws.userId, ws.deviceId);
           break;
+        }
+        case 'camera_stopped':
+        case 'camera_error': {
+          if (ws.role !== 'phone') return;
+          const a = acct(ws.userId);
+          const m = mediaState(a, ws.deviceId);
+          m.camera = 'off';
+          m.cameraStopAt = Date.now();
+          viewersOf(a, ws.deviceId).forEach((b) => { b.wantsCamera = false; });
+          relayToWatchers(msg.type === 'camera_error'
+            ? { type: 'camera_error', reason: msg.reason }
+            : { type: 'camera_stopped' });
+          break;
+        }
         case 'screenshot_error': {
           const errMsg = { type: 'screenshot_error', reason: msg.reason };
           relayToWatchers(errMsg);
@@ -613,14 +763,87 @@ function setupSignaling(wss, app) {
           break;
         }
 
-        // ── Browser → phone commands ──────────────────────────────────────
-        case 'camera_start':
-          relayToPhone({ type: 'camera_start', front: msg.front ?? true });
+        // ── Browser → phone: screen stream (shared, ref-counted) ─────────
+        case 'stream_start': {
+          if (ws.role !== 'browser' || !ws.watchId) return;
+          ws.wantsStream = true;
+          const m = mediaState(acct(ws.userId), ws.watchId);
+          if (m.stream === 'on') {
+            ws.send(j({ type: 'stream_started' }));
+            break;
+          }
+          if (m.stream === 'starting' && Date.now() - m.streamAt < START_PENDING_MS) break;
+          const phone = myPhone();
+          if (!phone) {
+            ws.send(j({ type: 'stream_error', reason: 'phone_offline' }));
+            break;
+          }
+          m.stream = 'starting';
+          m.streamAt = Date.now();
+          phone.send(j({ type: 'stream_start' }));
           break;
-        case 'camera_stop':
-        case 'camera_flip':
-        case 'stream_start':
-        case 'stream_stop':
+        }
+        case 'stream_stop': {
+          if (ws.role !== 'browser' || !ws.watchId) return;
+          ws.wantsStream = false;
+          const a = acct(ws.userId);
+          const others = viewersOf(a, ws.watchId).some((b) => b !== ws && b.wantsStream);
+          if (!others) {
+            const m = mediaState(a, ws.watchId);
+            m.stream = 'off';
+            m.streamStopAt = Date.now();
+            relayToPhone({ type: 'stream_stop' });
+          }
+          // Confirm to this tab right away — the phone's own reply goes to
+          // everyone, and may never come if the phone is offline.
+          if (others || !myPhone()) ws.send(j({ type: 'stream_stopped' }));
+          break;
+        }
+
+        // ── Browser → phone: camera (shared, ref-counted) ─────────────────
+        case 'camera_start': {
+          if (ws.role !== 'browser' || !ws.watchId) return;
+          ws.wantsCamera = true;
+          const front = msg.front ?? true;
+          const m = mediaState(acct(ws.userId), ws.watchId);
+          if (m.camera === 'on' && m.cameraFront === front) {
+            ws.send(j({ type: 'camera_streaming', front }));
+            break;
+          }
+          if (m.camera === 'starting' && m.cameraFront === front && Date.now() - m.cameraAt < START_PENDING_MS) break;
+          if (!myPhone()) {
+            ws.send(j({ type: 'camera_error', reason: 'phone_offline' }));
+            break;
+          }
+          m.camera = 'starting';
+          m.cameraAt = Date.now();
+          m.cameraFront = front;
+          relayToPhone({ type: 'camera_start', front });
+          break;
+        }
+        case 'camera_stop': {
+          if (ws.role !== 'browser' || !ws.watchId) return;
+          ws.wantsCamera = false;
+          const a = acct(ws.userId);
+          const others = viewersOf(a, ws.watchId).some((b) => b !== ws && b.wantsCamera);
+          if (!others) {
+            const m = mediaState(a, ws.watchId);
+            m.camera = 'off';
+            m.cameraStopAt = Date.now();
+            relayToPhone({ type: 'camera_stop' });
+          }
+          if (others || !myPhone()) ws.send(j({ type: 'camera_stopped' }));
+          break;
+        }
+        case 'camera_flip': {
+          if (ws.role !== 'browser' || !ws.watchId) return;
+          const m = mediaState(acct(ws.userId), ws.watchId);
+          m.cameraFront = !m.cameraFront;
+          relayToPhone({ type: 'camera_flip' });
+          break;
+        }
+
+        // ── Browser → phone commands ──────────────────────────────────────
         case 'screenshot':
         case 'ring':
           relayToPhone({ type: msg.type });
@@ -633,13 +856,26 @@ function setupSignaling(wss, app) {
           break;
 
         // ── Phone file system (browser ↔ phone) ───────────────────────────
-        case 'pf_list':
         case 'pf_download':
+          if (ws.role === 'browser' && msg.id) {
+            const a = acct(ws.userId);
+            a.downloadOwners.set(msg.id, ws);
+            (ws.downloads ||= new Set()).add(msg.id);
+          }
+          relayToPhone(msg);
+          break;
+        case 'pf_download_cancel':
+          if (ws.role === 'browser' && msg.id) {
+            acct(ws.userId).downloadOwners.delete(msg.id);
+            ws.downloads?.delete(msg.id);
+          }
+          relayToPhone(msg);
+          break;
+        case 'pf_list':
         case 'pf_delete':
         case 'pf_upload_start':
         case 'pf_upload_chunk':
         case 'pf_upload_cancel':
-        case 'pf_download_cancel':
           relayToPhone(msg);
           break;
         case 'pf_list_result':
@@ -648,6 +884,11 @@ function setupSignaling(wss, app) {
         case 'pf_delete_ok':
         case 'open_app_result':
         case 'pf_error': {
+          if (msg.type === 'pf_error' && msg.id) {
+            const a = acct(ws.userId);
+            a.downloadOwners.get(msg.id)?.downloads?.delete(msg.id);
+            a.downloadOwners.delete(msg.id);
+          }
           relayToWatchers(msg);
           // Resolve any MCP tool call waiting on this exact request id —
           // independent of whether a browser dashboard is also watching.
@@ -678,6 +919,11 @@ function setupSignaling(wss, app) {
         }
         case 'pf_chunk': {
           if (ws.role !== 'phone') return;
+          if (msg.done) {
+            const a = acct(ws.userId);
+            a.downloadOwners.get(msg.id)?.downloads?.delete(msg.id);
+            a.downloadOwners.delete(msg.id);
+          }
           bcast(watchers(), msg);
           // Ack back to phone — gates the next chunk send so the WebSocket
           // buffer never floods, which was causing rapid disconnect/reconnect.
@@ -792,6 +1038,14 @@ function setupSignaling(wss, app) {
           } else {
             a.phones.delete(ws.deviceId);
             a.lastLocation.delete(ws.deviceId);
+            // Capture state is unknown until the phone is back; the app
+            // reports any capture still running when it re-registers, and
+            // watchers keep their wantsStream/wantsCamera so they re-claim it.
+            const m = a.media.get(ws.deviceId);
+            if (m) { m.stream = 'off'; m.camera = 'off'; m.streamStopAt = 0; m.cameraStopAt = 0; }
+            for (const [id, owner] of a.downloadOwners) {
+              if (owner.watchId === ws.deviceId) { owner.downloads?.delete(id); a.downloadOwners.delete(id); }
+            }
             bcast(watchers(), { type: 'phone_disconnected', deviceId: ws.deviceId });
             bcast([...a.browsers], { type: 'device_offline', deviceId: ws.deviceId });
             db.touchDevice(ws.deviceId).catch(() => {});
@@ -800,6 +1054,8 @@ function setupSignaling(wss, app) {
         }
       } else if (ws.role === 'browser') {
         a.browsers.delete(ws);
+        cancelOwnedDownloads(a, ws);
+        if (ws.watchId && (ws.wantsStream || ws.wantsCamera)) scheduleIdleCheck(ws.userId, ws.watchId);
       }
       cleanupAcct(ws.userId);
     });
@@ -809,8 +1065,8 @@ function setupSignaling(wss, app) {
   if (app) {
     app.post('/api/control', requireAuth, (req, res) => {
       const { deviceId, ...cmd } = req.body || {};
-      const phone = accounts.get(req.userId)?.phones.get(deviceId);
-      if (!phone || phone.readyState !== 1) return res.status(503).json({ error: 'Phone not connected' });
+      const phone = livePhone(accounts.get(req.userId), deviceId);
+      if (!phone) return res.status(503).json({ error: 'Phone not connected' });
       phone.send(j({ type: 'control', ...cmd }));
       res.json({ ok: true });
     });

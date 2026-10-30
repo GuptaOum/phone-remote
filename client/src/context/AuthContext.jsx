@@ -56,6 +56,8 @@ export function AuthProvider({ children }) {
     localStorage.removeItem('pr_token');
     localStorage.removeItem('pr_email');
     localStorage.removeItem('pr_device');
+    sessionStorage.removeItem('pr_streaming');
+    sessionStorage.removeItem('pr_camera');
   };
 
   const api = async (path, opts = {}) => {

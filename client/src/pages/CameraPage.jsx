@@ -1,50 +1,80 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useDevice } from '../context/DeviceContext';
-import { Camera, SwitchCamera, Play, Square, AlertCircle, Info } from 'lucide-react';
+import { Camera, SwitchCamera, Play, Square, AlertCircle } from 'lucide-react';
+
+// sessionStorage: { deviceId, front } of the camera this tab has open, so a
+// refresh re-attaches to it instead of leaving it running unseen.
+const INTENT_KEY = 'pr_camera';
+const START_TIMEOUT_MS = 15000;
+
+function readIntent(deviceId) {
+  try {
+    const v = JSON.parse(sessionStorage.getItem(INTENT_KEY) || 'null');
+    return v && v.deviceId === deviceId ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 export default function CameraPage() {
-  const { selectedDeviceId, phoneOnline, sendRaw, addListener } = useDevice();
+  const { selectedDeviceId, phoneOnline, wsStatus, sendRaw, addListener } = useDevice();
   const [live, setLive] = useState(false);
-  const [isFront, setIsFront] = useState(true);
+  const [starting, setStarting] = useState(false);
+  const [isFront, setIsFront] = useState(() => readIntent(selectedDeviceId)?.front ?? true);
   const [errorMessage, setErrorMessage] = useState('');
-  
+
   const canvasRef = useRef(null);
-  const isFrontRef = useRef(true);
+  const isFrontRef = useRef(isFront);
   const suppressFramesUntilRef = useRef(0);
+  const liveRef = useRef(false);
+  const startingRef = useRef(false);
+  const startTimeoutRef = useRef(null);
+  const renderingRef = useRef(false);
+  const latestBlobRef = useRef(null);
 
-  useEffect(() => {
-    isFrontRef.current = isFront;
-  }, [isFront]);
+  const setIntent = (front) =>
+    sessionStorage.setItem(INTENT_KEY, JSON.stringify({ deviceId: selectedDeviceId, front }));
+  const clearIntent = () => {
+    if (readIntent(selectedDeviceId)) sessionStorage.removeItem(INTENT_KEY);
+  };
 
-  useEffect(() => {
-    return addListener((msg) => {
-      if (msg.type === 'camera_streaming') {
-        setLive(true);
-        setErrorMessage('');
-      } else if (msg.type === 'camera_stopped') {
-        setLive(false);
-      } else if (msg.type === 'camera_error') {
-        setLive(false);
-        setErrorMessage(
-          'Camera permission off. On the phone: Settings → Apps → Phone Remote → enable Camera permission.'
-        );
-      } else if (msg.type === 'phone_disconnected') {
-        setLive(false);
-      } else if (msg.type === 'binary_frame') {
-        if (msg.typeByte !== 0x02) return; // Only process camera frames
-        if (Date.now() < suppressFramesUntilRef.current) return;
+  const applyFront = (front) => {
+    isFrontRef.current = front;
+    setIsFront(front);
+  };
 
-        setLive(true);
-        createImageBitmap(msg.blob).then((bitmap) => {
-          const canvas = canvasRef.current;
-          if (!canvas) {
-            bitmap.close();
-            return;
-          }
+  const setOff = () => {
+    liveRef.current = false;
+    startingRef.current = false;
+    setLive(false);
+    setStarting(false);
+    clearTimeout(startTimeoutRef.current);
+    latestBlobRef.current = null;
+  };
+
+  const markLive = () => {
+    startingRef.current = false;
+    liveRef.current = true;
+    setStarting(false);
+    setLive(true);
+    setErrorMessage('');
+    clearTimeout(startTimeoutRef.current);
+  };
+
+  // Only the newest frame is decoded; frames that arrive mid-decode replace
+  // each other instead of piling up.
+  const drawLatestFrame = () => {
+    if (renderingRef.current || !latestBlobRef.current) return;
+    const blob = latestBlobRef.current;
+    latestBlobRef.current = null;
+    renderingRef.current = true;
+    createImageBitmap(blob)
+      .then((bitmap) => {
+        const canvas = canvasRef.current;
+        if (canvas && liveRef.current) {
           const ctx = canvas.getContext('2d');
           canvas.width = bitmap.height;
           canvas.height = bitmap.width;
-
           ctx.save();
           if (isFrontRef.current) {
             ctx.translate(0, bitmap.width);
@@ -55,32 +85,122 @@ export default function CameraPage() {
           }
           ctx.drawImage(bitmap, 0, 0);
           ctx.restore();
-          bitmap.close();
-        }).catch((err) => {
-          console.error('Frame decode error:', err);
-        });
+        }
+        bitmap.close();
+      })
+      .catch(() => {})
+      .finally(() => {
+        renderingRef.current = false;
+        if (latestBlobRef.current) drawLatestFrame();
+      });
+  };
+
+  const startCamera = (front) => {
+    if (startingRef.current) return;
+    suppressFramesUntilRef.current = 0;
+    applyFront(front);
+    setIntent(front);
+    setErrorMessage('');
+    startingRef.current = true;
+    setStarting(true);
+    sendRaw({ type: 'camera_start', front });
+    clearTimeout(startTimeoutRef.current);
+    startTimeoutRef.current = setTimeout(() => {
+      if (!startingRef.current || liveRef.current) return;
+      clearIntent();
+      setOff();
+      sendRaw({ type: 'camera_stop' });
+      setErrorMessage('The phone did not start the camera. Check that the app is running and has camera permission.');
+    }, START_TIMEOUT_MS);
+  };
+
+  useEffect(() => {
+    return addListener((msg) => {
+      const mine = () => liveRef.current || startingRef.current || !!readIntent(selectedDeviceId);
+      switch (msg.type) {
+        case 'phone_connected': {
+          const intent = readIntent(selectedDeviceId);
+          if (intent && !liveRef.current) startCamera(intent.front);
+          break;
+        }
+        case 'camera_streaming':
+          if (!mine()) break;
+          if (typeof msg.front === 'boolean') {
+            applyFront(msg.front);
+            setIntent(msg.front);
+          }
+          markLive();
+          break;
+        case 'camera_stopped':
+          if (!mine()) break;
+          clearIntent();
+          setOff();
+          break;
+        case 'camera_error':
+          if (!mine()) break;
+          clearIntent();
+          setOff();
+          setErrorMessage(
+            msg.reason === 'phone_offline'
+              ? 'The phone is offline.'
+              : 'Camera permission off. On the phone: Settings → Apps → Phone Remote → enable Camera permission.'
+          );
+          break;
+        case 'phone_disconnected':
+        case '_ws_closed':
+          // Keep the intent: the camera is re-requested when the phone is back.
+          setOff();
+          break;
+        case 'device_offline':
+          if (!msg.deviceId || msg.deviceId === selectedDeviceId) setOff();
+          break;
+        case 'binary_frame':
+          if (msg.typeByte !== 0x02) return; // Only process camera frames
+          if (!liveRef.current && !startingRef.current) return;
+          if (Date.now() < suppressFramesUntilRef.current) return;
+          if (!liveRef.current) markLive();
+          latestBlobRef.current = msg.blob;
+          drawLatestFrame();
+          break;
+        default:
+          break;
       }
     });
-  }, [addListener]);
+  }, [addListener, sendRaw, selectedDeviceId]);
 
-  const handleStartCamera = (front) => {
-    suppressFramesUntilRef.current = 0;
-    setIsFront(front);
-    isFrontRef.current = front;
-    sendRaw({ type: 'camera_start', front });
-  };
+  // Re-attach after a refresh / phone reconnect if this tab had the camera open
+  useEffect(() => {
+    if (!phoneOnline) return;
+    const intent = readIntent(selectedDeviceId);
+    if (intent && !liveRef.current) startCamera(intent.front);
+  }, [phoneOnline]);
+
+  // Leaving the page releases the camera (a refresh doesn't run this).
+  useEffect(() => {
+    return () => {
+      clearTimeout(startTimeoutRef.current);
+      latestBlobRef.current = null;
+      if (liveRef.current || startingRef.current) {
+        liveRef.current = false;
+        startingRef.current = false;
+        clearIntent();
+        sendRaw({ type: 'camera_stop' });
+      }
+    };
+  }, []);
 
   const handleFlipCamera = () => {
     const nextFront = !isFront;
-    setIsFront(nextFront);
-    isFrontRef.current = nextFront;
+    applyFront(nextFront);
+    setIntent(nextFront);
     sendRaw({ type: 'camera_flip' });
   };
 
   const handleStopCamera = () => {
+    clearIntent();
+    setOff();
+    suppressFramesUntilRef.current = Date.now() + 1500;
     sendRaw({ type: 'camera_stop' });
-    setLive(false);
-    suppressFramesUntilRef.current = Date.now() + 4000;
   };
 
   if (!selectedDeviceId) {
@@ -104,11 +224,16 @@ export default function CameraPage() {
     );
   }
 
+  const canControl = phoneOnline && wsStatus === 'connected';
+  const waitingToResume = !live && !starting && !!readIntent(selectedDeviceId);
+
   return (
     <div className="camera-main">
       <div className="cam-badge">
         <div className={`cam-dot ${live ? 'live' : 'off'}`} />
-        <span className="cam-label">{live ? 'Live' : 'Camera off'}</span>
+        <span className="cam-label">
+          {live ? 'Live' : starting ? 'Starting…' : waitingToResume ? 'Reconnecting…' : 'Camera off'}
+        </span>
       </div>
 
       {errorMessage && (
@@ -130,7 +255,12 @@ export default function CameraPage() {
             <Camera size={30} />
           </div>
           <div>
-            Camera ready — select front or back.<br />
+            {starting
+              ? 'Starting camera…'
+              : waitingToResume
+                ? 'Waiting for the phone — the camera will resume automatically.'
+                : 'Camera ready — select front or back.'}
+            <br />
             <small>Works even when phone screen is off.</small>
           </div>
         </div>
@@ -139,16 +269,16 @@ export default function CameraPage() {
       <div className="cam-controls">
         <button
           className="btn primary"
-          onClick={() => handleStartCamera(true)}
-          disabled={!phoneOnline}
+          onClick={() => startCamera(true)}
+          disabled={!canControl || starting || (live && isFront)}
         >
           <Play size={14} fill="currentColor" />
           <span>Front</span>
         </button>
         <button
           className="btn primary"
-          onClick={() => handleStartCamera(false)}
-          disabled={!phoneOnline}
+          onClick={() => startCamera(false)}
+          disabled={!canControl || starting || (live && !isFront)}
         >
           <Play size={14} fill="currentColor" />
           <span>Back</span>
@@ -156,7 +286,7 @@ export default function CameraPage() {
         <button
           className="btn"
           onClick={handleFlipCamera}
-          disabled={!live || !phoneOnline}
+          disabled={!live || !canControl}
         >
           <SwitchCamera size={14} />
           <span>Flip</span>
@@ -164,7 +294,7 @@ export default function CameraPage() {
         <button
           className="btn danger"
           onClick={handleStopCamera}
-          disabled={!live}
+          disabled={!live && !starting && !waitingToResume}
         >
           <Square size={14} fill="currentColor" />
           <span>Stop</span>

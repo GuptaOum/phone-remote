@@ -1,6 +1,7 @@
 import React from 'react';
 import { Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
+import { useDevice } from './context/DeviceContext';
 import { Header } from './components/Header';
 
 import LoginPage from './pages/LoginPage';
@@ -37,6 +38,9 @@ function ProtectedLayout() {
 }
 
 export default function App() {
+  // Keyed by device: switching phones remounts these pages, so no stream
+  // state, frame, or pending command carries over to the other phone.
+  const { selectedDeviceId } = useDevice();
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
@@ -44,10 +48,10 @@ export default function App() {
       <Route element={<ProtectedLayout />}>
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<DashboardPage />} />
-        <Route path="/mirror" element={<MirrorPage />} />
-        <Route path="/camera" element={<CameraPage />} />
-        <Route path="/files" element={<FilesPage />} />
-        <Route path="/location" element={<LocationPage />} />
+        <Route path="/mirror" element={<MirrorPage key={selectedDeviceId} />} />
+        <Route path="/camera" element={<CameraPage key={selectedDeviceId} />} />
+        <Route path="/files" element={<FilesPage key={selectedDeviceId} />} />
+        <Route path="/location" element={<LocationPage key={selectedDeviceId} />} />
         <Route path="/mcp-test" element={<McpTestPage />} />
       </Route>
 

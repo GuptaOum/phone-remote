@@ -177,7 +177,11 @@ export default function FilesPage() {
           }
           break;
 
+        case 'device_offline':
+          if (msg.deviceId && msg.deviceId !== selectedDeviceId) break;
+        // falls through
         case 'phone_disconnected':
+        case '_ws_closed':
           setLoadingPhone(false);
           setPhoneFiles([]);
           setDownloadProgress(null);
@@ -243,7 +247,16 @@ export default function FilesPage() {
           break;
       }
     });
-  }, [addListener, phonePath, activeTab, requestPhoneFiles]);
+  }, [addListener, phonePath, activeTab, requestPhoneFiles, selectedDeviceId]);
+
+  // Leaving the page: stop the phone from streaming downloads nobody will save.
+  useEffect(() => {
+    const downloads = activeDownloadsRef.current;
+    return () => {
+      for (const id of downloads.keys()) sendRaw({ type: 'pf_download_cancel', id });
+      downloads.clear();
+    };
+  }, [sendRaw]);
 
   // ── PC-to-Phone File Upload & Transfer Hub ────────────────────────────────
 

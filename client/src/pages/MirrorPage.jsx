@@ -19,22 +19,35 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleDot,
-  Compass,
 } from 'lucide-react';
+
+// sessionStorage holds the id of the device this tab is streaming, so a page
+// refresh resumes that device's stream (and only that one).
+const INTENT_KEY = 'pr_streaming';
+const START_TIMEOUT_MS = 15000;
+const STOP_FRAME_SUPPRESS_MS = 1500;
+
+const STREAM_ERRORS = {
+  permission_denied: 'Screen-recording permission was denied on the phone.',
+  projection_stopped: 'Screen sharing was stopped on the phone.',
+  phone_offline: 'The phone is offline.',
+  capture_failed: 'The phone could not start screen capture. Try again.',
+};
 
 export default function MirrorPage() {
   const {
     selectedDeviceId,
     phoneOnline,
-    latestFrame,
-    clearLatestFrame,
+    wsStatus,
     sendControl,
     sendRaw,
     addListener,
   } = useDevice();
 
   const [streaming, setStreaming] = useState(false);
-  const [streamStarting, setStreamStarting] = useState(() => sessionStorage.getItem('pr_streaming') === 'true');
+  const [streamStarting, setStreamStarting] = useState(false);
+  const [streamError, setStreamError] = useState('');
+  const [notice, setNotice] = useState('');
   const [showTypeModal, setShowTypeModal] = useState(false);
   const [typeText, setTypeText] = useState('');
   const [pressSubmit, setPressSubmit] = useState(false);
@@ -48,7 +61,22 @@ export default function MirrorPage() {
   const renderingRef = useRef(false);
   const latestBlobRef = useRef(null);
   const streamingRef = useRef(false);
+  const startingRef = useRef(false);
   const startingTimeoutRef = useRef(null);
+  const screenshotTimeoutRef = useRef(null);
+  const noticeTimeoutRef = useRef(null);
+
+  const hasIntent = () => !!selectedDeviceId && sessionStorage.getItem(INTENT_KEY) === selectedDeviceId;
+  const setIntent = () => sessionStorage.setItem(INTENT_KEY, selectedDeviceId);
+  const clearIntent = () => {
+    if (sessionStorage.getItem(INTENT_KEY) === selectedDeviceId) sessionStorage.removeItem(INTENT_KEY);
+  };
+
+  const showNotice = (text) => {
+    setNotice(text);
+    clearTimeout(noticeTimeoutRef.current);
+    noticeTimeoutRef.current = setTimeout(() => setNotice(''), 5000);
+  };
 
   // High-performance direct canvas frame renderer
   // Discards intermediate frames while rendering to guarantee absolute latest frame with zero queue delay
@@ -61,7 +89,7 @@ export default function MirrorPage() {
     createImageBitmap(blob)
       .then((bitmap) => {
         const canvas = canvasRef.current;
-        if (canvas && Date.now() >= suppressFramesUntilRef.current) {
+        if (canvas && streamingRef.current && Date.now() >= suppressFramesUntilRef.current) {
           if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
             canvas.width = bitmap.width;
             canvas.height = bitmap.height;
@@ -83,40 +111,67 @@ export default function MirrorPage() {
       });
   };
 
-  // Stop stream helper that thoroughly cuts off frames, clears canvas, and disables touches
-  const stopStream = () => {
-    streamingRef.current = false;
-    setStreaming(false);
-    setStreamStarting(false);
-    sessionStorage.removeItem('pr_streaming');
-    suppressFramesUntilRef.current = Date.now() + 4000;
+  const clearView = () => {
     pointerStartRef.current = null;
     latestBlobRef.current = null;
-    if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
-
-    if (clearLatestFrame) clearLatestFrame();
-
     const canvas = canvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
+  };
 
-    sendRaw({ type: 'stream_stop' });
+  const setOff = () => {
+    streamingRef.current = false;
+    startingRef.current = false;
+    setStreaming(false);
+    setStreamStarting(false);
+    if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
+    clearView();
+  };
+
+  const markStreaming = () => {
+    startingRef.current = false;
+    streamingRef.current = true;
+    setStreamStarting(false);
+    setStreaming(true);
+    setStreamError('');
+    if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
   };
 
   const startStream = () => {
+    if (startingRef.current || streamingRef.current) return;
+    setIntent();
+    setStreamError('');
     suppressFramesUntilRef.current = 0;
+    startingRef.current = true;
     setStreamStarting(true);
     sendRaw({ type: 'stream_start' });
 
     if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
     startingTimeoutRef.current = setTimeout(() => {
-      setStreamStarting(false);
-      if (!streamingRef.current) {
-        sessionStorage.removeItem('pr_streaming');
-      }
-    }, 12000);
+      if (!startingRef.current) return;
+      // Give up and release our claim, so a permission granted much later
+      // doesn't leave the phone sharing to nobody.
+      clearIntent();
+      setOff();
+      sendRaw({ type: 'stream_stop' });
+      setStreamError('The phone did not start sharing. Check the phone for a screen-recording permission prompt, then try again.');
+    }, START_TIMEOUT_MS);
+  };
+
+  // User pressed Stop (or Cancel while starting)
+  const stopStream = () => {
+    clearIntent();
+    setOff();
+    suppressFramesUntilRef.current = Date.now() + STOP_FRAME_SUPPRESS_MS;
+    sendRaw({ type: 'stream_stop' });
+  };
+
+  // The phone or our socket went away. Keep the intent so the stream resumes
+  // by itself when the phone is reachable again.
+  const handleLinkLost = () => {
+    setOff();
   };
 
   // Toggle stream
@@ -131,90 +186,104 @@ export default function MirrorPage() {
   // Listen for stream status updates and frames from phone
   useEffect(() => {
     return addListener((msg) => {
-      if (msg.type === 'phone_connected') {
-        if (sessionStorage.getItem('pr_streaming') === 'true') {
-          startStream();
-        }
-      } else if (msg.type === 'stream_started') {
-        setStreamStarting(false);
-        setStreaming(true);
-        streamingRef.current = true;
-        sessionStorage.setItem('pr_streaming', 'true');
-        if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
-      } else if (msg.type === 'stream_stopped') {
-        streamingRef.current = false;
-        setStreaming(false);
-        setStreamStarting(false);
-        sessionStorage.removeItem('pr_streaming');
-        suppressFramesUntilRef.current = Date.now() + 4000;
-        pointerStartRef.current = null;
-        latestBlobRef.current = null;
-        if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
-        if (clearLatestFrame) clearLatestFrame();
-        const canvas = canvasRef.current;
-        if (canvas) {
-          const ctx = canvas.getContext('2d');
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-        }
-      } else if (msg.type === 'phone_disconnected' || msg.type === 'device_offline') {
-        stopStream();
-      } else if (msg.type === 'offer') {
-        setStreaming(true);
-        streamingRef.current = true;
-        setStreamStarting(false);
-        sessionStorage.setItem('pr_streaming', 'true');
-      } else if (msg.type === 'binary_frame') {
-        if (msg.typeByte === 0x03) {
-          const url = URL.createObjectURL(msg.blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `screenshot_${Date.now()}.jpg`;
-          a.click();
-          URL.revokeObjectURL(url);
+      const mine = () => streamingRef.current || startingRef.current || hasIntent();
+      switch (msg.type) {
+        case 'phone_connected':
+          if (hasIntent()) startStream();
+          break;
+        case 'stream_started':
+          if (mine()) markStreaming();
+          break;
+        case 'stream_stopped':
+          if (!mine()) break;
+          clearIntent();
+          setOff();
+          suppressFramesUntilRef.current = Date.now() + STOP_FRAME_SUPPRESS_MS;
+          break;
+        case 'stream_error':
+          if (!mine()) break;
+          clearIntent();
+          setOff();
+          setStreamError(STREAM_ERRORS[msg.reason] || `Screen sharing failed${msg.reason ? ` (${msg.reason})` : ''}.`);
+          break;
+        case 'phone_disconnected':
+        case '_ws_closed':
+          handleLinkLost();
+          break;
+        case 'device_offline':
+          if (!msg.deviceId || msg.deviceId === selectedDeviceId) handleLinkLost();
+          break;
+        case 'screenshot_error':
+          clearTimeout(screenshotTimeoutRef.current);
           setTakingScreenshot(false);
-          return;
+          showNotice(`Screenshot failed${msg.reason ? `: ${msg.reason}` : ''}`);
+          break;
+        case 'binary_frame': {
+          if (msg.typeByte === 0x03) {
+            const url = URL.createObjectURL(msg.blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `screenshot_${Date.now()}.jpg`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            clearTimeout(screenshotTimeoutRef.current);
+            setTakingScreenshot(false);
+            return;
+          }
+
+          if (msg.typeByte !== 0x01) return; // Only process screen frames
+          if (!streamingRef.current && !startingRef.current) return;
+          if (Date.now() < suppressFramesUntilRef.current) return;
+          if (!streamingRef.current) markStreaming();
+
+          latestBlobRef.current = msg.blob;
+          drawLatestFrame();
+          break;
         }
-
-        if (msg.typeByte !== 0x01) return; // Only process screen frames
-        if (Date.now() < suppressFramesUntilRef.current) return;
-
-        // Sync streaming state to incoming frame arrival
-        if (!streamingRef.current) {
-          streamingRef.current = true;
-          setStreaming(true);
-          setStreamStarting(false);
-          sessionStorage.setItem('pr_streaming', 'true');
-          if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
-        }
-
-        latestBlobRef.current = msg.blob;
-        drawLatestFrame();
+        default:
+          break;
       }
     });
-  }, [addListener, sendRaw, clearLatestFrame]);
+  }, [addListener, sendRaw, selectedDeviceId]);
 
-  // Resume stream on mount or reconnect if previously streaming
+  // Resume on mount / phone reconnect if this tab was streaming this device
   useEffect(() => {
-    if (phoneOnline && sessionStorage.getItem('pr_streaming') === 'true' && !streamingRef.current) {
-      startStream();
-    }
+    if (phoneOnline && hasIntent()) startStream();
   }, [phoneOnline]);
 
-  // Clean up starting timer and frame ref on unmount
+  // Leaving the page (route change or device switch) releases the stream.
+  // A refresh never runs this, so the intent survives it.
   useEffect(() => {
     return () => {
       if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
+      clearTimeout(screenshotTimeoutRef.current);
+      clearTimeout(noticeTimeoutRef.current);
       latestBlobRef.current = null;
+      if (streamingRef.current || startingRef.current) {
+        streamingRef.current = false;
+        startingRef.current = false;
+        clearIntent();
+        sendRaw({ type: 'stream_stop' });
+      }
     };
   }, []);
 
-  // Touch gesture calculations (normalized 0.0 - 1.0)
+  // Touch gesture calculations (normalized 0.0 - 1.0 of the PHONE screen).
+  // The canvas uses object-fit: contain, so the frame is letterboxed inside
+  // the element box — map against the drawn image, not the element.
   const getNormalizedPos = (e) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
-    const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    const cw = canvas.width || 1;
+    const ch = canvas.height || 1;
+    const scale = Math.min(rect.width / cw, rect.height / ch) || 1;
+    const drawnW = cw * scale;
+    const drawnH = ch * scale;
+    const left = rect.left + (rect.width - drawnW) / 2;
+    const top = rect.top + (rect.height - drawnH) / 2;
+    const x = Math.max(0, Math.min(1, (e.clientX - left) / drawnW));
+    const y = Math.max(0, Math.min(1, (e.clientY - top) / drawnH));
     return { x, y };
   };
 
@@ -250,7 +319,14 @@ export default function MirrorPage() {
 
     if (dist < 0.03) {
       if (duration > 500) {
-        sendControl('long_press', { x: start.x, y: start.y, ms: duration });
+        // A zero-distance swipe held for the press duration is a long-press.
+        sendControl('swipe', {
+          x1: start.x,
+          y1: start.y,
+          x2: start.x,
+          y2: start.y,
+          ms: Math.max(600, Math.min(3000, duration)),
+        });
       } else {
         sendControl('tap', { x: start.x, y: start.y });
       }
@@ -398,9 +474,13 @@ export default function MirrorPage() {
   };
 
   const handleScreenshot = () => {
+    if (!sendRaw({ type: 'screenshot' })) return;
     setTakingScreenshot(true);
-    sendRaw({ type: 'screenshot' });
-    setTimeout(() => setTakingScreenshot(false), 6000);
+    clearTimeout(screenshotTimeoutRef.current);
+    screenshotTimeoutRef.current = setTimeout(() => {
+      setTakingScreenshot(false);
+      showNotice('Screenshot timed out — the phone did not respond.');
+    }, 15000);
   };
 
   const handleRingPhone = () => {
@@ -422,6 +502,29 @@ export default function MirrorPage() {
     );
   }
 
+  const linkDown = wsStatus !== 'connected';
+  const resuming = hasIntent() && !streaming;
+  let overlayTitle;
+  let overlayText;
+  if (linkDown) {
+    overlayTitle = 'Connection Lost';
+    overlayText = resuming
+      ? 'Reconnecting to the server. The stream will resume automatically.'
+      : 'Reconnecting to the server…';
+  } else if (!phoneOnline) {
+    overlayTitle = resuming ? 'Waiting for Phone to Reconnect' : 'Waiting for Device';
+    overlayText = resuming
+      ? 'The stream will resume automatically when the phone is back online.'
+      : 'Ensure the Phone Remote companion app is running on the device.';
+  } else if (streamStarting) {
+    overlayTitle = 'Starting Stream...';
+    overlayText = 'Connecting to phone display. Please grant permission if prompted on the device.';
+  } else {
+    overlayTitle = 'Phone Connected';
+    overlayText = 'Screen mirroring is ready. Press Start Streaming to view and interact.';
+  }
+  const controlsDisabled = !phoneOnline || linkDown;
+
   return (
     <div className="mirror-view-container">
       {/* Phone Screen Frame */}
@@ -439,29 +542,26 @@ export default function MirrorPage() {
           {!streaming && (
             <div className="stream-overlay">
               <div className="overlay-content">
-                <h3>{phoneOnline ? (streamStarting ? 'Starting Stream...' : 'Phone Connected') : 'Waiting for Device'}</h3>
-                <p>
-                  {phoneOnline
-                    ? (streamStarting
-                        ? 'Connecting to phone display. Please grant permission if prompted on the device.'
-                        : 'Screen mirroring is ready. Press Start Streaming to view and interact.')
-                    : 'Ensure the Phone Remote companion app is running on the device.'}
-                </p>
+                <h3>{overlayTitle}</h3>
+                <p>{overlayText}</p>
+                {streamError && <p className="stream-error">{streamError}</p>}
                 <button
                   className="btn primary stream-btn"
                   onClick={handleToggleStream}
-                  disabled={!phoneOnline || streamStarting}
+                  disabled={!streamStarting && controlsDisabled}
                 >
                   {streamStarting ? (
                     <span className="spinner"></span>
                   ) : (
                     <Play size={16} fill="currentColor" />
                   )}
-                  <span>{streamStarting ? 'Starting stream...' : 'Start Streaming'}</span>
+                  <span>{streamStarting ? 'Cancel' : 'Start Streaming'}</span>
                 </button>
               </div>
             </div>
           )}
+
+          {notice && <div className="stream-notice">{notice}</div>}
         </div>
       </div>
 
@@ -471,12 +571,12 @@ export default function MirrorPage() {
         <div className="control-group">
           <span className="group-title">Session</span>
           <button
-            className={`btn ${streaming ? 'danger' : 'primary'} control-action-btn`}
+            className={`btn ${streaming || streamStarting ? 'danger' : 'primary'} control-action-btn`}
             onClick={handleToggleStream}
-            disabled={!phoneOnline}
+            disabled={!streaming && !streamStarting && controlsDisabled}
           >
-            {streaming ? <Square size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
-            <span>{streaming ? 'Stop Stream' : (streamStarting ? 'Starting...' : 'Start Stream')}</span>
+            {streaming || streamStarting ? <Square size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
+            <span>{streaming ? 'Stop Stream' : (streamStarting ? 'Cancel Start' : 'Start Stream')}</span>
           </button>
         </div>
 
@@ -484,15 +584,15 @@ export default function MirrorPage() {
         <div className="control-group">
           <span className="group-title">Navigation</span>
           <div className="nav-button-row">
-            <button className="btn" title="Back" onClick={() => handleKeyPress('back')}>
+            <button className="btn" title="Back" disabled={controlsDisabled} onClick={() => handleKeyPress('back')}>
               <ArrowLeft size={16} />
               <span>Back</span>
             </button>
-            <button className="btn" title="Home" onClick={() => handleKeyPress('home')}>
+            <button className="btn" title="Home" disabled={controlsDisabled} onClick={() => handleKeyPress('home')}>
               <Home size={16} />
               <span>Home</span>
             </button>
-            <button className="btn" title="Recents" onClick={() => handleKeyPress('recents')}>
+            <button className="btn" title="Recents" disabled={controlsDisabled} onClick={() => handleKeyPress('recents')}>
               <Layers size={16} />
               <span>Recents</span>
             </button>
@@ -507,6 +607,7 @@ export default function MirrorPage() {
               <button
                 className="btn dpad-btn"
                 title="Swipe Up / Scroll Down (Arrow Up)"
+                disabled={controlsDisabled}
                 onClick={() => handleSwipe('up')}
               >
                 <ChevronUp size={22} />
@@ -516,6 +617,7 @@ export default function MirrorPage() {
               <button
                 className="btn dpad-btn"
                 title="Swipe Left (Arrow Left)"
+                disabled={controlsDisabled}
                 onClick={() => handleSwipe('left')}
               >
                 <ChevronLeft size={22} />
@@ -523,6 +625,7 @@ export default function MirrorPage() {
               <button
                 className="btn dpad-btn dpad-center"
                 title="Center Tap (Tap screen center)"
+                disabled={controlsDisabled}
                 onClick={handleCenterTap}
               >
                 <CircleDot size={20} />
@@ -530,6 +633,7 @@ export default function MirrorPage() {
               <button
                 className="btn dpad-btn"
                 title="Swipe Right (Arrow Right)"
+                disabled={controlsDisabled}
                 onClick={() => handleSwipe('right')}
               >
                 <ChevronRight size={22} />
@@ -539,6 +643,7 @@ export default function MirrorPage() {
               <button
                 className="btn dpad-btn"
                 title="Swipe Down / Scroll Up (Arrow Down)"
+                disabled={controlsDisabled}
                 onClick={() => handleSwipe('down')}
               >
                 <ChevronDown size={22} />
@@ -551,19 +656,19 @@ export default function MirrorPage() {
         <div className="control-group">
           <span className="group-title">Hardware & Input</span>
           <div className="action-button-grid">
-            <button className="btn" onClick={() => setShowTypeModal(true)} title="Type text into phone">
+            <button className="btn" disabled={controlsDisabled} onClick={() => setShowTypeModal(true)} title="Type text into phone">
               <Type size={16} />
               <span>Type Text</span>
             </button>
-            <button className="btn" onClick={() => handleKeyPress('lock')} title="Lock / Power screen">
+            <button className="btn" disabled={controlsDisabled} onClick={() => handleKeyPress('lock')} title="Lock / Power screen">
               <Power size={16} />
               <span>Lock / Power</span>
             </button>
-            <button className="btn" onClick={() => handleKeyPress('volume_up')} title="Raise volume">
+            <button className="btn" disabled={controlsDisabled} onClick={() => handleKeyPress('volume_up')} title="Raise volume">
               <Volume2 size={16} />
               <span>Vol +</span>
             </button>
-            <button className="btn" onClick={() => handleKeyPress('volume_down')} title="Lower volume">
+            <button className="btn" disabled={controlsDisabled} onClick={() => handleKeyPress('volume_down')} title="Lower volume">
               <Volume1 size={16} />
               <span>Vol -</span>
             </button>
@@ -574,20 +679,20 @@ export default function MirrorPage() {
         <div className="control-group">
           <span className="group-title">Utilities</span>
           <div className="action-button-grid">
-            <button className="btn" onClick={handleScreenshot} disabled={takingScreenshot} title="Screenshot">
+            <button className="btn" onClick={handleScreenshot} disabled={takingScreenshot || controlsDisabled} title="Screenshot">
               <Camera size={16} />
               <span>{takingScreenshot ? 'Capturing...' : 'Screenshot'}</span>
             </button>
-            <button className="btn" onClick={handleRingPhone} title="Ring phone">
+            <button className="btn" disabled={controlsDisabled} onClick={handleRingPhone} title="Ring phone">
               <Bell size={16} />
               <span>Ring</span>
             </button>
             <div style={{ position: 'relative' }}>
-              <button className="btn" onClick={() => setShowFlashMenu(!showFlashMenu)} style={{ width: '100%' }} title="Flash blink">
+              <button className="btn" disabled={controlsDisabled} onClick={() => setShowFlashMenu(!showFlashMenu)} style={{ width: '100%' }} title="Flash blink">
                 <Zap size={16} />
                 <span>Flash</span>
               </button>
-              {showFlashMenu && (
+              {showFlashMenu && !controlsDisabled && (
                 <div style={{
                   position: 'absolute',
                   bottom: '100%',
@@ -731,6 +836,24 @@ export default function MirrorPage() {
           width: 100%;
           padding: 10px;
           font-size: 13.5px;
+        }
+        .overlay-content p.stream-error {
+          color: #fca5a5;
+          margin-top: -10px;
+        }
+        .stream-notice {
+          position: absolute;
+          left: 50%;
+          bottom: 18px;
+          transform: translateX(-50%);
+          z-index: 11;
+          background: rgba(0, 0, 0, 0.8);
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          padding: 8px 14px;
+          font-size: 12.5px;
+          color: #fff;
+          white-space: nowrap;
         }
         .controls-sidebar {
           width: 330px;
