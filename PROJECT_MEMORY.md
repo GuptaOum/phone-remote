@@ -266,7 +266,12 @@ curl -k https://3-6-239-48.sslip.io/health
    - `id 1`: `phone-remote-fastmcp` (Python FastMCP server, port 8001)
 5. **Phone dropping offline every few minutes**:
    - *Root Cause*: OkHttp `pingInterval(3s)` killed the socket whenever one pong was late on mobile data. Now 10s; the server's 15s heartbeat still reaps dead sockets.
-6. **Killing processes on EC2 over SSH**:
+6. **Known open issues (deferred — fine for the demo / MCP demonstration)**:
+   - *Device takeover (low risk)*: `db.upsertDevice` moves a device row to whichever account registers its `deviceId`, without checking the current owner. Another account that knows a phone's random ID can make it vanish from the owner's list (until the phone re-registers) or rename it. It CANNOT see or control the phone — live routing uses the phone's own token. Not fixed because the same path legitimately moves a phone when a different account logs in on it (`AuthService.deviceId` survives logout). Planned fix (~30 min incl. APK build): app generates a new deviceId when a different account logs in, and the server refuses to reassign a device owned by another account.
+   - *Default JWT secret*: the server falls back to a built-in secret if `JWT_SECRET` is unset. Set a strong `JWT_SECRET` in the EC2 env before any non-demo use.
+   - *Stale screen size in reports*: `get_device_status` / `list_devices` report the screen size from connect time, so width/height can appear swapped after rotation. Taps and UI-tree coordinates are unaffected (they use the live size). One-line Kotlin fix (`refreshScreenSize()` in `handleDeviceStatus`), ship with the next APK.
+   - *Shared password = full access*: anyone with the account's email+password can watch and control the phone, with no alert. Possible additions: session list with "sign out everywhere", on-phone notification when a viewer starts the mirror.
+7. **Killing processes on EC2 over SSH**:
    - `pkill -f <name>` / `pgrep -f <name>` match the SSH command line itself. Use the bracket trick (`grep '[G]radleDaemon'`) or `./gradlew --stop`.
 
 ---
