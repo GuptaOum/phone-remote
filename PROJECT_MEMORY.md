@@ -400,4 +400,28 @@ All phone storage is anchored at `/storage/emulated/0`. The backend automaticall
 * In Deep Scan mode, iterate into each child directory recursively and collect all matching items across the whole directory tree.
 
 ---
+
+### ⚡ Rule 8: WhatsApp Input Protocol (Strict Copy-Paste Only)
+**CRITICAL**: Under no circumstances should standard typing (`ACTION_SET_TEXT`) be used in WhatsApp (`com.whatsapp`) or WhatsApp Business (`com.whatsapp.w4b`).
+
+#### Why standard typing fails in WhatsApp:
+* WhatsApp ignores or corrupts Android's advisory `ACTION_SET_TEXT` across search bars and message text boxes containing placeholders. For instance, typing `"Yash bro"` into the `"Search…"` bar produces interleaved corruption like `"SYash br oearch…"`.
+* WhatsApp explicitly honors Android's native `ACTION_PASTE`.
+
+#### The Golden Rule:
+* **Always pass `method: "paste"`** whenever typing into WhatsApp or WhatsApp Business:
+  ```python
+  # Search bar:
+  tap(deviceId="...", x=search_x, y=search_y)
+  type_text(deviceId="...", text="Contact Name", method="paste")
+
+  # Message box:
+  tap(deviceId="...", x=input_x, y=input_y)
+  type_text(deviceId="...", text="Message text", method="paste")
+  ```
+* **Send Message Fast-Path**:
+  1. Once pasted, WhatsApp's bottom-right microphone icon immediately morphs into the Send button (`desc: "Send"`, `cls: "ImageButton"`).
+  2. Locate the node with `desc: "Send"` in `get_ui_tree` and tap its coordinates `(x, y)` to dispatch the message immediately.
+
+---
 *Created & Maintained by Google Antigravity & User Team. Last Updated: October 30, 2026.*
