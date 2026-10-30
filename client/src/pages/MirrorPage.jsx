@@ -14,21 +14,71 @@ import {
   Bell,
   Zap,
   AlertCircle,
+  ChevronUp,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  CircleDot,
+  Compass,
 } from 'lucide-react';
 
 export default function MirrorPage() {
-  const { selectedDeviceId, phoneOnline, latestFrame, sendControl, sendRaw, addListener } = useDevice();
+  const {
+    selectedDeviceId,
+    phoneOnline,
+    latestFrame,
+    clearLatestFrame,
+    sendControl,
+    sendRaw,
+    addListener,
+  } = useDevice();
+
   const [streaming, setStreaming] = useState(() => sessionStorage.getItem('pr_streaming') === 'true');
   const [streamStarting, setStreamStarting] = useState(false);
   const [showTypeModal, setShowTypeModal] = useState(false);
   const [typeText, setTypeText] = useState('');
   const [pressSubmit, setPressSubmit] = useState(false);
+  const [usePaste, setUsePaste] = useState(false);
   const [takingScreenshot, setTakingScreenshot] = useState(false);
   const [showFlashMenu, setShowFlashMenu] = useState(false);
 
   const canvasRef = useRef(null);
   const pointerStartRef = useRef(null);
-  const typeDialogRef = useRef(null);
+  const suppressFramesUntilRef = useRef(0);
+
+  // Stop stream helper that thoroughly cuts off frames, clears canvas, and disables touches
+  const stopStream = () => {
+    setStreaming(false);
+    setStreamStarting(false);
+    sessionStorage.removeItem('pr_streaming');
+    suppressFramesUntilRef.current = Date.now() + 4000;
+    pointerStartRef.current = null;
+
+    if (clearLatestFrame) clearLatestFrame();
+
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    sendRaw({ type: 'stream_stop' });
+  };
+
+  const startStream = () => {
+    suppressFramesUntilRef.current = 0;
+    setStreamStarting(true);
+    sendRaw({ type: 'stream_start' });
+  };
+
+  // Toggle stream
+  const handleToggleStream = () => {
+    if (streaming) {
+      stopStream();
+    } else {
+      startStream();
+    }
+  };
 
   // Listen for stream status updates and frames from phone
   useEffect(() => {
@@ -41,6 +91,16 @@ export default function MirrorPage() {
         setStreaming(false);
         setStreamStarting(false);
         sessionStorage.removeItem('pr_streaming');
+        suppressFramesUntilRef.current = Date.now() + 4000;
+        pointerStartRef.current = null;
+        if (clearLatestFrame) clearLatestFrame();
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const ctx = canvas.getContext('2d');
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+      } else if (msg.type === 'phone_disconnected') {
+        stopStream();
       } else if (msg.type === 'offer') {
         setStreaming(true);
         setStreamStarting(false);
@@ -55,15 +115,20 @@ export default function MirrorPage() {
         setTakingScreenshot(false);
       }
     });
-  }, [addListener, sendRaw]);
+  }, [addListener, sendRaw, clearLatestFrame]);
 
   // Draw incoming JPEG frames to canvas
   useEffect(() => {
     if (!latestFrame || !canvasRef.current) return;
+    if (Date.now() < suppressFramesUntilRef.current) return;
+    // If user has stopped streaming, do not draw stale frames
+    if (!streaming && sessionStorage.getItem('pr_streaming') !== 'true') return;
+
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
     const img = new Image();
     img.onload = () => {
+      if (Date.now() < suppressFramesUntilRef.current) return;
       canvas.width = img.naturalWidth || 1080;
       canvas.height = img.naturalHeight || 1920;
       ctx.drawImage(img, 0, 0);
@@ -72,19 +137,7 @@ export default function MirrorPage() {
       sessionStorage.setItem('pr_streaming', 'true');
     };
     img.src = latestFrame;
-  }, [latestFrame]);
-
-  // Start or stop streaming
-  const handleToggleStream = () => {
-    if (streaming) {
-      setStreaming(false);
-      sessionStorage.removeItem('pr_streaming');
-      sendRaw({ type: 'stream_stop' });
-    } else {
-      setStreamStarting(true);
-      sendRaw({ type: 'stream_start' });
-    }
-  };
+  }, [latestFrame, streaming]);
 
   // Touch gesture calculations (normalized 0.0 - 1.0)
   const getNormalizedPos = (e) => {
@@ -97,13 +150,23 @@ export default function MirrorPage() {
   };
 
   const handlePointerDown = (e) => {
-    if (!streaming) return;
+    // CRITICAL: Prevent touch actions if streaming is false
+    if (!streaming) {
+      pointerStartRef.current = null;
+      return;
+    }
+    e.preventDefault();
     const { x, y } = getNormalizedPos(e);
     pointerStartRef.current = { x, y, time: Date.now() };
   };
 
   const handlePointerUp = (e) => {
-    if (!streaming || !pointerStartRef.current) return;
+    // CRITICAL: Prevent touch actions if streaming is false
+    if (!streaming || !pointerStartRef.current) {
+      pointerStartRef.current = null;
+      return;
+    }
+    e.preventDefault();
     const start = pointerStartRef.current;
     const end = getNormalizedPos(e);
     const duration = Date.now() - start.time;
@@ -130,16 +193,129 @@ export default function MirrorPage() {
     }
   };
 
+  const handlePointerCancel = () => {
+    pointerStartRef.current = null;
+  };
+
+  // Keyboard navigation & hardware buttons
+  const handleKeyPress = (key) => {
+    switch (key) {
+      case 'back':
+        sendControl('back');
+        break;
+      case 'home':
+        sendControl('home');
+        break;
+      case 'recents':
+        sendControl('recents');
+        break;
+      case 'lock':
+      case 'power':
+        sendControl('keyevent', { keycode: 'KEYCODE_POWER' });
+        break;
+      case 'volume_up':
+      case 'vol_up':
+        sendControl('keyevent', { keycode: 'KEYCODE_VOLUME_UP' });
+        break;
+      case 'volume_down':
+      case 'vol_down':
+        sendControl('keyevent', { keycode: 'KEYCODE_VOLUME_DOWN' });
+        break;
+      case 'enter':
+        sendControl('keyevent', { keycode: 'KEYCODE_ENTER' });
+        break;
+      case 'delete':
+      case 'backspace':
+        sendControl('keyevent', { keycode: 'KEYCODE_DEL' });
+        break;
+      default:
+        break;
+    }
+  };
+
+  // Directional Swipe / D-Pad Navigation
+  const handleSwipe = (direction) => {
+    switch (direction) {
+      case 'left':
+        sendControl('swipe', { x1: 0.8, y1: 0.5, x2: 0.2, y2: 0.5, ms: 300 });
+        break;
+      case 'right':
+        sendControl('swipe', { x1: 0.2, y1: 0.5, x2: 0.8, y2: 0.5, ms: 300 });
+        break;
+      case 'up':
+        sendControl('swipe', { x1: 0.5, y1: 0.7, x2: 0.5, y2: 0.3, ms: 300 });
+        break;
+      case 'down':
+        sendControl('swipe', { x1: 0.5, y1: 0.3, x2: 0.5, y2: 0.7, ms: 300 });
+        break;
+      default:
+        break;
+    }
+  };
+
+  const handleCenterTap = () => {
+    sendControl('tap', { x: 0.5, y: 0.5 });
+  };
+
+  // Physical Keyboard Listeners (Arrow navigation + Escape/Enter)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (
+        showTypeModal ||
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)
+      ) {
+        return;
+      }
+      if (!streaming) return;
+
+      switch (e.key) {
+        case 'ArrowUp':
+          e.preventDefault();
+          handleSwipe('up');
+          break;
+        case 'ArrowDown':
+          e.preventDefault();
+          handleSwipe('down');
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          handleSwipe('left');
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          handleSwipe('right');
+          break;
+        case 'Escape':
+          e.preventDefault();
+          sendControl('back');
+          break;
+        case 'Enter':
+          e.preventDefault();
+          sendControl('keyevent', { keycode: 'KEYCODE_ENTER' });
+          break;
+        default:
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [streaming, showTypeModal, sendControl]);
+
+  // Type Text Handler
   const handleSendText = (e) => {
     e.preventDefault();
     if (!typeText) return;
-    sendControl('type_text', { text: typeText, submit: pressSubmit, method: 'set' });
+    const action = usePaste ? 'paste' : 'text';
+    sendControl(action, { value: typeText });
+
+    if (pressSubmit) {
+      setTimeout(() => {
+        sendControl('keyevent', { keycode: 'KEYCODE_ENTER' });
+      }, 150);
+    }
     setTypeText('');
     setShowTypeModal(false);
-  };
-
-  const handleKeyPress = (key) => {
-    sendControl('press_key', { key });
   };
 
   const handleScreenshot = () => {
@@ -174,9 +350,10 @@ export default function MirrorPage() {
         <div className="phone-chassis">
           <canvas
             ref={canvasRef}
-            className="phone-canvas"
+            className={`phone-canvas ${streaming ? 'active-stream' : 'inert-stream'}`}
             onPointerDown={handlePointerDown}
             onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
           />
 
           {!streaming && (
@@ -185,7 +362,7 @@ export default function MirrorPage() {
                 <h3>{phoneOnline ? 'Phone Connected' : 'Waiting for Device'}</h3>
                 <p>
                   {phoneOnline
-                    ? 'Screen mirroring is ready. Press Start to stream the screen.'
+                    ? 'Screen mirroring is ready. Press Start Streaming to view and interact.'
                     : 'Ensure the Phone Remote companion app is running on the device.'}
                 </p>
                 <button
@@ -208,6 +385,7 @@ export default function MirrorPage() {
 
       {/* Control Toolbar */}
       <div className="controls-sidebar">
+        {/* Session Group */}
         <div className="control-group">
           <span className="group-title">Session</span>
           <button
@@ -220,6 +398,7 @@ export default function MirrorPage() {
           </button>
         </div>
 
+        {/* Navigation Group */}
         <div className="control-group">
           <span className="group-title">Navigation</span>
           <div className="nav-button-row">
@@ -238,28 +417,78 @@ export default function MirrorPage() {
           </div>
         </div>
 
+        {/* Accessibility & D-Pad Navigation */}
+        <div className="control-group">
+          <span className="group-title">Accessibility & D-Pad Swiping</span>
+          <div className="dpad-card">
+            <div className="dpad-row">
+              <button
+                className="btn dpad-btn"
+                title="Swipe Up / Scroll Down (Arrow Up)"
+                onClick={() => handleSwipe('up')}
+              >
+                <ChevronUp size={22} />
+              </button>
+            </div>
+            <div className="dpad-row dpad-middle">
+              <button
+                className="btn dpad-btn"
+                title="Swipe Left (Arrow Left)"
+                onClick={() => handleSwipe('left')}
+              >
+                <ChevronLeft size={22} />
+              </button>
+              <button
+                className="btn dpad-btn dpad-center"
+                title="Center Tap (Tap screen center)"
+                onClick={handleCenterTap}
+              >
+                <CircleDot size={20} />
+              </button>
+              <button
+                className="btn dpad-btn"
+                title="Swipe Right (Arrow Right)"
+                onClick={() => handleSwipe('right')}
+              >
+                <ChevronRight size={22} />
+              </button>
+            </div>
+            <div className="dpad-row">
+              <button
+                className="btn dpad-btn"
+                title="Swipe Down / Scroll Up (Arrow Down)"
+                onClick={() => handleSwipe('down')}
+              >
+                <ChevronDown size={22} />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Hardware & Input Group */}
         <div className="control-group">
           <span className="group-title">Hardware & Input</span>
           <div className="action-button-grid">
-            <button className="btn" onClick={() => setShowTypeModal(true)}>
+            <button className="btn" onClick={() => setShowTypeModal(true)} title="Type text into phone">
               <Type size={16} />
               <span>Type Text</span>
             </button>
-            <button className="btn" onClick={() => handleKeyPress('lock')}>
+            <button className="btn" onClick={() => handleKeyPress('lock')} title="Lock / Power screen">
               <Power size={16} />
               <span>Lock / Power</span>
             </button>
-            <button className="btn" onClick={() => handleKeyPress('volume_up')}>
+            <button className="btn" onClick={() => handleKeyPress('volume_up')} title="Raise volume">
               <Volume2 size={16} />
               <span>Vol +</span>
             </button>
-            <button className="btn" onClick={() => handleKeyPress('volume_down')}>
+            <button className="btn" onClick={() => handleKeyPress('volume_down')} title="Lower volume">
               <Volume1 size={16} />
               <span>Vol -</span>
             </button>
           </div>
         </div>
 
+        {/* Utilities Group */}
         <div className="control-group">
           <span className="group-title">Utilities</span>
           <div className="action-button-grid">
@@ -318,14 +547,25 @@ export default function MirrorPage() {
                 value={typeText}
                 onChange={(e) => setTypeText(e.target.value)}
               />
-              <div className="checkbox-row">
-                <input
-                  type="checkbox"
-                  id="pressSubmit"
-                  checked={pressSubmit}
-                  onChange={(e) => setPressSubmit(e.target.checked)}
-                />
-                <label htmlFor="pressSubmit">Press Enter / Submit after typing</label>
+              <div className="checkbox-options-container">
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    id="pressSubmit"
+                    checked={pressSubmit}
+                    onChange={(e) => setPressSubmit(e.target.checked)}
+                  />
+                  <span>Press Enter / Submit after typing</span>
+                </label>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    id="usePaste"
+                    checked={usePaste}
+                    onChange={(e) => setUsePaste(e.target.checked)}
+                  />
+                  <span>Use Paste mode (bypasses input filters)</span>
+                </label>
               </div>
               <div className="modal-actions">
                 <button type="button" className="btn" onClick={() => setShowTypeModal(false)}>
@@ -371,19 +611,27 @@ export default function MirrorPage() {
           width: 100%;
           height: 100%;
           object-fit: contain;
+        }
+        .phone-canvas.active-stream {
           cursor: crosshair;
           touch-action: none;
+          pointer-events: auto;
+        }
+        .phone-canvas.inert-stream {
+          cursor: not-allowed;
+          pointer-events: none;
         }
         .stream-overlay {
           position: absolute;
           inset: 0;
-          background: rgba(10, 12, 16, 0.85);
-          backdrop-filter: blur(10px);
+          background: rgba(10, 12, 16, 0.88);
+          backdrop-filter: blur(12px);
           display: flex;
           align-items: center;
           justify-content: center;
           padding: 24px;
           text-align: center;
+          z-index: 10;
         }
         .overlay-content h3 {
           font-size: 18px;
@@ -403,18 +651,19 @@ export default function MirrorPage() {
           font-size: 13.5px;
         }
         .controls-sidebar {
-          width: 320px;
+          width: 330px;
           background: var(--bg2);
           border-left: 1px solid var(--border);
-          padding: 20px;
+          padding: 18px;
           display: flex;
           flex-direction: column;
-          gap: 24px;
+          gap: 18px;
+          overflow-y: auto;
         }
         .control-group {
           display: flex;
           flex-direction: column;
-          gap: 10px;
+          gap: 8px;
         }
         .group-title {
           font-size: 11px;
@@ -437,6 +686,60 @@ export default function MirrorPage() {
           grid-template-columns: repeat(2, 1fr);
           gap: 8px;
         }
+        
+        /* D-Pad Styling */
+        .dpad-card {
+          background: var(--bg3);
+          border: 1px solid var(--border);
+          border-radius: 14px;
+          padding: 12px 10px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 6px;
+        }
+        .dpad-row {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+        }
+        .dpad-middle {
+          width: 100%;
+          justify-content: center;
+        }
+        .dpad-btn {
+          width: 44px;
+          height: 40px;
+          padding: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: var(--bg2);
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          color: var(--text);
+          transition: all 0.15s ease;
+        }
+        .dpad-btn:hover {
+          background: var(--accent-glow);
+          border-color: var(--accent);
+          color: var(--accent2);
+          transform: scale(1.05);
+        }
+        .dpad-btn:active {
+          transform: scale(0.94);
+        }
+        .dpad-center {
+          background: var(--accent-glow);
+          border-color: rgba(99, 102, 241, 0.4);
+          color: var(--accent2);
+        }
+        .dpad-center:hover {
+          background: var(--accent);
+          color: #fff;
+        }
+
         .empty-mirror-view {
           flex: 1;
           display: flex;
@@ -450,7 +753,7 @@ export default function MirrorPage() {
         .modal-backdrop {
           position: fixed;
           inset: 0;
-          background: rgba(0, 0, 0, 0.6);
+          background: rgba(0, 0, 0, 0.65);
           backdrop-filter: blur(4px);
           display: flex;
           align-items: center;
@@ -462,7 +765,7 @@ export default function MirrorPage() {
           border: 1px solid var(--border);
           border-radius: 16px;
           width: 100%;
-          max-width: 420px;
+          max-width: 440px;
           padding: 24px;
           box-shadow: var(--shadow);
         }
@@ -476,13 +779,24 @@ export default function MirrorPage() {
           color: var(--muted);
           margin-bottom: 16px;
         }
+        .checkbox-options-container {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          margin: 14px 0 18px 0;
+        }
         .checkbox-row {
           display: flex;
           align-items: center;
           gap: 8px;
-          font-size: 12px;
-          color: var(--muted);
-          margin: 12px 0 18px 0;
+          font-size: 12.5px;
+          color: var(--text);
+          cursor: pointer;
+        }
+        .checkbox-row input[type="checkbox"] {
+          accent-color: var(--accent);
+          width: 15px;
+          height: 15px;
         }
         .modal-actions {
           display: flex;

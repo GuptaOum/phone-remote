@@ -684,21 +684,69 @@ function setupSignaling(wss, app) {
           break;
         }
 
+        case 'get_location': {
+          if (ws.role === 'browser' && ws.watchId) {
+            const loc = acct(ws.userId).lastLocation.get(ws.watchId);
+            if (loc) ws.send(j(loc));
+          }
+          break;
+        }
+
         // ── Remote control (browser → phone) ─────────────────────────────
-        case 'control':
+        case 'control': {
+          let action = msg.action;
+          let keycode = msg.keycode;
+          let value = msg.value !== undefined ? msg.value : msg.text;
+
+          if (action === 'press_key' && msg.key) {
+            const keyMap = {
+              back: { action: 'back', keycode: 'KEYCODE_BACK' },
+              home: { action: 'home', keycode: 'KEYCODE_HOME' },
+              recents: { action: 'recents', keycode: 'KEYCODE_APP_SWITCH' },
+              lock: { action: 'keyevent', keycode: 'KEYCODE_POWER' },
+              power: { action: 'keyevent', keycode: 'KEYCODE_POWER' },
+              volume_up: { action: 'keyevent', keycode: 'KEYCODE_VOLUME_UP' },
+              vol_up: { action: 'keyevent', keycode: 'KEYCODE_VOLUME_UP' },
+              volume_down: { action: 'keyevent', keycode: 'KEYCODE_VOLUME_DOWN' },
+              vol_down: { action: 'keyevent', keycode: 'KEYCODE_VOLUME_DOWN' },
+              enter: { action: 'keyevent', keycode: 'KEYCODE_ENTER' },
+              delete: { action: 'keyevent', keycode: 'KEYCODE_DEL' },
+              backspace: { action: 'keyevent', keycode: 'KEYCODE_DEL' },
+            };
+            const mapped = keyMap[msg.key];
+            if (mapped) {
+              action = mapped.action;
+              keycode = mapped.keycode;
+            }
+          } else if (action === 'type_text') {
+            action = msg.method === 'paste' ? 'paste' : 'text';
+            value = msg.text !== undefined ? msg.text : msg.value;
+          }
+
           relayToPhone({
             type: 'control',
-            action: msg.action,
+            action,
             // Pass all possible args — phone ignores what it doesn't need
             x: msg.x, y: msg.y,
             x1: msg.x1, y1: msg.y1,
             x2: msg.x2, y2: msg.y2,
             dx: msg.dx, dy: msg.dy,
             ms: msg.ms,
-            keycode: msg.keycode,
-            value: msg.value,
+            keycode,
+            value,
           });
+
+          if (msg.action === 'type_text' && msg.submit) {
+            setTimeout(() => {
+              relayToPhone({
+                type: 'control',
+                action: 'keyevent',
+                keycode: 'KEYCODE_ENTER',
+              });
+            }, 150);
+          }
           break;
+        }
 
         case 'ping':
           ws.send(j({ type: 'pong' }));

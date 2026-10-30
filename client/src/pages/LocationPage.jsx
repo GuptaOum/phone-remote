@@ -3,13 +3,51 @@ import { useDevice } from '../context/DeviceContext';
 import { MapPin, ExternalLink, AlertCircle } from 'lucide-react';
 
 export default function LocationPage() {
-  const { selectedDeviceId, addListener } = useDevice();
-  const [locData, setLocData] = useState(null);
+  const { selectedDeviceId, addListener, sendRaw, lastLocation } = useDevice();
+  const [locData, setLocData] = useState(lastLocation);
 
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const markerRef = useRef(null);
   const circleRef = useRef(null);
+
+  const updateMapMarker = (loc) => {
+    const L = window.L;
+    if (!L || !mapInstanceRef.current || !loc || !loc.lat || !loc.lng) return;
+    const latlng = [loc.lat, loc.lng];
+
+    const phoneIcon = L.divIcon({
+      html: '<div style="font-size:28px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.5))">📍</div>',
+      iconSize: [32, 32],
+      iconAnchor: [16, 28],
+      className: '',
+    });
+
+    if (!markerRef.current) {
+      mapInstanceRef.current.setView(latlng, 15);
+      markerRef.current = L.marker(latlng, { icon: phoneIcon })
+        .addTo(mapInstanceRef.current)
+        .bindPopup('Phone is here')
+        .openPopup();
+    } else {
+      markerRef.current.setLatLng(latlng);
+      mapInstanceRef.current.panTo(latlng);
+    }
+
+    if (circleRef.current) {
+      circleRef.current.remove();
+      circleRef.current = null;
+    }
+
+    if (loc.accuracy) {
+      circleRef.current = L.circle(latlng, {
+        radius: loc.accuracy,
+        color: '#6366f1',
+        fillOpacity: 0.1,
+        weight: 1.5,
+      }).addTo(mapInstanceRef.current);
+    }
+  };
 
   // Initialize Leaflet map
   useEffect(() => {
@@ -24,6 +62,16 @@ export default function LocationPage() {
         maxZoom: 19,
       }).addTo(map);
       mapInstanceRef.current = map;
+
+      // If location is already known, center immediately
+      if (lastLocation) {
+        updateMapMarker(lastLocation);
+      }
+    }
+
+    // Proactively request latest location from server
+    if (sendRaw) {
+      sendRaw({ type: 'get_location' });
     }
 
     return () => {
@@ -36,49 +84,20 @@ export default function LocationPage() {
     };
   }, []);
 
+  // Sync if lastLocation changes
+  useEffect(() => {
+    if (lastLocation) {
+      setLocData(lastLocation);
+      updateMapMarker(lastLocation);
+    }
+  }, [lastLocation]);
+
   // Handle incoming location events from phone
   useEffect(() => {
     return addListener((msg) => {
-      const L = window.L;
-      if (!L || !mapInstanceRef.current) return;
-
       if (msg.type === 'location') {
-        const lat = msg.lat;
-        const lng = msg.lng;
-        const latlng = [lat, lng];
         setLocData(msg);
-
-        const phoneIcon = L.divIcon({
-          html: '<div style="font-size:28px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.5))">📍</div>',
-          iconSize: [32, 32],
-          iconAnchor: [16, 28],
-          className: '',
-        });
-
-        if (!markerRef.current) {
-          mapInstanceRef.current.setView(latlng, 15);
-          markerRef.current = L.marker(latlng, { icon: phoneIcon })
-            .addTo(mapInstanceRef.current)
-            .bindPopup('Phone is here')
-            .openPopup();
-        } else {
-          markerRef.current.setLatLng(latlng);
-          mapInstanceRef.current.panTo(latlng);
-        }
-
-        if (circleRef.current) {
-          circleRef.current.remove();
-          circleRef.current = null;
-        }
-
-        if (msg.accuracy) {
-          circleRef.current = L.circle(latlng, {
-            radius: msg.accuracy,
-            color: '#6366f1',
-            fillOpacity: 0.1,
-            weight: 1.5,
-          }).addTo(mapInstanceRef.current);
-        }
+        updateMapMarker(msg);
       } else if (msg.type === 'phone_disconnected') {
         setLocData(null);
         if (markerRef.current) {

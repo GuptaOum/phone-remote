@@ -15,6 +15,7 @@ export function DeviceProvider({ children }) {
   const [phoneOnline, setPhoneOnline] = useState(false);
   const [screenSize, setScreenSize] = useState({ width: 1080, height: 1920 });
   const [latestFrame, setLatestFrame] = useState(null);
+  const [lastLocation, setLastLocation] = useState(null);
 
   const socketRef = useRef(null);
   const listenersRef = useRef(new Set());
@@ -110,6 +111,9 @@ export function DeviceProvider({ children }) {
             }
           } else if (msg.type === 'phone_disconnected') {
             setPhoneOnline(false);
+            setLastLocation(null);
+          } else if (msg.type === 'location') {
+            setLastLocation(msg);
           }
           listenersRef.current.forEach((fn) => fn(msg));
         } catch (e) {
@@ -162,6 +166,10 @@ export function DeviceProvider({ children }) {
     return () => listenersRef.current.delete(callback);
   }, []);
 
+  const clearLatestFrame = useCallback(() => {
+    setLatestFrame(null);
+  }, []);
+
   return (
     <DeviceContext.Provider
       value={{
@@ -173,6 +181,8 @@ export function DeviceProvider({ children }) {
         phoneOnline,
         screenSize,
         latestFrame,
+        clearLatestFrame,
+        lastLocation,
         sendControl,
         sendRaw,
         addListener,
