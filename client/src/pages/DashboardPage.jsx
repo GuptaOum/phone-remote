@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useDevice } from '../context/DeviceContext';
-import { Smartphone, RefreshCw, Trash2, PlusCircle, CheckCircle2, XCircle } from 'lucide-react';
+import { Smartphone, RefreshCw, Trash2, PlusCircle, CheckCircle2, XCircle, Download } from 'lucide-react';
 
 function timeAgo(ms) {
   if (!ms) return 'never seen';
