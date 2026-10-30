@@ -197,6 +197,18 @@ The FastMCP server (`server/fastmcp_server.py`) exposes 26 standardized tools:
   2. **Screen Recording (MediaProjection)**: Granted once when stream starts.
   3. **Storage / All Files Access**: Required for `/storage/emulated/0` file explorer.
   4. **Location**: Required for GPS tab.
+* **Current release**: v1.3.0 (versionCode 3) — [GitHub release](https://github.com/GuptaOum/phone-remote/releases/tag/v1.3.0).
+* **Streaming ownership (v1.3.0)**: `ConnectionForegroundService` owns screen + camera capture; Flutter only mirrors state via `_screen_started` / `_screen_stopped`. `ScreenCaptureService` creates ONE virtual display per consent (Android 14 tokens are single-use) and drops the token on stop for API 34+, so the next start re-prompts. After every `auth_ok` the phone re-announces `stream_started` / `camera_streaming` if capture survived a socket blip.
+
+### Building the APK on EC2
+```bash
+# Upload sources (never overwrite android/local.properties on EC2):
+tar -czf flutter_src.tgz -C flutter_app --exclude=android/local.properties --exclude=android/.gradle --exclude=android/app/build --exclude=build --exclude=.dart_tool lib android pubspec.yaml
+# Build detached, ONE at a time (two concurrent builds share the build dir and crawl):
+ssh ... 'cd ~/phone-remote/flutter_app && nohup ~/flutter/bin/flutter build apk --release > /tmp/apk_build.log 2>&1 < /dev/null &'
+# ~10 min cold on t3.medium. Then copy build/app/outputs/flutter-apk/app-release.apk to
+# server/public/phone-remote.apk AND client/dist/phone-remote.apk.
+```
 
 ---
 
@@ -251,6 +263,10 @@ curl -k https://3-6-239-48.sslip.io/health
 4. **PM2 Process Mapping on EC2**:
    - `id 0`: `phone-remote` (Node.js server, port 3000)
    - `id 1`: `phone-remote-fastmcp` (Python FastMCP server, port 8001)
+5. **Phone dropping offline every few minutes**:
+   - *Root Cause*: OkHttp `pingInterval(3s)` killed the socket whenever one pong was late on mobile data. Now 10s; the server's 15s heartbeat still reaps dead sockets.
+6. **Killing processes on EC2 over SSH**:
+   - `pkill -f <name>` / `pgrep -f <name>` match the SSH command line itself. Use the bracket trick (`grep '[G]radleDaemon'`) or `./gradlew --stop`.
 
 ---
 *Created & Maintained by Google Antigravity & User Team. Last Updated: October 30, 2026.*
