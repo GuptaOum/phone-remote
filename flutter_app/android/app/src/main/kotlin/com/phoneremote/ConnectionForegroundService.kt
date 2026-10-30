@@ -26,6 +26,14 @@ class ConnectionForegroundService : Service() {
         var onMessage: ((String) -> Unit)? = null
         const val NOTIF_ID = 3
         const val NOTIF_ID_PROMPT = 4
+
+        // Must match the server's FRAME_ACK byte for byte.
+        private const val FRAME_ACK = """{"type":"fa"}"""
+        private const val FRAME_WINDOW = 2
+        private const val FRAME_ACK_STALL_MS = 1500L
+        private const val DEFAULT_FRAME_QUALITY = 40
+        private const val MIN_FRAME_QUALITY = 20
+        private const val MAX_FRAME_QUALITY = 55
         const val CHANNEL_ID = "connection"
         const val PREFS_NAME = "PhoneRemotePrefs"
         const val ACTION_STOP = "com.phoneremote.STOP_SERVICE"
@@ -100,6 +108,9 @@ class ConnectionForegroundService : Service() {
             // behind frame/file traffic) dropped a healthy connection every few
             // minutes. The server's own 15s heartbeat still reaps dead sockets.
             .pingInterval(10, TimeUnit.SECONDS)
+            // Nagle would hold back the tail of every frame until the previous
+            // segment is acked — up to a full round-trip of added latency.
+            .socketFactory(NoDelaySocketFactory())
             .build()
     }
 
@@ -182,6 +193,7 @@ class ConnectionForegroundService : Service() {
                 handler.post {
                     if (webSocket !== ws) return@post
                     reconnectDelay = 1
+                    resetFrameFlow()
                     val auth = JSONObject().apply {
                         put("type", "auth")
                         put("token", token)
@@ -191,6 +203,12 @@ class ConnectionForegroundService : Service() {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                // Frame acks arrive ~15×/s; handle them right here on the
+                // socket thread instead of queueing behind main-thread work.
+                if (text == FRAME_ACK) {
+                    if (webSocket === ws) onFrameAck()
+                    return
+                }
                 handler.post {
                     if (webSocket !== ws) return@post
                     try {
@@ -218,6 +236,7 @@ class ConnectionForegroundService : Service() {
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
                                         "list_apps", "open_url", "notifications", "paste",
+                                        "frame_ack",
                                     )))
                                 }
                                 webSocket.send(reg.toString())
@@ -377,11 +396,61 @@ class ConnectionForegroundService : Service() {
         ws?.send(bytes)
     }
 
+    // ── Live-frame flow control ──────────────────────────────────────────────
+    // The server acks every screen frame. At most FRAME_WINDOW may be
+    // unacknowledged; beyond that the capture loop doesn't even encode, so a
+    // network spike costs dropped frames, never a backlog of stale ones.
+    // Gating only starts after the first ack, so an older server still works.
+    private val framesInFlight = java.util.ArrayDeque<Long>() // send times, oldest first
+    @Volatile private var serverAcksFrames = false
+    @Volatile private var frameQuality = DEFAULT_FRAME_QUALITY
+
+    private fun resetFrameFlow() {
+        synchronized(framesInFlight) {
+            framesInFlight.clear()
+            serverAcksFrames = false
+        }
+    }
+
+    private fun screenFrameAllowed(): Boolean {
+        val queued = ws?.queueSize() ?: return false
+        if (queued > 0L) return false
+        if (!serverAcksFrames) return true
+        synchronized(framesInFlight) {
+            if (framesInFlight.size < FRAME_WINDOW) return true
+            // Acks stopped entirely (lost with a dying socket): start over
+            // rather than freezing the stream.
+            if (System.currentTimeMillis() - framesInFlight.peekLast() > FRAME_ACK_STALL_MS) {
+                framesInFlight.clear()
+                return true
+            }
+            return false
+        }
+    }
+
+    private fun onFrameAck() {
+        val rtt: Long
+        synchronized(framesInFlight) {
+            serverAcksFrames = true
+            val sentAt = framesInFlight.pollFirst() ?: return
+            rtt = System.currentTimeMillis() - sentAt
+        }
+        // Trade sharpness for speed when frames take long to get through
+        // (slow uplink), and win it back when the link is quick.
+        frameQuality = when {
+            rtt > 400 -> (frameQuality - 5).coerceAtLeast(MIN_FRAME_QUALITY)
+            rtt < 150 -> (frameQuality + 1).coerceAtMost(MAX_FRAME_QUALITY)
+            else -> frameQuality
+        }
+        ScreenCaptureService.instance?.jpegQuality = frameQuality
+    }
+
     private fun sendScreenFrame(jpegBytes: ByteArray) {
-        if ((ws?.queueSize() ?: 1L) > 0L) return
+        if (!screenFrameAllowed()) return
         val payload = ByteArray(jpegBytes.size + 1)
         payload[0] = 0x01
         jpegBytes.copyInto(payload, destinationOffset = 1)
+        synchronized(framesInFlight) { framesInFlight.addLast(System.currentTimeMillis()) }
         sendBinary(ByteString.of(*payload))
     }
 
@@ -389,6 +458,8 @@ class ConnectionForegroundService : Service() {
     // and by handleScreenCapture when a projection token already exists.
     fun startScreenStreaming() {
         val svc = ScreenCaptureService.instance
+        svc?.frameGate = ::screenFrameAllowed
+        svc?.jpegQuality = frameQuality
         if (svc == null || !svc.startStreaming { jpegBytes -> sendScreenFrame(jpegBytes) }) {
             // No token, or it's spent (Android 14+ allows one capture session
             // per consent): ask the user again.
@@ -1323,4 +1394,23 @@ class ConnectionForegroundService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
+}
+
+/** Plain sockets with TCP_NODELAY; OkHttp layers TLS on top. */
+private class NoDelaySocketFactory : javax.net.SocketFactory() {
+    private val base = javax.net.SocketFactory.getDefault()
+
+    private fun java.net.Socket.noDelay(): java.net.Socket = apply {
+        try { tcpNoDelay = true } catch (_: Exception) {}
+    }
+
+    override fun createSocket(): java.net.Socket = base.createSocket().noDelay()
+    override fun createSocket(host: String?, port: Int): java.net.Socket =
+        base.createSocket(host, port).noDelay()
+    override fun createSocket(host: String?, port: Int, localHost: java.net.InetAddress?, localPort: Int): java.net.Socket =
+        base.createSocket(host, port, localHost, localPort).noDelay()
+    override fun createSocket(host: java.net.InetAddress?, port: Int): java.net.Socket =
+        base.createSocket(host, port).noDelay()
+    override fun createSocket(address: java.net.InetAddress?, port: Int, localAddress: java.net.InetAddress?, localPort: Int): java.net.Socket =
+        base.createSocket(address, port, localAddress, localPort).noDelay()
 }

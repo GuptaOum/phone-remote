@@ -37,6 +37,9 @@ class ScreenCaptureService : Service() {
 
         private const val SCALE = 0.7f
         private const val ROTATION_CHECK_MS = 750L
+        // Frame-rate ceiling (~20 fps). Below it, the rate is set by how fast
+        // the network acks frames — see ConnectionForegroundService.
+        private const val MIN_FRAME_INTERVAL_MS = 50L
     }
 
     inner class LocalBinder : Binder() { val service get() = this@ScreenCaptureService }
@@ -54,6 +57,9 @@ class ScreenCaptureService : Service() {
     private var capH = 0
     @Volatile private var onFrame: ((ByteArray) -> Unit)? = null
     @Volatile private var running = false
+    /** Checked BEFORE grabbing and encoding a frame: false = the link is full, skip. */
+    @Volatile var frameGate: (() -> Boolean)? = null
+    @Volatile var jpegQuality = 40
     private val thread = Thread(::captureLoop).also { it.isDaemon = true }
 
     // Required before createVirtualDisplay on Android 14+. Also how we learn
@@ -189,14 +195,21 @@ class ScreenCaptureService : Service() {
 
     private fun captureLoop() {
         var lastRotationCheck = 0L
+        // Reused across frames: a fresh multi-MB bitmap per frame meant
+        // constant GC, and GC pauses showed up as stutter.
+        var buf: Bitmap? = null
+        val out = ByteArrayOutputStream(256 * 1024)
         while (true) {
             if (!running) { Thread.sleep(100); continue }
             try {
-                var bmp: Bitmap? = null
+                // Link full → don't capture at all. The next frame grabbed is
+                // whatever is on screen when there's room, never an old one.
+                if (frameGate?.invoke() == false) { Thread.sleep(5); continue }
+                val started = System.currentTimeMillis()
+                var frame: Bitmap? = null
                 synchronized(lock) {
-                    val now = System.currentTimeMillis()
-                    if (now - lastRotationCheck > ROTATION_CHECK_MS) {
-                        lastRotationCheck = now
+                    if (started - lastRotationCheck > ROTATION_CHECK_MS) {
+                        lastRotationCheck = started
                         resizeIfRotatedLocked()
                     }
                     val img = reader?.acquireLatestImage()
@@ -204,25 +217,30 @@ class ScreenCaptureService : Service() {
                         try {
                             val plane = img.planes[0]
                             val stride = plane.rowStride / plane.pixelStride
-                            val full = Bitmap.createBitmap(stride, img.height, Bitmap.Config.ARGB_8888)
-                            full.copyPixelsFromBuffer(plane.buffer)
+                            val b = buf?.takeIf { it.width == stride && it.height == img.height }
+                                ?: Bitmap.createBitmap(stride, img.height, Bitmap.Config.ARGB_8888).also {
+                                    buf?.recycle()
+                                    buf = it
+                                }
+                            b.copyPixelsFromBuffer(plane.buffer)
                             // Row padding makes the buffer wider than the image; crop it
                             // off so the frame's aspect matches the screen exactly.
-                            bmp = if (stride > img.width) {
-                                Bitmap.createBitmap(full, 0, 0, img.width, img.height).also { full.recycle() }
-                            } else full
+                            frame = if (stride > img.width) Bitmap.createBitmap(b, 0, 0, img.width, img.height) else b
                         } finally {
                             img.close()
                         }
                     }
                 }
-                val frame = bmp
-                if (frame == null) { Thread.sleep(33); continue }
-                val out = ByteArrayOutputStream()
-                frame.compress(Bitmap.CompressFormat.JPEG, 35, out)
-                frame.recycle()
+                val f = frame
+                // The mirror only produces images when the screen changes, so
+                // poll briefly: a change is picked up within ~10 ms.
+                if (f == null) { Thread.sleep(10); continue }
+                out.reset()
+                f.compress(Bitmap.CompressFormat.JPEG, jpegQuality, out)
+                if (f !== buf) f.recycle()
                 onFrame?.invoke(out.toByteArray())
-                Thread.sleep(83)
+                val spent = System.currentTimeMillis() - started
+                if (spent < MIN_FRAME_INTERVAL_MS) Thread.sleep(MIN_FRAME_INTERVAL_MS - spent)
             } catch (e: Exception) {
                 Thread.sleep(100)
             }
