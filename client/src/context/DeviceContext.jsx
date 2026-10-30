@@ -119,6 +119,11 @@ export function DeviceProvider({ children }) {
         if (event.data instanceof ArrayBuffer) {
           const bytes = new Uint8Array(event.data);
           const typeByte = bytes[0];
+          // Ack live frames on arrival: the server holds back new frames
+          // while two are unacknowledged, so stale ones never queue up.
+          if ((typeByte === 0x01 || typeByte === 0x02) && ws.readyState === WebSocket.OPEN) {
+            ws.send(typeByte === 0x01 ? '{"type":"fa","k":1}' : '{"type":"fa","k":2}');
+          }
           const payload = bytes.subarray(1);
           const blob = new Blob([payload], { type: 'image/jpeg' });
           emit({ type: 'binary_frame', typeByte, buffer: event.data, payload, blob });
@@ -134,7 +139,7 @@ export function DeviceProvider({ children }) {
         }
         if (msg.type === 'auth_ok') {
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'register', role: 'browser', deviceId: selectedDeviceId }));
+            ws.send(JSON.stringify({ type: 'register', role: 'browser', deviceId: selectedDeviceId, frameAck: true }));
           }
         } else if (msg.type === 'auth_error') {
           // Token rejected (expired/revoked) — reconnecting with it would loop forever.

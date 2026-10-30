@@ -79,6 +79,13 @@ function livePhone(a, deviceId) {
 const START_PENDING_MS = 15000;
 const IDLE_STOP_GRACE_MS = 10000;
 const STOP_FRAME_GRACE_MS = 3000;
+// Live-frame flow control: at most this many frames unacknowledged per hop.
+// 2 keeps the link busy (one frame on the wire while the next is encoded)
+// while bounding latency to ~2 frames instead of whatever TCP buffers hold.
+const FRAME_WINDOW = 2;
+// No ack for this long → assume the acks were lost, not that the link is slow.
+const FRAME_ACK_STALL_MS = 1500;
+const FRAME_ACK = '{"type":"fa"}';
 
 function mediaState(a, deviceId) {
   let m = a.media.get(deviceId);
@@ -517,17 +524,33 @@ function setupSignaling(wss, app) {
       if (isBinary) {
         if (ws.authed && ws.role === 'phone') {
           const marker = raw[0];
-          if (marker === 0x01 || marker === 0x02) syncMediaFromFrame(marker);
+          const live = marker === 0x01 || marker === 0x02;
+          if (live) syncMediaFromFrame(marker);
+          // Per-hop flow control: the phone keeps at most FRAME_WINDOW screen
+          // frames unacknowledged, so frames can't pile up in its TCP buffer
+          // during a network spike and play back late.
+          if (marker === 0x01 && ws.caps?.includes('frame_ack')) ws.send(FRAME_ACK);
+          const now = Date.now();
           watchers().forEach((b) => {
             if (b.readyState !== 1) return;
             // Screen (0x01) and camera (0x02) frames only go to tabs that asked
             // for them; screenshots (0x03) go to every watcher (MCP included).
             if (marker === 0x01 && !b.wantsStream) return;
             if (marker === 0x02 && !b.wantsCamera) return;
-            // Live frames are disposable: if a browser's socket is backed up,
-            // DROP the frame instead of queueing it — otherwise the backlog
-            // keeps playing long after the phone stopped streaming.
-            if ((marker === 0x01 || marker === 0x02) && (b.bufferedAmount || 0) > 512 * 1024) return;
+            if (live) {
+              // Live frames are disposable: a frame that would have to wait
+              // behind older ones is dropped, never queued.
+              if (b.frameAck) {
+                const f = b.frames || (b.frames = { 1: { n: 0, at: 0 }, 2: { n: 0, at: 0 } });
+                const s = f[marker];
+                if (s.n >= FRAME_WINDOW && now - s.at < FRAME_ACK_STALL_MS) return;
+                if (s.n >= FRAME_WINDOW) s.n = 0; // acks lost (tab froze/reloaded) — start over
+                s.n++;
+                s.at = now;
+              } else if ((b.bufferedAmount || 0) > 128 * 1024) {
+                return;
+              }
+            }
             b.send(raw, { binary: true });
           });
         }
@@ -653,6 +676,9 @@ function setupSignaling(wss, app) {
           } else {
             const prevWatch = ws.watchId;
             ws.watchId = msg.deviceId || null;
+            // This tab acks every live frame it receives (`fa`).
+            ws.frameAck = msg.frameAck === true;
+            ws.frames = null;
             if (prevWatch !== ws.watchId) {
               ws.wantsStream = false;
               ws.wantsCamera = false;
@@ -1015,6 +1041,11 @@ function setupSignaling(wss, app) {
         case 'ping':
           ws.send(j({ type: 'pong' }));
           break;
+        case 'fa': {
+          const s = ws.frames?.[msg.k === 2 ? 2 : 1];
+          if (s && s.n > 0) s.n--;
+          break;
+        }
       }
     });
 
