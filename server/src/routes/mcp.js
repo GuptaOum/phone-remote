@@ -595,6 +595,9 @@ const PHONE_BASE = '/storage/emulated/0';
 function confineToBase(path) {
   let raw = (path || PHONE_BASE).replace(/\\/g, '/').replace(/\/+/g, '/').trim();
   if (!raw.startsWith('/')) raw = '/' + raw;
+  if (!raw.startsWith(PHONE_BASE)) {
+    raw = PHONE_BASE + raw;
+  }
   const parts = [];
   for (const seg of raw.split('/')) {
     if (seg === '' || seg === '.') continue;

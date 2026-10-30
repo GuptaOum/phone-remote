@@ -370,4 +370,34 @@ Taking full screenshots (`take_screenshot`) and running visual models over them 
 * Wake up screen / lock: `press_key(deviceId="...", key="lock")`
 
 ---
+
+### ⚡ Rule 7: Phone File Exploration & Search Protocol (Shallow vs Deep Scan)
+When interacting with phone storage via `list_files` and `get_file`:
+
+#### 1. Android Directory Aliases (Automatic Base Mapping)
+All phone storage is anchored at `/storage/emulated/0`. The backend automatically maps short folder names:
+* `"Download"` or `"/Download"` $\rightarrow$ `/storage/emulated/0/Download`
+* `"Documents"` $\rightarrow$ `/storage/emulated/0/Documents`
+* `"DCIM/Camera"` $\rightarrow$ `/storage/emulated/0/DCIM/Camera`
+* `"Pictures"` $\rightarrow$ `/storage/emulated/0/Pictures`
+* `"Telegram"` $\rightarrow$ `/storage/emulated/0/Download/Telegram`
+* `"WhatsApp"` $\rightarrow$ `/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media`
+
+#### 2. Default Search Behavior: Shallow Scan (Single Folder Level)
+* When a user asks: *"List all PDFs in the Download folder"* or *"Show files in Documents"*:
+  1. Call `list_files(deviceId="...", path="Download")`.
+  2. Filter and present all matching files located directly inside that folder.
+  3. **For any subfolders present inside**: Explicitly list them with a clear notice:
+     `📁 [Subfolder Name] (did not search inside here)`
+  4. **DO NOT** automatically recurse into subdirectories. This saves dozens of network round trips, phone CPU/battery, and LLM context window space.
+
+#### 3. Deep Scan Mode (Recursive Search)
+* **Trigger Condition**: ONLY if the user explicitly instructs:
+  - *"scan whole folder"*
+  - *"search all subfolders"*
+  - *"deep search"*
+  - *"recursively find all [ext] files"*
+* In Deep Scan mode, iterate into each child directory recursively and collect all matching items across the whole directory tree.
+
+---
 *Created & Maintained by Google Antigravity & User Team. Last Updated: October 30, 2026.*
