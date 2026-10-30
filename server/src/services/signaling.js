@@ -723,8 +723,8 @@ function setupSignaling(wss, app) {
           // arrives after the browser already asked to start again. Passing
           // it on would kill the stream the user just restarted.
           const staleStop = msg.type === 'stream_stopped' && m.streamStopAt && (
-            (m.stream === 'starting' && m.streamAt > m.streamStopAt) ||
-            (m.stream === 'on' && m.streamAt > m.streamStopAt && now - m.streamOnAt < 2000)
+            (m.stream === 'starting' && m.streamAt >= m.streamStopAt) ||
+            (m.stream === 'on' && m.streamAt >= m.streamStopAt && now - m.streamOnAt < 2000)
           );
           if (staleStop) break;
           m.stream = 'off';
@@ -739,6 +739,7 @@ function setupSignaling(wss, app) {
           if (ws.role !== 'phone') return;
           const m = mediaState(acct(ws.userId), ws.deviceId);
           m.camera = 'on';
+          if (typeof msg.front === 'boolean') m.cameraFront = msg.front;
           relayToWatchers({ type: 'camera_streaming', front: m.cameraFront });
           scheduleIdleCheck(ws.userId, ws.deviceId);
           break;

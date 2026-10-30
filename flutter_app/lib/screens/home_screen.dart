@@ -81,32 +81,20 @@ class _HomeScreenState extends State<HomeScreen>
       final view = WidgetsBinding.instance.platformDispatcher.views.first;
       _screenW = view.physicalSize.width.toInt();
       _screenH = view.physicalSize.height.toInt();
-      final screenW = _screenW;
-      final screenH = _screenH;
-
       _files = FileService(serverUrl: widget.serverUrl, token: widget.token);
 
+      // The Kotlin service registers itself (with the real screen size) on
+      // every auth_ok; registering again from here only duplicated it.
       _sig = SignalingService(
         serverUrl: widget.serverUrl,
         onConnected: () {
           setState(() => _connected = true);
-          _sig!.send({
-            'type': 'register',
-            'role': 'phone',
-            'deviceId': widget.deviceId,
-            'deviceName': _deviceModel,
-            'screenW': screenW,
-            'screenH': screenH,
-            'model': _deviceModel,
-          });
           _startConnectionService('Connected');
           _location?.start();
         },
         onDisconnected: () {
-          setState(() {
-            _connected = false;
-            _streaming = false;
-          });
+          // Capture keeps running across a socket blip, so _streaming stays.
+          setState(() => _connected = false);
           _updateConnectionStatus('Reconnecting...');
           _location?.stop();
         },
@@ -180,11 +168,11 @@ class _HomeScreenState extends State<HomeScreen>
       case 'stream_start':
         _handleStreamStart();
         break;
-      case 'stream_stop':
-        _handleStreamStop();
-        break;
       case '_screen_started':
         setState(() { _loading = false; _streaming = true; });
+        break;
+      case '_screen_stopped':
+        setState(() { _loading = false; _streaming = false; });
         break;
       case 'answer':
         _stream?.handleAnswer(msg['sdp'] as String);
@@ -246,12 +234,6 @@ class _HomeScreenState extends State<HomeScreen>
         );
       }
     }
-  }
-
-  Future<void> _handleStreamStop() async {
-    if (!_streaming) return;
-    await _stream?.stop();
-    if (mounted) setState(() => _streaming = false);
   }
 
   // ── Accessibility dialog ──────────────────────────────────────────────────
@@ -319,8 +301,8 @@ class _HomeScreenState extends State<HomeScreen>
   void dispose() {
     _pulseCtrl.dispose();
     WidgetsBinding.instance.removeObserver(this);
-    _camera?.stop();
-    _stream?.stop();
+    // Screen and camera capture belong to the Kotlin services and must
+    // outlive this widget (Android destroys the activity in the background).
     _location?.stop();
     _sig?.dispose();
     super.dispose();

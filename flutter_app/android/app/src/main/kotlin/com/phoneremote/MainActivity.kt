@@ -88,29 +88,26 @@ class MainActivity : FlutterActivity() {
         screenChannel = MethodChannel(engine.dartExecutor.binaryMessenger, SCREEN_CH)
         screenChannel!!.setMethodCallHandler { call, result ->
             when (call.method) {
+                // Capture is owned by ConnectionForegroundService (binary frames
+                // straight onto its socket); these just route there.
                 "startCapture" -> {
-                    if (captureService?.hasProjection() == true) {
-                        captureService?.restart { jpegBytes ->
-                            val b64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
-                            ConnectionForegroundService.instance?.send(
-                                JSONObject().apply {
-                                    put("type", "frame"); put("data", b64)
-                                    put("w", physicalW); put("h", physicalH)
-                                }.toString()
-                            )
-                        }
-                        ConnectionForegroundService.instance?.send("""{"type":"stream_started"}""")
-                        ConnectionForegroundService.onMessage?.invoke("""{"type":"_screen_started"}""")
+                    val conn = ConnectionForegroundService.instance
+                    if (conn == null) {
+                        result.error("NO_SVC", "Connection service not running", null)
+                    } else if ((captureService ?: ScreenCaptureService.instance)?.hasProjection() == true) {
+                        conn.streamRequested = true
+                        conn.startScreenStreaming()
                         result.success(null)
                     } else {
+                        conn.streamRequested = true
                         pendingResult = result
                         val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                         startActivityForResult(mgr.createScreenCaptureIntent(), PERM_CODE)
                     }
                 }
                 "stopCapture" -> {
-                    captureService?.stop()
-                    ConnectionForegroundService.instance?.send("""{"type":"stream_stopped"}""")
+                    ConnectionForegroundService.instance?.stopScreenStreaming()
+                        ?: (captureService ?: ScreenCaptureService.instance)?.stop()
                     result.success(null)
                 }
                 else -> result.notImplemented()
@@ -326,14 +323,21 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private var projectionDialogOpen = false
+
     private fun requestProjectionPermission() {
-        // If we already have a projection token (race: user tapped notification twice),
-        // just start streaming immediately — no dialog needed.
+        val conn = ConnectionForegroundService.instance
+        // The browser may have cancelled while the notification sat unread.
+        if (conn?.streamRequested != true) return
+        // A token already exists (e.g. notification tapped twice) — no dialog needed.
         val svc = captureService ?: ScreenCaptureService.instance
         if (svc?.hasProjection() == true) {
-            ConnectionForegroundService.instance?.startScreenStreaming()
+            conn.startScreenStreaming()
             return
         }
+        // Full-screen intent + notification tap can both land here.
+        if (projectionDialogOpen) return
+        projectionDialogOpen = true
         pendingResult = null
         val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         startActivityForResult(mgr.createScreenCaptureIntent(), PERM_CODE)
@@ -341,24 +345,35 @@ class MainActivity : FlutterActivity() {
 
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         super.onActivityResult(req, res, data)
-        if (req == PERM_CODE) {
-            if (res == Activity.RESULT_OK && data != null) {
-                // Promote ScreenCaptureService to a started service so it survives MainActivity death
-                startService(Intent(this, ScreenCaptureService::class.java))
-                // Set up the MediaProjection token (empty callback — binary streaming is started below)
-                val svc = captureService ?: ScreenCaptureService.instance
-                svc?.start(res, data) { _ -> }
-                // Start binary streaming via ConnectionForegroundService (replaces old b64 path)
-                ConnectionForegroundService.instance?.startScreenStreaming()
-                // Dismiss the permission prompt notification
-                (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-                    .cancel(ConnectionForegroundService.NOTIF_ID_PROMPT)
-                pendingResult?.success(null)
-            } else {
-                pendingResult?.error("DENIED", "Screen capture denied", null)
+        if (req != PERM_CODE) return
+        projectionDialogOpen = false
+        val conn = ConnectionForegroundService.instance
+        if (res == Activity.RESULT_OK && data != null) {
+            // Started (not just bound) so capture survives MainActivity death.
+            startService(Intent(this, ScreenCaptureService::class.java))
+            val svc = captureService ?: ScreenCaptureService.instance
+            try {
+                svc?.acceptProjection(res, data)
+            } catch (e: Exception) {
+                conn?.onProjectionDenied()
+                pendingResult?.error("FAILED", e.message, null)
+                pendingResult = null
+                return
             }
-            pendingResult = null
+            if (conn?.streamRequested == true) {
+                conn.startScreenStreaming()
+            } else {
+                // Stop was pressed while the dialog was up; keep the token for next time.
+                svc?.idle()
+            }
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                .cancel(ConnectionForegroundService.NOTIF_ID_PROMPT)
+            pendingResult?.success(null)
+        } else {
+            conn?.onProjectionDenied()
+            pendingResult?.error("DENIED", "Screen capture denied", null)
         }
+        pendingResult = null
     }
 
     override fun onDestroy() {

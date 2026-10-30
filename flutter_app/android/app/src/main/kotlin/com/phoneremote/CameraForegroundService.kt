@@ -44,52 +44,103 @@ class CameraForegroundService : Service() {
         return START_STICKY
     }
 
-    fun startCamera(front: Boolean, cb: (ByteArray) -> Unit) {
+    val isStreaming: Boolean get() = onFrame != null
+
+    // Bumped on every start/stop so callbacks from a superseded camera
+    // session (flip, restart) can't report on behalf of the current one.
+    @Volatile private var generation = 0
+
+    /**
+     * [onStarted] fires once the repeating request is running; [onError] if the
+     * camera can't be opened or drops out. Both may run on the camera thread.
+     */
+    fun startCamera(
+        front: Boolean,
+        onStarted: (() -> Unit)? = null,
+        onError: ((String) -> Unit)? = null,
+        cb: (ByteArray) -> Unit,
+    ) {
         stopCamera()
+        val gen = ++generation
         onFrame = cb
-
-        camThread = HandlerThread("CamThread").also { it.start() }
-        camHandler = Handler(camThread!!.looper)
-
-        val manager = getSystemService(CAMERA_SERVICE) as CameraManager
-        val cameraId = findCameraId(manager, front)
-
-        imageReader = ImageReader.newInstance(640, 480, ImageFormat.JPEG, 2)
-        imageReader!!.setOnImageAvailableListener({ reader ->
-            val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-            try {
-                val buf = image.planes[0].buffer
-                val bytes = ByteArray(buf.remaining())
-                buf.get(bytes)
-                onFrame?.invoke(bytes)
-            } finally {
-                image.close()
+        val fail = { reason: String ->
+            if (gen == generation) {
+                stopCamera()
+                onError?.invoke(reason)
             }
-        }, camHandler)
+        }
 
-        manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
-            override fun onOpened(cam: CameraDevice) {
-                cameraDevice = cam
-                cam.createCaptureSession(
-                    listOf(imageReader!!.surface),
-                    object : CameraCaptureSession.StateCallback() {
-                        override fun onConfigured(session: CameraCaptureSession) {
-                            captureSession = session
-                            val req = cam.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-                            req.addTarget(imageReader!!.surface)
-                            req.set(CaptureRequest.JPEG_QUALITY, 20.toByte())
-                            session.setRepeatingRequest(req.build(), null, camHandler)
-                        }
-                        override fun onConfigureFailed(session: CameraCaptureSession) {}
-                    }, camHandler
-                )
-            }
-            override fun onDisconnected(cam: CameraDevice) { cam.close() }
-            override fun onError(cam: CameraDevice, error: Int) { cam.close() }
-        }, camHandler)
+        try {
+            camThread = HandlerThread("CamThread").also { it.start() }
+            camHandler = Handler(camThread!!.looper)
+
+            val manager = getSystemService(CAMERA_SERVICE) as CameraManager
+            val cameraId = findCameraId(manager, front) ?: return fail("no_camera")
+
+            val reader = ImageReader.newInstance(640, 480, ImageFormat.JPEG, 2)
+            imageReader = reader
+            reader.setOnImageAvailableListener({ r ->
+                val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                try {
+                    val buf = image.planes[0].buffer
+                    val bytes = ByteArray(buf.remaining())
+                    buf.get(bytes)
+                    onFrame?.invoke(bytes)
+                } finally {
+                    image.close()
+                }
+            }, camHandler)
+
+            manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+                override fun onOpened(cam: CameraDevice) {
+                    if (gen != generation) { cam.close(); return }
+                    cameraDevice = cam
+                    try {
+                        cam.createCaptureSession(
+                            listOf(reader.surface),
+                            object : CameraCaptureSession.StateCallback() {
+                                override fun onConfigured(session: CameraCaptureSession) {
+                                    if (gen != generation) { session.close(); return }
+                                    try {
+                                        captureSession = session
+                                        val req = cam.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+                                        req.addTarget(reader.surface)
+                                        req.set(CaptureRequest.JPEG_QUALITY, 20.toByte())
+                                        session.setRepeatingRequest(req.build(), null, camHandler)
+                                        onStarted?.invoke()
+                                    } catch (e: Exception) {
+                                        fail("capture_failed")
+                                    }
+                                }
+                                override fun onConfigureFailed(session: CameraCaptureSession) {
+                                    fail("configure_failed")
+                                }
+                            }, camHandler
+                        )
+                    } catch (e: Exception) {
+                        fail("capture_failed")
+                    }
+                }
+                override fun onDisconnected(cam: CameraDevice) {
+                    cam.close()
+                    fail("camera_disconnected")
+                }
+                override fun onError(cam: CameraDevice, error: Int) {
+                    cam.close()
+                    val inUse = error == CameraDevice.StateCallback.ERROR_CAMERA_IN_USE ||
+                        error == CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE
+                    fail(if (inUse) "camera_in_use" else "camera_error")
+                }
+            }, camHandler)
+        } catch (e: SecurityException) {
+            fail("permission_denied")
+        } catch (e: Exception) {
+            fail("open_failed")
+        }
     }
 
     fun stopCamera() {
+        generation++
         onFrame = null
         try { captureSession?.close() } catch (_: Exception) {}
         try { cameraDevice?.close() } catch (_: Exception) {}
@@ -99,12 +150,13 @@ class CameraForegroundService : Service() {
         imageReader = null; camThread = null; camHandler = null
     }
 
-    private fun findCameraId(mgr: CameraManager, front: Boolean): String {
+    private fun findCameraId(mgr: CameraManager, front: Boolean): String? {
         val target = if (front) CameraCharacteristics.LENS_FACING_FRONT
                      else CameraCharacteristics.LENS_FACING_BACK
-        return mgr.cameraIdList.firstOrNull { id ->
+        val ids = mgr.cameraIdList
+        return ids.firstOrNull { id ->
             mgr.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == target
-        } ?: mgr.cameraIdList[0]
+        } ?: ids.firstOrNull()
     }
 
     private fun createChannel() {

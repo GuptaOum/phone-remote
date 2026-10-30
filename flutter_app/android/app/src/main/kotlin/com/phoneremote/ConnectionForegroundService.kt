@@ -73,6 +73,10 @@ class ConnectionForegroundService : Service() {
     private var authFailed = false
 
     private var lastCameraFrameMs = 0L
+    // The browser asked for the screen stream and hasn't cancelled. Checked
+    // when the permission dialog returns, so a Stop pressed while the dialog
+    // was open still wins.
+    var streamRequested = false
     private var reconnectDelay = 1L
     private var reconnectRunnable: Runnable? = null
     var isAlive = false
@@ -91,7 +95,11 @@ class ConnectionForegroundService : Service() {
         client = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.SECONDS)
-            .pingInterval(3, TimeUnit.SECONDS)
+            // OkHttp fails the socket if a ping's pong hasn't arrived by the next
+            // ping. At 3s, one slow round-trip on mobile data (or a pong queued
+            // behind frame/file traffic) dropped a healthy connection every few
+            // minutes. The server's own 15s heartbeat still reaps dead sockets.
+            .pingInterval(10, TimeUnit.SECONDS)
             .build()
     }
 
@@ -100,7 +108,8 @@ class ConnectionForegroundService : Service() {
             prefs.edit().remove("url").remove("token").apply()
             onMessage?.invoke("""{"type":"_service_stopped"}""")
             stopService(Intent(this, CameraForegroundService::class.java))
-            // ScreenCaptureService intentionally left running — MediaProjection token reused on next connect
+            // Capture itself is stopped in onDestroy. Pre-14 the token is kept,
+            // so the next connect needs no permission dialog.
             stopSelf()
             return START_NOT_STICKY
         }
@@ -166,8 +175,12 @@ class ConnectionForegroundService : Service() {
             .build()
 
         ws = client?.newWebSocket(req, object : WebSocketListener() {
+            // Every callback checks it still belongs to the current socket: a
+            // replaced socket's late onFailure would otherwise "lose" the new,
+            // healthy connection and start a reconnect loop.
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 handler.post {
+                    if (webSocket !== ws) return@post
                     reconnectDelay = 1
                     val auth = JSONObject().apply {
                         put("type", "auth")
@@ -179,6 +192,7 @@ class ConnectionForegroundService : Service() {
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 handler.post {
+                    if (webSocket !== ws) return@post
                     try {
                         val json = JSONObject(text)
                         when (json.optString("type")) {
@@ -207,6 +221,18 @@ class ConnectionForegroundService : Service() {
                                     )))
                                 }
                                 webSocket.send(reg.toString())
+                                // Capture survives a socket blip. Tell the server so a
+                                // waiting browser re-attaches instead of re-requesting
+                                // (which would mean a new permission dialog on 14+).
+                                if (ScreenCaptureService.instance?.isStreaming == true) {
+                                    webSocket.send("""{"type":"stream_started"}""")
+                                }
+                                if (CameraForegroundService.instance?.isStreaming == true) {
+                                    webSocket.send(JSONObject().apply {
+                                        put("type", "camera_streaming")
+                                        put("front", _cameraFront)
+                                    }.toString())
+                                }
                                 startLocationUpdates()
                             }
                             "auth_error" -> {
@@ -284,7 +310,12 @@ class ConnectionForegroundService : Service() {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                handler.post { onLost() }
+                handler.post { if (webSocket === ws) onLost() }
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                // Complete the close handshake so onClosed actually fires.
+                webSocket.close(code, null)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -293,7 +324,7 @@ class ConnectionForegroundService : Service() {
                     handler.post { handleAuthFailure(reason.ifEmpty { "Device removed" }) }
                     return
                 }
-                if (code != 1000) handler.post { onLost() }
+                if (code != 1000) handler.post { if (webSocket === ws) onLost() }
             }
         })
     }
@@ -324,6 +355,8 @@ class ConnectionForegroundService : Service() {
     }
 
     private fun scheduleReconnect() {
+        // onFailure and onClosed can both report the same drop; never stack two timers.
+        cancelReconnect()
         reconnectRunnable = Runnable {
             reconnectDelay = (reconnectDelay * 2).coerceAtMost(3)
             doConnect()
@@ -355,14 +388,57 @@ class ConnectionForegroundService : Service() {
     // Called by MainActivity after the user grants screen recording permission,
     // and by handleScreenCapture when a projection token already exists.
     fun startScreenStreaming() {
-        val svc = ScreenCaptureService.instance ?: return
-        if (!svc.hasProjection()) return
-        svc.restart { jpegBytes -> sendScreenFrame(jpegBytes) }
+        val svc = ScreenCaptureService.instance
+        if (svc == null || !svc.startStreaming { jpegBytes -> sendScreenFrame(jpegBytes) }) {
+            // No token, or it's spent (Android 14+ allows one capture session
+            // per consent): ask the user again.
+            requestProjection()
+            return
+        }
         send("""{"type":"stream_started"}""")
         onMessage?.invoke("""{"type":"_screen_started"}""")
-        // Restore the main notification back to normal "Connected" state
-        updateNotification("Connected", serverUrl)
-        // Dismiss the separate prompt notification if it was shown
+        clearProjectionPrompt()
+    }
+
+    fun stopScreenStreaming() {
+        streamRequested = false
+        ScreenCaptureService.instance?.stop()
+        send("""{"type":"stream_stopped"}""")
+        onMessage?.invoke("""{"type":"_screen_stopped"}""")
+        clearProjectionPrompt()
+    }
+
+    /** The user dismissed the screen-recording dialog. */
+    fun onProjectionDenied() {
+        if (!streamRequested) return
+        streamRequested = false
+        send("""{"type":"stream_error","reason":"permission_denied"}""")
+        clearProjectionPrompt()
+    }
+
+    /** Sharing ended outside our control (status-bar "Stop sharing", token revoked). */
+    fun onProjectionStopped() {
+        handler.post {
+            streamRequested = false
+            send("""{"type":"stream_error","reason":"projection_stopped"}""")
+            onMessage?.invoke("""{"type":"_screen_stopped"}""")
+        }
+    }
+
+    private fun requestProjection() {
+        // Shown from anywhere, and also try to bring the app to the front directly.
+        showProjectionPromptNotification()
+        try {
+            val launch = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+                action = ACTION_REQUEST_PROJECTION
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            if (launch != null) startActivity(launch)
+        } catch (_: Exception) {}
+    }
+
+    private fun clearProjectionPrompt() {
+        updateNotification(if (isAlive) "Connected" else "Reconnecting...", serverUrl)
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIF_ID_PROMPT)
     }
 
@@ -430,6 +506,7 @@ class ConnectionForegroundService : Service() {
             try { ws?.send(out.toString()) } catch (_: Exception) {}
             return
         }
+        refreshScreenSize()
         try {
             val (nodes, truncated) = svc.uiTree(
                 json.optBoolean("all", false),
@@ -516,6 +593,15 @@ class ConnectionForegroundService : Service() {
         try { ws?.send(o.toString()) } catch (_: Exception) {}
     }
 
+    // Normalised coordinates map onto the screen as it is NOW: the size cached
+    // at connect time is wrong (axes swapped) once the phone rotates.
+    private fun refreshScreenSize() {
+        try {
+            val p = ScreenCaptureService.realScreenSize(this)
+            if (p.x > 0 && p.y > 0) { screenW = p.x; screenH = p.y }
+        } catch (_: Exception) {}
+    }
+
     private fun handleControl(json: JSONObject) {
         val id = json.optString("id")
         val action = json.optString("action")
@@ -527,6 +613,7 @@ class ConnectionForegroundService : Service() {
             controlAck(id, action, false, "accessibility_not_enabled")
             return
         }
+        refreshScreenSize()
         val w = screenW.toFloat()
         val h = screenH.toFloat()
         if (w <= 0f || h <= 0f) {
@@ -551,6 +638,12 @@ class ConnectionForegroundService : Service() {
                     json.optInt("ms", 300).toLong(),
                     gestureAck
                 )
+                // A zero-distance stroke held in place is how Android sees a long press.
+                "long_press" -> {
+                    val x = (json.getDouble("x") * w).toFloat()
+                    val y = (json.getDouble("y") * h).toFloat()
+                    svc.swipe(x, y, x, y, json.optInt("ms", 800).coerceIn(500, 3000).toLong(), gestureAck)
+                }
                 "scroll"   -> svc.scroll(
                     (json.getDouble("x") * w).toFloat(),
                     (json.getDouble("y") * h).toFloat(),
@@ -955,48 +1048,63 @@ class ConnectionForegroundService : Service() {
                     }.toString())
                     return
                 }
-                val front = json.optBoolean("front", true)
-                _cameraFront = front
+                _cameraFront = json.optBoolean("front", true)
                 CameraForegroundService.instance?.stopCamera()
                 startService(Intent(this, CameraForegroundService::class.java))
-                handler.postDelayed({
-                    CameraForegroundService.instance?.startCamera(front) { jpegBytes ->
-                        val now = System.currentTimeMillis()
-                        if (now - lastCameraFrameMs < 83L) return@startCamera  // 12fps cap
-                        if ((ws?.queueSize() ?: 1L) > 0L) return@startCamera   // drop if wire busy
-                        lastCameraFrameMs = now
-                        val payload = ByteArray(jpegBytes.size + 1)
-                        payload[0] = 0x02  // camera frame type marker
-                        jpegBytes.copyInto(payload, destinationOffset = 1)
-                        sendBinary(ByteString.of(*payload))
-                    }
-                    send("""{"type":"camera_streaming"}""")
-                }, 300)
+                handler.postDelayed({ openCamera(_cameraFront) }, 300)
             }
-            "camera_stop" -> {
-                CameraForegroundService.instance?.stopCamera()
-                stopService(Intent(this, CameraForegroundService::class.java))
-                send("""{"type":"camera_stopped"}""")
-            }
+            "camera_stop" -> stopCamera()
             "camera_flip" -> {
                 _cameraFront = !_cameraFront
-                val front = _cameraFront
                 CameraForegroundService.instance?.stopCamera()
-                handler.postDelayed({
-                    CameraForegroundService.instance?.startCamera(front) { jpegBytes ->
-                        val now = System.currentTimeMillis()
-                        if (now - lastCameraFrameMs < 83L) return@startCamera  // 12fps cap
-                        if ((ws?.queueSize() ?: 1L) > 0L) return@startCamera   // drop if wire busy
-                        lastCameraFrameMs = now
-                        val payload = ByteArray(jpegBytes.size + 1)
-                        payload[0] = 0x02  // camera frame type marker
-                        jpegBytes.copyInto(payload, destinationOffset = 1)
-                        sendBinary(ByteString.of(*payload))
-                    }
-                    send("""{"type":"camera_streaming"}""")
-                }, 300)
+                handler.postDelayed({ openCamera(_cameraFront) }, 300)
             }
         }
+    }
+
+    // camera_streaming is sent only once frames are actually flowing, so the
+    // browser's "starting" state means something and failures surface as errors.
+    private fun openCamera(front: Boolean) {
+        val svc = CameraForegroundService.instance
+        if (svc == null) {
+            send("""{"type":"camera_error","reason":"service_unavailable"}""")
+            return
+        }
+        svc.startCamera(
+            front,
+            onStarted = {
+                handler.post {
+                    send(JSONObject().apply {
+                        put("type", "camera_streaming")
+                        put("front", front)
+                    }.toString())
+                }
+            },
+            onError = { reason ->
+                handler.post {
+                    stopService(Intent(this, CameraForegroundService::class.java))
+                    send(JSONObject().apply {
+                        put("type", "camera_error")
+                        put("reason", reason)
+                    }.toString())
+                }
+            },
+        ) { jpegBytes ->
+            val now = System.currentTimeMillis()
+            if (now - lastCameraFrameMs < 83L) return@startCamera  // 12fps cap
+            if ((ws?.queueSize() ?: 1L) > 0L) return@startCamera   // drop if wire busy
+            lastCameraFrameMs = now
+            val payload = ByteArray(jpegBytes.size + 1)
+            payload[0] = 0x02  // camera frame type marker
+            jpegBytes.copyInto(payload, destinationOffset = 1)
+            sendBinary(ByteString.of(*payload))
+        }
+    }
+
+    private fun stopCamera() {
+        CameraForegroundService.instance?.stopCamera()
+        stopService(Intent(this, CameraForegroundService::class.java))
+        send("""{"type":"camera_stopped"}""")
     }
 
     private fun handleScreenshot() {
@@ -1099,26 +1207,10 @@ class ConnectionForegroundService : Service() {
     private fun handleScreenCapture(json: JSONObject) {
         when (json.optString("type")) {
             "stream_start" -> {
-                if (ScreenCaptureService.instance?.hasProjection() == true) {
-                    startScreenStreaming()
-                } else {
-                    // No projection token yet — show a tappable notification the user can see
-                    // from anywhere, and also try to bring the app to the foreground directly.
-                    showProjectionPromptNotification()
-                    try {
-                        val launch = packageManager.getLaunchIntentForPackage(packageName)?.apply {
-                            action = ACTION_REQUEST_PROJECTION
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                        }
-                        if (launch != null) startActivity(launch)
-                    } catch (_: Exception) {}
-                }
+                streamRequested = true
+                startScreenStreaming()
             }
-            "stream_stop" -> {
-                ScreenCaptureService.instance?.stop()
-                send("""{"type":"stream_stopped"}""")
-                onMessage?.invoke(json.toString())
-            }
+            "stream_stop" -> stopScreenStreaming()
         }
     }
 
@@ -1220,6 +1312,12 @@ class ConnectionForegroundService : Service() {
         instance = null
         cancelReconnect()
         stopLocationUpdates()
+        // Logout, the notification's Stop, or a removed device: nobody can
+        // watch anymore, so don't leave the screen or camera being captured.
+        streamRequested = false
+        ScreenCaptureService.instance?.stop()
+        CameraForegroundService.instance?.stopCamera()
+        try { stopService(Intent(this, CameraForegroundService::class.java)) } catch (_: Exception) {}
         ws?.close(1000, "service destroyed")
         client?.dispatcher?.executorService?.shutdown()
         stopForeground(STOP_FOREGROUND_REMOVE)
