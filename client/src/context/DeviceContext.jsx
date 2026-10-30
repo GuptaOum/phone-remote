@@ -79,9 +79,8 @@ export function DeviceProvider({ children }) {
       ws.onopen = () => {
         if (!active) return;
         setWsStatus('connected');
-        // Authenticate & register
+        // Authenticate first
         ws.send(JSON.stringify({ type: 'auth', token }));
-        ws.send(JSON.stringify({ type: 'register', role: 'browser', deviceId: selectedDeviceId }));
       };
 
       ws.onmessage = (event) => {
@@ -91,10 +90,10 @@ export function DeviceProvider({ children }) {
           const typeByte = bytes[0];
           const payload = bytes.subarray(1);
           const blob = new Blob([payload], { type: 'image/jpeg' });
-          const url = URL.createObjectURL(blob);
-
-          if (typeByte === 0x01) {
-            setLatestFrame(url);
+          let url = null;
+          // Only create object URL for screenshots to avoid leaking thousands of blob URLs
+          if (typeByte === 0x03) {
+            url = URL.createObjectURL(blob);
           }
           listenersRef.current.forEach((fn) =>
             fn({ type: 'binary_frame', typeByte, buffer: event.data, payload, blob, url })
@@ -104,7 +103,11 @@ export function DeviceProvider({ children }) {
 
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'phone_connected') {
+          if (msg.type === 'auth_ok') {
+            if (selectedDeviceId && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'register', role: 'browser', deviceId: selectedDeviceId }));
+            }
+          } else if (msg.type === 'phone_connected') {
             setPhoneOnline(true);
             if (msg.screenW && msg.screenH) {
               setScreenSize({ width: msg.screenW, height: msg.screenH });
@@ -112,6 +115,15 @@ export function DeviceProvider({ children }) {
           } else if (msg.type === 'phone_disconnected') {
             setPhoneOnline(false);
             setLastLocation(null);
+          } else if (msg.type === 'device_offline') {
+            if (!msg.deviceId || msg.deviceId === selectedDeviceId) {
+              setPhoneOnline(false);
+              setLastLocation(null);
+            }
+          } else if (msg.type === 'device_online') {
+            if (msg.deviceId === selectedDeviceId) {
+              setPhoneOnline(true);
+            }
           } else if (msg.type === 'location') {
             setLastLocation(msg);
           }

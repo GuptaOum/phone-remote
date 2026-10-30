@@ -33,8 +33,8 @@ export default function MirrorPage() {
     addListener,
   } = useDevice();
 
-  const [streaming, setStreaming] = useState(() => sessionStorage.getItem('pr_streaming') === 'true');
-  const [streamStarting, setStreamStarting] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [streamStarting, setStreamStarting] = useState(() => sessionStorage.getItem('pr_streaming') === 'true');
   const [showTypeModal, setShowTypeModal] = useState(false);
   const [typeText, setTypeText] = useState('');
   const [pressSubmit, setPressSubmit] = useState(false);
@@ -45,14 +45,54 @@ export default function MirrorPage() {
   const canvasRef = useRef(null);
   const pointerStartRef = useRef(null);
   const suppressFramesUntilRef = useRef(0);
+  const renderingRef = useRef(false);
+  const latestBlobRef = useRef(null);
+  const streamingRef = useRef(false);
+  const startingTimeoutRef = useRef(null);
+
+  // High-performance direct canvas frame renderer
+  // Discards intermediate frames while rendering to guarantee absolute latest frame with zero queue delay
+  const drawLatestFrame = () => {
+    if (renderingRef.current || !latestBlobRef.current) return;
+    const blob = latestBlobRef.current;
+    latestBlobRef.current = null;
+    renderingRef.current = true;
+
+    createImageBitmap(blob)
+      .then((bitmap) => {
+        const canvas = canvasRef.current;
+        if (canvas && Date.now() >= suppressFramesUntilRef.current) {
+          if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+          }
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(bitmap, 0, 0);
+        }
+        bitmap.close();
+      })
+      .catch(() => {
+        // Suppress decode errors on rapid/aborted frames
+      })
+      .finally(() => {
+        renderingRef.current = false;
+        // If a fresher frame arrived while decoding, draw it immediately!
+        if (latestBlobRef.current && Date.now() >= suppressFramesUntilRef.current) {
+          drawLatestFrame();
+        }
+      });
+  };
 
   // Stop stream helper that thoroughly cuts off frames, clears canvas, and disables touches
   const stopStream = () => {
+    streamingRef.current = false;
     setStreaming(false);
     setStreamStarting(false);
     sessionStorage.removeItem('pr_streaming');
     suppressFramesUntilRef.current = Date.now() + 4000;
     pointerStartRef.current = null;
+    latestBlobRef.current = null;
+    if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
 
     if (clearLatestFrame) clearLatestFrame();
 
@@ -69,11 +109,19 @@ export default function MirrorPage() {
     suppressFramesUntilRef.current = 0;
     setStreamStarting(true);
     sendRaw({ type: 'stream_start' });
+
+    if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
+    startingTimeoutRef.current = setTimeout(() => {
+      setStreamStarting(false);
+      if (!streamingRef.current) {
+        sessionStorage.removeItem('pr_streaming');
+      }
+    }, 12000);
   };
 
   // Toggle stream
   const handleToggleStream = () => {
-    if (streaming) {
+    if (streaming || streamStarting) {
       stopStream();
     } else {
       startStream();
@@ -85,59 +133,80 @@ export default function MirrorPage() {
     return addListener((msg) => {
       if (msg.type === 'phone_connected') {
         if (sessionStorage.getItem('pr_streaming') === 'true') {
-          sendRaw({ type: 'stream_start' });
+          startStream();
         }
+      } else if (msg.type === 'stream_started') {
+        setStreamStarting(false);
+        setStreaming(true);
+        streamingRef.current = true;
+        sessionStorage.setItem('pr_streaming', 'true');
+        if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
       } else if (msg.type === 'stream_stopped') {
+        streamingRef.current = false;
         setStreaming(false);
         setStreamStarting(false);
         sessionStorage.removeItem('pr_streaming');
         suppressFramesUntilRef.current = Date.now() + 4000;
         pointerStartRef.current = null;
+        latestBlobRef.current = null;
+        if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
         if (clearLatestFrame) clearLatestFrame();
         const canvas = canvasRef.current;
         if (canvas) {
           const ctx = canvas.getContext('2d');
           ctx.clearRect(0, 0, canvas.width, canvas.height);
         }
-      } else if (msg.type === 'phone_disconnected') {
+      } else if (msg.type === 'phone_disconnected' || msg.type === 'device_offline') {
         stopStream();
       } else if (msg.type === 'offer') {
         setStreaming(true);
+        streamingRef.current = true;
         setStreamStarting(false);
         sessionStorage.setItem('pr_streaming', 'true');
-      } else if (msg.type === 'binary_frame' && msg.typeByte === 0x03) {
-        const url = URL.createObjectURL(msg.blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `screenshot_${Date.now()}.jpg`;
-        a.click();
-        URL.revokeObjectURL(url);
-        setTakingScreenshot(false);
+      } else if (msg.type === 'binary_frame') {
+        if (msg.typeByte === 0x03) {
+          const url = URL.createObjectURL(msg.blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `screenshot_${Date.now()}.jpg`;
+          a.click();
+          URL.revokeObjectURL(url);
+          setTakingScreenshot(false);
+          return;
+        }
+
+        if (msg.typeByte !== 0x01) return; // Only process screen frames
+        if (Date.now() < suppressFramesUntilRef.current) return;
+
+        // Sync streaming state to incoming frame arrival
+        if (!streamingRef.current) {
+          streamingRef.current = true;
+          setStreaming(true);
+          setStreamStarting(false);
+          sessionStorage.setItem('pr_streaming', 'true');
+          if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
+        }
+
+        latestBlobRef.current = msg.blob;
+        drawLatestFrame();
       }
     });
   }, [addListener, sendRaw, clearLatestFrame]);
 
-  // Draw incoming JPEG frames to canvas
+  // Resume stream on mount or reconnect if previously streaming
   useEffect(() => {
-    if (!latestFrame || !canvasRef.current) return;
-    if (Date.now() < suppressFramesUntilRef.current) return;
-    // If user has stopped streaming, do not draw stale frames
-    if (!streaming && sessionStorage.getItem('pr_streaming') !== 'true') return;
+    if (phoneOnline && sessionStorage.getItem('pr_streaming') === 'true' && !streamingRef.current) {
+      startStream();
+    }
+  }, [phoneOnline]);
 
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    const img = new Image();
-    img.onload = () => {
-      if (Date.now() < suppressFramesUntilRef.current) return;
-      canvas.width = img.naturalWidth || 1080;
-      canvas.height = img.naturalHeight || 1920;
-      ctx.drawImage(img, 0, 0);
-      setStreaming(true);
-      setStreamStarting(false);
-      sessionStorage.setItem('pr_streaming', 'true');
+  // Clean up starting timer and frame ref on unmount
+  useEffect(() => {
+    return () => {
+      if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
+      latestBlobRef.current = null;
     };
-    img.src = latestFrame;
-  }, [latestFrame, streaming]);
+  }, []);
 
   // Touch gesture calculations (normalized 0.0 - 1.0)
   const getNormalizedPos = (e) => {
@@ -156,6 +225,9 @@ export default function MirrorPage() {
       return;
     }
     e.preventDefault();
+    try {
+      e.target.setPointerCapture?.(e.pointerId);
+    } catch (_) {}
     const { x, y } = getNormalizedPos(e);
     pointerStartRef.current = { x, y, time: Date.now() };
   };
@@ -195,6 +267,13 @@ export default function MirrorPage() {
 
   const handlePointerCancel = () => {
     pointerStartRef.current = null;
+  };
+
+  const handleWheel = (e) => {
+    if (!streaming) return;
+    e.preventDefault();
+    const { x, y } = getNormalizedPos(e);
+    sendControl('scroll', { x, y, dx: e.deltaX / 1080, dy: e.deltaY / 1920 });
   };
 
   // Keyboard navigation & hardware buttons
@@ -354,15 +433,18 @@ export default function MirrorPage() {
             onPointerDown={handlePointerDown}
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerCancel}
+            onWheel={handleWheel}
           />
 
           {!streaming && (
             <div className="stream-overlay">
               <div className="overlay-content">
-                <h3>{phoneOnline ? 'Phone Connected' : 'Waiting for Device'}</h3>
+                <h3>{phoneOnline ? (streamStarting ? 'Starting Stream...' : 'Phone Connected') : 'Waiting for Device'}</h3>
                 <p>
                   {phoneOnline
-                    ? 'Screen mirroring is ready. Press Start Streaming to view and interact.'
+                    ? (streamStarting
+                        ? 'Connecting to phone display. Please grant permission if prompted on the device.'
+                        : 'Screen mirroring is ready. Press Start Streaming to view and interact.')
                     : 'Ensure the Phone Remote companion app is running on the device.'}
                 </p>
                 <button
@@ -394,7 +476,7 @@ export default function MirrorPage() {
             disabled={!phoneOnline}
           >
             {streaming ? <Square size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
-            <span>{streaming ? 'Stop Stream' : 'Start Stream'}</span>
+            <span>{streaming ? 'Stop Stream' : (streamStarting ? 'Starting...' : 'Start Stream')}</span>
           </button>
         </div>
 

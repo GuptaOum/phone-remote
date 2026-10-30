@@ -399,8 +399,20 @@ function setupSignaling(wss, app) {
     // The phone THIS browser is controlling
     const myPhone = () => {
       if (!ws.userId || !ws.watchId) return null;
-      const p = accounts.get(ws.userId)?.phones.get(ws.watchId);
-      return p?.readyState === 1 ? p : null;
+      const a = accounts.get(ws.userId);
+      if (!a) return null;
+      let p = a.phones.get(ws.watchId);
+      if (p?.readyState === 1) return p;
+      const pool = a.phonePool?.get(ws.watchId);
+      if (pool) {
+        for (const s of pool) {
+          if (s.readyState === 1) {
+            a.phones.set(ws.watchId, s);
+            return s;
+          }
+        }
+      }
+      return null;
     };
 
     const relayToPhone = (msg) => { if (ws.role === 'browser') myPhone()?.send(j(msg)); };
@@ -539,8 +551,13 @@ function setupSignaling(wss, app) {
           } else {
             ws.watchId = msg.deviceId || null;
             a.browsers.add(ws);
-            const p = ws.watchId && a.phones.get(ws.watchId);
-            if (p) {
+            let p = ws.watchId && a.phones.get(ws.watchId);
+            if (!p || p.readyState !== 1) {
+              const pool = ws.watchId && a.phonePool?.get(ws.watchId);
+              p = pool ? [...pool].find((s) => s.readyState === 1) : null;
+              if (p) a.phones.set(ws.watchId, p);
+            }
+            if (p && p.readyState === 1) {
               ws.send(j({
                 type: 'phone_connected',
                 deviceId: p.deviceId,
