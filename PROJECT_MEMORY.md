@@ -197,7 +197,8 @@ The FastMCP server (`server/fastmcp_server.py`) exposes 26 standardized tools:
   2. **Screen Recording (MediaProjection)**: Granted once when stream starts.
   3. **Storage / All Files Access**: Required for `/storage/emulated/0` file explorer.
   4. **Location**: Required for GPS tab.
-* **Current release**: v1.3.0 (versionCode 3) — [GitHub release](https://github.com/GuptaOum/phone-remote/releases/tag/v1.3.0).
+* **Current release**: v1.3.1 (versionCode 4) — [GitHub release](https://github.com/GuptaOum/phone-remote/releases/tag/v1.3.1).
+* **Live-frame flow control (v1.3.1)**: max 2 unacked frames per hop. Server sends `{"type":"fa"}` to phones with the `frame_ack` cap for every 0x01 frame; tabs registering with `frameAck: true` send `{"type":"fa","k":1|2}` on frame arrival and the server holds back frames to them while 2 are unacked (1.5 s stall reset). Phone skips capture/encode while its window is full and adapts JPEG quality 20–55 to ack RTT.
 * **Streaming ownership (v1.3.0)**: `ConnectionForegroundService` owns screen + camera capture; Flutter only mirrors state via `_screen_started` / `_screen_stopped`. `ScreenCaptureService` creates ONE virtual display per consent (Android 14 tokens are single-use) and drops the token on stop for API 34+, so the next start re-prompts. After every `auth_ok` the phone re-announces `stream_started` / `camera_streaming` if capture survived a socket blip.
 
 ### Building the APK on EC2
