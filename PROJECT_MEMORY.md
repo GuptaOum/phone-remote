@@ -424,4 +424,32 @@ All phone storage is anchored at `/storage/emulated/0`. The backend automaticall
   2. Locate the node with `desc: "Send"` in `get_ui_tree` and tap its coordinates `(x, y)` to dispatch the message immediately.
 
 ---
+
+### ⚡ Rule 9: PC-to-Phone Media & Document Dispatch Protocol (WhatsApp File Sharing)
+When the user gives a local PC file (e.g. `C:\Users\hp\Desktop\...\image.png` or video/doc) and instructs to send it to person X (e.g. Yash bro) on WhatsApp:
+
+#### 1. Size Verification & Pre-Flight Checks
+* **WhatsApp File Limits**:
+  - Documents (sent as Document): **Up to 2 GB** (preserves 100% original uncompressed quality).
+  - Media (sent via Gallery/Camera): **Up to 16 MB** for videos.
+* **Server Transfer Protocol**:
+  - For files $\le$ 18 MB: Call `send_file(deviceId, name, data_base64, folder="Download")`.
+  - For files $>$ 18 MB (up to 100 MB): Call `send_local_file(deviceId, name, folder="Download")` and stream raw binary to the generated `upload_url`.
+  - If file $>$ 2 GB: Alert/warn user immediately before upload.
+
+#### 2. The Android System DocumentsUI Security Trap & WhatsApp Solution
+* **Android Security Trap**: Android's system file picker (`com.google.android.documentsui` / SAF) blocks synthetic accessibility touches due to Android OS tapjacking protections (`FLAG_FILTER_TOUCHES_WHEN_OBSCURED`). Synthetic clicks on grid cards inside `documentsui` are dropped by the OS.
+* **The 100% Working Fast-Path (In-App WhatsApp Document Picker)**:
+  1. **Transfer File**: Push file to `/storage/emulated/0/Download/<filename>`.
+  2. **Open Chat**: In WhatsApp / WA Business, navigate to the target contact chat.
+  3. **Open Attachment Sheet**: Tap the bottom paperclip icon (`desc: "Attach"`, `x ≈ 0.619, y ≈ 0.91`).
+  4. **Select Document**: Tap the Document option (`desc: "Document"`, `x ≈ 0.125, y ≈ 0.694`).
+  5. **Stay in WhatsApp's Native Files Screen**: This opens WhatsApp's internal `Files` Activity (`com.whatsapp.w4b`). **Do NOT click "Browse documents"** (which launches the restricted system DocumentsUI).
+  6. **Search by Filename**: Tap the Search icon in WhatsApp's top bar (`desc: "Search"`, `x ≈ 0.8, y ≈ 0.085`).
+  7. **Paste Search Query**: Paste the base filename using `type_text(deviceId, text="filename", method="paste")`.
+  8. **Tap Matching Row**: WhatsApp isolates the file immediately under `Recents`. Tap the row directly (`desc: "filename"` or row `FrameLayout` at `x ≈ 0.39, y ≈ 0.54`). WhatsApp's in-app views accept synthetic clicks 100% reliably.
+  9. **Confirm & Dispatch**: WhatsApp opens the Send preview screen. Tap the green Send button (`desc: "Send"`, `x ≈ 0.911, y ≈ 0.552`).
+  10. Confirm delivery status (`"Sent"` or `"Delivered"`).
+
+---
 *Created & Maintained by Google Antigravity & User Team. Last Updated: October 30, 2026.*
