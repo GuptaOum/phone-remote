@@ -1285,7 +1285,7 @@ document.getElementById('go').onclick = async () => {
       }
       if (!userId) {
         // Fallback to default owner UUID if running in single-user FastMCP mode
-        userId = process.env.DEFAULT_USER_ID || '19d75c7c-b737-49c6-a3f8-4fe3e70d5b13';
+        userId = process.env.DEFAULT_USER_ID || '34256f0e-a22f-42ea-9f26-344cf5c3354a';
       }
 
       const { name, args } = req.body || {};

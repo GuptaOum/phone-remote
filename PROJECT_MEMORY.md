@@ -275,4 +275,99 @@ curl -k https://3-6-239-48.sslip.io/health
    - `pkill -f <name>` / `pgrep -f <name>` match the SSH command line itself. Use the bracket trick (`grep '[G]radleDaemon'`) or `./gradlew --stop`.
 
 ---
+
+## 🚀 10. AI Agent Execution Playbook & Fast-Path Cheatsheet
+> **For AI Agents (Antigravity, Claude, Cursor)**: Follow these golden rules to execute phone tasks 10× faster with minimal tool calls and zero pixel hallucinations.
+
+### ⚡ Rule 1: Launch Apps Directly via Package Names (Never Swipe / Search Drawer)
+Opening the app drawer and visually searching for an icon takes 4–6 tool calls and multiple seconds. **Always launch directly by package name or display name in 1 single call**:
+
+```python
+# 1-step direct app launch:
+open_app(deviceId="...", package="com.whatsapp")
+```
+
+#### Common Android Package Name Registry:
+| Application | Package Identifier | Direct Intent Action |
+| :--- | :--- | :--- |
+| **WhatsApp** | `com.whatsapp` | Chat / Messaging |
+| **YouTube** | `com.google.android.youtube` | Video playback |
+| **Google Chrome** | `com.android.chrome` | Web browsing |
+| **Google Maps** | `com.google.android.apps.maps` | Navigation / Places |
+| **Gmail** | `com.google.android.gm` | Email client |
+| **System Settings** | `com.android.settings` | Device configuration |
+| **Camera** | `com.android.camera` (or `com.oppo.camera`) | Photo / Video capture |
+| **Google Play Store** | `com.android.vending` | App installations |
+| **Telegram** | `org.telegram.messenger` | Messaging |
+| **Spotify** | `com.spotify.music` | Music streaming |
+| **Instagram** | `com.instagram.android` | Social feed |
+| **Phone Dialer** | `com.google.android.dialer` / `com.android.dialer` | Calls |
+| **Messages (SMS)** | `com.google.android.apps.messaging` | SMS / OTP review |
+| **Calculator** | `com.google.android.calculator` | Quick math |
+
+---
+
+### ⚡ Rule 2: Instant Deep Links & URL Schemes (`open_url`)
+Why open an app, tap search, type a contact, and open a conversation when you can jump straight to the action via Android Intent Deep Links in **1 call**?
+
+* **WhatsApp Direct Chat**:
+  `open_url(deviceId="...", url="https://wa.me/+919876543210?text=Hello")`
+  *(Bypasses opening WhatsApp, searching contact, and opening chat)*
+* **Google Maps Navigation**:
+  `open_url(deviceId="...", url="google.navigation:q=Taj+Mahal,+Agra")`
+  `open_url(deviceId="...", url="geo:0,0?q=Coffee+shops+near+me")`
+* **Direct Phone Dialer**:
+  `open_url(deviceId="...", url="tel:+919876543210")`
+* **Compose Email**:
+  `open_url(deviceId="...", url="mailto:support@example.com?subject=Inquiry&body=Help")`
+* **Direct Android System Settings Jump**:
+  - Wi-Fi Settings: `open_url(deviceId="...", url="android.settings.WIFI_SETTINGS")`
+  - Bluetooth: `open_url(deviceId="...", url="android.settings.BLUETOOTH_SETTINGS")`
+  - Location Services: `open_url(deviceId="...", url="android.settings.LOCATION_SOURCE_SETTINGS")`
+  - Application Management: `open_url(deviceId="...", url="android.settings.APPLICATION_SETTINGS")`
+
+---
+
+### ⚡ Rule 3: Targeted UI Tree Perception (`get_ui_tree` with `filter`)
+Taking full screenshots (`take_screenshot`) and running visual models over them is slow (~1.5s) and prone to coordinate estimation errors.
+* **Always use `get_ui_tree` with a targeted filter**:
+  ```python
+  # Takes only ~50ms, returns exact normalized center (x, y)
+  tree = get_ui_tree(deviceId="...", filter="Send")
+  
+  # Then tap directly with the returned coordinates:
+  tap(deviceId="...", x=tree.nodes[0].x, y=tree.nodes[0].y)
+  ```
+
+---
+
+### ⚡ Rule 4: Reactive Synchronization (`wait_for` vs `wait`)
+* ❌ **Bad Pattern**: Calling `wait(seconds=3)` blindly. If the page loads in 500ms, you wasted 2.5s. If it takes 4s, the next action fails.
+* ✅ **Best Practice**: Use `wait_for`:
+  ```python
+  # Resolves the exact millisecond the view or text appears on screen:
+  wait_for(deviceId="...", text="Search Results", timeout=8.0)
+  ```
+
+---
+
+### ⚡ Rule 5: Reliable Input Injection (`type_text`)
+* Set `submit=True` to immediately trigger the Enter / Search action without needing a second `press_key` call:
+  ```python
+  type_text(deviceId="...", text="Search query", submit=True)
+  ```
+* If a custom web input or secure field rejects keystrokes, switch to paste mode:
+  ```python
+  type_text(deviceId="...", text="ComplexPassword#123", method="paste", submit=True)
+  ```
+
+---
+
+### ⚡ Rule 6: Navigation Shortcuts (`press_key`)
+* Dismiss on-screen keyboards or modals: `press_key(deviceId="...", key="back")`
+* Return to clean home screen state: `press_key(deviceId="...", key="home")`
+* Switch recent tasks: `press_key(deviceId="...", key="recents")`
+* Wake up screen / lock: `press_key(deviceId="...", key="lock")`
+
+---
 *Created & Maintained by Google Antigravity & User Team. Last Updated: October 30, 2026.*
