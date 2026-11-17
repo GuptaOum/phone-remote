@@ -6,419 +6,66 @@ const dns = require('dns');
 const net = require('net');
 const http = require('http');
 const https = require('https');
+const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
+const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
+const { z } = require('zod');
+
 const db = require('../services/db');
 const { verifyToken } = require('../middleware/auth');
 const signaling = require('../services/signaling');
 
 /**
- * MCP server — Streamable HTTP transport (2025-06-18), single-JSON-response
- * mode (no SSE): the client POSTs one JSON-RPC message, gets one JSON-RPC
- * reply. That's all Claude's remote connector needs for request/response
- * tool calls; no server-side session state is required since we don't do
- * sampling, roots, or long-lived subscriptions.
- *
- * Auth: every request needs `Authorization: Bearer <token>` — the same JWT
- * issued by /oauth/token (or, for convenience while testing, by /api/login).
- * A 401 without a valid token points the client at the protected-resource
- * metadata per RFC 9728, so a compliant MCP client can find its way to the
- * authorization server on its own.
- *
- * All the "advanced" navigation tools (scroll, long_press, open_app_drawer,
- * the rich press_key set, and the `screenshot: true` act-and-see option) are
- * composed entirely from the phone's existing control primitives — no APK
- * change is needed. See RemoteAccessibilityService.pressKey for the keycodes.
+ * MCP server — Powered by Anthropic's official @modelcontextprotocol/sdk and zod.
+ * Streamable HTTP transport (single-JSON-response mode via enableJsonResponse: true).
+ * Auth: Multi-tenant JWT scoping passed via req.auth -> extra.authInfo.
  */
 
-const PROTOCOL_VERSION = '2025-06-18';
 const SERVER_VERSION = '2.0.0';
 
-// send_file: JSON body limit is 25 MB (index.js) and base64 inflates ~4/3,
-// so cap the decoded payload safely below that.
+// send_file caps
 const MAX_SEND_FILE_BYTES = 18 * 1024 * 1024;
-
-// Raw-bytes paths (upload URL, send_url, get_file) never touch the model's
-// context or the JSON body limit — the phone streams chunks to/from disk, so
-// they can afford a much higher ceiling.
 const MAX_TRANSFER_BYTES = 100 * 1024 * 1024;
+const MAX_GET_FILE_BYTES = MAX_TRANSFER_BYTES;
 
-// send_local_file: one-time upload URLs. The tool call reserves a token, the
-// MCP client then POSTs the raw file bytes to /mcp/upload/<token> — the file
-// never has to be base64'd through the model's context window.
+// send_local_file: one-time upload URLs
 const UPLOAD_TTL_MS = 10 * 60 * 1000;
-const pendingUploads = new Map(); // token → { userId, deviceId, dest, expiresAt }
+const pendingUploads = new Map(); // token -> { userId, deviceId, dest, expiresAt }
 function pruneUploads() {
   const now = Date.now();
   for (const [token, u] of pendingUploads) if (u.expiresAt < now) pendingUploads.delete(token);
 }
 
-// get_file: the mirror image — the server pulls the file off the phone and
-// holds it briefly under a one-time token; the MCP client GETs the raw bytes
-// from /mcp/download/<token>, again bypassing the model's context window.
+// get_file: one-time download URLs
 const DOWNLOAD_TTL_MS = 10 * 60 * 1000;
-const MAX_GET_FILE_BYTES = MAX_TRANSFER_BYTES;
-const pendingDownloads = new Map(); // token → { buffer, name, expiresAt }
+const pendingDownloads = new Map(); // token -> { buffer, name, expiresAt }
 function pruneDownloads() {
   const now = Date.now();
   for (const [token, d] of pendingDownloads) if (d.expiresAt < now) pendingDownloads.delete(token);
 }
 
-// Named keys → the KEYCODE_* strings the phone's pressKey() already handles.
+// Named keys -> KEYCODE_* strings
 const KEY_MAP = {
   back: 'KEYCODE_BACK',
   home: 'KEYCODE_HOME',
   recents: 'KEYCODE_APP_SWITCH',
-  enter: 'KEYCODE_ENTER',            // submits/newlines in the focused text field
-  delete: 'KEYCODE_DEL',             // backspace in the focused text field
+  enter: 'KEYCODE_ENTER',
+  delete: 'KEYCODE_DEL',
   notifications: 'KEYCODE_NOTIFICATION',
   quick_settings: 'KEYCODE_QUICK_SETTINGS',
-  lock: 'KEYCODE_POWER',             // GLOBAL_ACTION_LOCK_SCREEN
+  lock: 'KEYCODE_POWER',
   volume_up: 'KEYCODE_VOLUME_UP',
   volume_down: 'KEYCODE_VOLUME_DOWN',
 };
 const KEY_NAMES = Object.keys(KEY_MAP);
 
-// How long to let the UI settle before the auto-screenshot in act-and-see calls.
+// Screenshot constants
 const SCREENSHOT_SETTLE_MS = 850;
-
-// The phone captures at full native resolution (JPEG q90) — far bigger than
-// the model can use, and each image lingers in the conversation, so a long
-// automation session fills the context until older screenshots get evicted.
-// Shrink server-side before returning: explicit take_screenshot keeps the
-// API's max useful long edge; act-and-see confirmation shots go leaner still.
 const SCREENSHOT_MAX_EDGE = 1568;
 const SCREENSHOT_ACT_MAX_EDGE = 1092;
 const SCREENSHOT_JPEG_QUALITY = 70;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-const TOOLS = [
-  {
-    name: 'list_devices',
-    description: 'List the Android phones linked to this account, with online/offline status and (when online) live screen resolution.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  },
-  {
-    name: 'get_location',
-    description: 'Get the most recent known GPS location of a device. Returns the cached last fix — may be a few minutes old.',
-    inputSchema: {
-      type: 'object',
-      properties: { deviceId: { type: 'string', description: 'Device id from list_devices' } },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'get_device_status',
-    description: 'Check a device\'s health before acting on it: battery level, whether the screen is on, whether the Accessibility Service (which performs all taps and typing) is enabled, the current foreground app, and network type. Call this first when a tap or type seems to do nothing, or at the start of a session — it catches "accessibility is off" up front instead of after several silent no-ops.',
-    inputSchema: {
-      type: 'object',
-      properties: { deviceId: { type: 'string', description: 'Device id from list_devices' } },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'get_foreground_app',
-    description: 'Get the package name of the app currently on screen (e.g. com.whatsapp). A cheap way to confirm you are still in the right app after an action, without the cost of a full screenshot.',
-    inputSchema: {
-      type: 'object',
-      properties: { deviceId: { type: 'string', description: 'Device id from list_devices' } },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'get_ui_tree',
-    description: 'Read the screen as structured data instead of an image: every visible text, button and input field, with the normalized x/y you can pass straight to tap. PREFER THIS OVER take_screenshot for finding and acting on things — it is far cheaper, has no capture throttle, and gives exact coordinates instead of estimates from pixels. Use take_screenshot only when you need to see something genuinely visual (an image, a layout problem, a CAPTCHA). Each node has: i (index), text, desc (accessibility label), id (resource id), cls (widget class), x/y (normalized centre — pass to tap), f (flags: c=clickable, e=editable/text field, s=scrollable, k=checkable, K=checked, f=focused, d=disabled).',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string', description: 'Device id from list_devices' },
-        all: { type: 'boolean', description: 'Include layout containers with no text or action (default false). Leave false unless the tree looks incomplete — it adds a lot of noise.' },
-        filter: { type: 'string', description: 'Only return elements whose text, accessibility label, resource id, or widget class contains this (case-insensitive substring match). ALWAYS set this when you already know what you are looking for — e.g. filter:"send" to find a send button — instead of reading the whole screen. A chat or feed screen can carry many message bubbles; without a filter every one of them comes back just to report one button\'s coordinates. Omit only when you genuinely need to see everything on screen.' },
-      },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'wait_for',
-    description: 'Wait until something appears on screen, then return. Polls the UI tree, so it returns the moment the condition is met instead of guessing a sleep duration like wait does. Use after any action that triggers loading, navigation or an animation. Give exactly one of text, id, or app.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string', description: 'Device id from list_devices' },
-        text: { type: 'string', description: 'Wait until this text (or accessibility label) appears — case-insensitive substring match' },
-        id: { type: 'string', description: 'Wait until a view with this resource id appears, e.g. "send_button"' },
-        app: { type: 'string', description: 'Wait until this package is in the foreground, e.g. "com.whatsapp"' },
-        gone: { type: 'boolean', description: 'Invert: wait until the thing DISAPPEARS instead (e.g. a loading spinner). Default false.' },
-        timeout: { type: 'number', description: 'Seconds to wait before giving up (default 10, max 60)' },
-        screenshot: { type: 'boolean', description: 'If true, return a screenshot once the condition is met (default false)' },
-      },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'list_apps',
-    description: 'List every app installed on the phone, with display name and package name. Use this when you are unsure what an app is called or whether it is installed, rather than guessing a package name at open_app.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string', description: 'Device id from list_devices' },
-        filter: { type: 'string', description: 'Optional case-insensitive substring to match against the name or package' },
-      },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'open_url',
-    description: 'Open a URL or app deep link on the phone (https://…, tel:, mailto:, geo:, or an app scheme like whatsapp://). Often the most reliable way to get somewhere: a deep link jumps straight to the target screen instead of tapping through several, so it cannot mis-tap. Prefer it over open_app + navigation when a link for the destination exists.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string', description: 'Device id from list_devices' },
-        url: { type: 'string', description: 'The URL or deep link to open' },
-        screenshot: { type: 'boolean', description: 'If true, return a screenshot after opening (default true)' },
-      },
-      required: ['deviceId', 'url'],
-    },
-  },
-  {
-    name: 'read_notifications',
-    description: 'Read the phone\'s notifications — currently showing ones plus a short history of recent ones. This is how you get an OTP / 2FA code, a delivery confirmation, or an incoming message. Requires a separate one-time user grant on the phone (Settings → Notifications → Device & app notifications → Phone Remote), which is NOT the same as the Accessibility grant.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string', description: 'Device id from list_devices' },
-        filter: { type: 'string', description: 'Optional case-insensitive substring to match against the package, title or body — e.g. "whatsapp" or "code"' },
-        limit: { type: 'number', description: 'Max notifications to return (default 20)' },
-      },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'take_screenshot',
-    description: 'Capture and return the current screen of a device as a JPEG image. Requires the phone\'s Accessibility Service to be enabled. Call this first to see the screen before tapping. In long multi-step sessions, don\'t screenshot after every action — act with screenshot:false on intermediate steps and take one screenshot when you need to check state.',
-    inputSchema: {
-      type: 'object',
-      properties: { deviceId: { type: 'string', description: 'Device id from list_devices' } },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'tap',
-    description: 'Tap the screen at a point. Coordinates are normalized 0.0-1.0 (fraction of screen width/height), not pixels — e.g. x=0.5, y=0.5 is the center. Set screenshot:true to get a fresh screenshot back after the tap so you can see the result in one call.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        x: { type: 'number', minimum: 0, maximum: 1, description: 'Horizontal position, 0 = left edge, 1 = right edge' },
-        y: { type: 'number', minimum: 0, maximum: 1, description: 'Vertical position, 0 = top edge, 1 = bottom edge' },
-        screenshot: { type: 'boolean', description: 'If true, return a fresh screenshot of the screen after tapping (default false). In long sessions keep this false on intermediate steps and check state occasionally.' },
-      },
-      required: ['deviceId', 'x', 'y'],
-    },
-  },
-  {
-    name: 'long_press',
-    description: 'Press and hold at a point — opens context menus, enters selection/edit mode, moves icons. Coordinates are normalized 0.0-1.0.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        x: { type: 'number', minimum: 0, maximum: 1 },
-        y: { type: 'number', minimum: 0, maximum: 1 },
-        ms: { type: 'integer', minimum: 400, maximum: 3000, description: 'Hold duration in ms (default 700)' },
-        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default false)' },
-      },
-      required: ['deviceId', 'x', 'y'],
-    },
-  },
-  {
-    name: 'swipe',
-    description: 'Swipe from one point to another with precise coordinates (normalized 0.0-1.0). For simple list/page navigation prefer the `scroll` tool instead.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        x1: { type: 'number', minimum: 0, maximum: 1 },
-        y1: { type: 'number', minimum: 0, maximum: 1 },
-        x2: { type: 'number', minimum: 0, maximum: 1 },
-        y2: { type: 'number', minimum: 0, maximum: 1 },
-        ms: { type: 'integer', minimum: 50, maximum: 5000, description: 'Swipe duration in milliseconds (default 300)' },
-        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default false)' },
-      },
-      required: ['deviceId', 'x1', 'y1', 'x2', 'y2'],
-    },
-  },
-  {
-    name: 'scroll',
-    description: 'Scroll the screen in a direction — the easy way to move through lists, feeds, and home-screen pages. direction is where the CONTENT moves: "down" reveals content further down the page, "up" goes back up, "left"/"right" flip pages.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
-        amount: { type: 'number', minimum: 0.1, maximum: 0.9, description: 'Fraction of the screen to travel (default 0.6). Larger = scrolls further.' },
-        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default false)' },
-      },
-      required: ['deviceId', 'direction'],
-    },
-  },
-  {
-    name: 'type_text',
-    description: 'Type text into the currently focused input field (tap the field first). Set submit:true to press Enter after typing — use this to run a search once the query is typed. IF TYPING REPORTS SUCCESS BUT THE TEXT DOES NOT APPEAR (WhatsApp and some other apps ignore the standard method), retry with method:"paste".',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        text: { type: 'string' },
-        method: {
-          type: 'string',
-          enum: ['set', 'paste'],
-          description: 'How to enter the text. "set" (default) writes it directly. "paste" puts it on the phone\'s clipboard and pastes it — slower and it overwrites the clipboard, but it works in apps that ignore the direct method. Use "paste" as the fallback when "set" appears to do nothing.',
-        },
-        submit: { type: 'boolean', description: 'Press Enter after typing, e.g. to execute a search (default false)' },
-        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default false)' },
-      },
-      required: ['deviceId', 'text'],
-    },
-  },
-  {
-    name: 'press_key',
-    description: 'Press a system key or button. back/home/recents navigate; enter submits and delete backspaces in a focused text field; notifications/quick_settings open those shades; lock locks the screen; volume_up/volume_down change media volume.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        key: { type: 'string', enum: KEY_NAMES },
-        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default false)' },
-      },
-      required: ['deviceId', 'key'],
-    },
-  },
-  {
-    name: 'open_app',
-    description: 'Open an app on the device by name (e.g. "YouTube", "Settings", "WhatsApp") — matched against installed apps by label — or by exact package name. This is the fastest way to launch an app; prefer it over hunting through the app drawer.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        name: { type: 'string', description: 'App name to search for, e.g. "YouTube". Case-insensitive, matches partial names.' },
-        package: { type: 'string', description: 'Exact package name (e.g. com.google.android.youtube), if you know it — overrides name.' },
-        screenshot: { type: 'boolean', description: 'Return a screenshot after launching (default true)' },
-      },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'open_app_drawer',
-    description: 'Go to the home screen and open the app drawer (swipe up from the bottom), where the app search bar lives. Follow with take_screenshot, then tap the search bar and type an app name to find and open any app.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        screenshot: { type: 'boolean', description: 'Return a fresh screenshot afterwards (default true)' },
-      },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'wait',
-    description: 'Pause for a few seconds to let the screen finish loading or animating before the next action.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        seconds: { type: 'number', minimum: 0.2, maximum: 15, description: 'How long to wait (default 1.5)' },
-        screenshot: { type: 'boolean', description: 'Return a screenshot after waiting (default false)' },
-      },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'ring',
-    description: 'Play a ringtone on the device at full volume, even in silent mode — useful for locating a lost phone.',
-    inputSchema: {
-      type: 'object',
-      properties: { deviceId: { type: 'string' } },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'flash_light',
-    description: 'Blink the device\'s camera flash a few times.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        count: { type: 'integer', minimum: 1, maximum: 10, description: 'Number of blinks (default 3)' },
-      },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'list_files',
-    description: 'List files and folders in a directory of the device\'s shared storage. Browsing is confined to /storage/emulated/0 (the Android storage root) and its subfolders; paths outside it are clamped to the root.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        path: { type: 'string', description: 'Absolute path under /storage/emulated/0 (defaults to the root)' },
-      },
-      required: ['deviceId'],
-    },
-  },
-  {
-    name: 'get_file',
-    description: 'Fetch a file FROM the phone. Step 1: call this tool with the file\'s absolute path (find it with list_files); the server pulls the file off the phone and returns a one-time download_url. Step 2: with a shell, `curl -sS -o "<local-path>" "<download_url>"`; without a shell (claude.ai chat), give the user the download_url to click — the browser saves the file. The URL works once, within 10 minutes. Max 100 MB.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        path: { type: 'string', description: 'Absolute file path on the phone under /storage/emulated/0, e.g. /storage/emulated/0/Download/report.pdf (see list_files)' },
-      },
-      required: ['deviceId', 'path'],
-    },
-  },
-  {
-    name: 'send_local_file',
-    description: 'Send a file from the user\'s computer to the phone — the right tool for files on disk, no base64 needed. Step 1: call this tool with the destination file name (and optional folder); it returns a one-time upload_url. Step 2: with a shell, POST the raw bytes: `curl -sS -X POST -H "Content-Type: application/octet-stream" --data-binary @"/path/to/file" "<upload_url>"`; without a shell (claude.ai chat), give the user the upload_url to open — it shows a file-picker page that uploads straight to the phone. Saves to /storage/emulated/0/<folder>/<name>. The URL works once, within 10 minutes. Max 100 MB.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        name: { type: 'string', description: 'File name to save as on the phone, e.g. "photo.png"' },
-        folder: { type: 'string', description: 'Destination folder under /storage/emulated/0 (default "Download")' },
-      },
-      required: ['deviceId', 'name'],
-    },
-  },
-  {
-    name: 'send_file',
-    description: 'Send a small file to the device\'s shared storage with the content passed inline as base64. Saves to /storage/emulated/0/<folder>/<name> (folder defaults to Download). Max 18 MB — but for any file that exists on disk, prefer send_local_file (streams the bytes directly instead of routing base64 through the conversation).',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        name: { type: 'string', description: 'File name to save as, e.g. "photo.png"' },
-        data_base64: { type: 'string', description: 'File content, base64-encoded' },
-        folder: { type: 'string', description: 'Destination folder under /storage/emulated/0 (default "Download")' },
-      },
-      required: ['deviceId', 'name', 'data_base64'],
-    },
-  },
-  {
-    name: 'send_url',
-    description: 'Download a file from a public http(s) URL and save it to the phone. The server fetches the bytes itself — they never pass through this conversation — so this is the cheapest way to put an online image or file on the phone (no base64, no tokens for the content). Saves to /storage/emulated/0/<folder>/<name>. Max 100 MB.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        deviceId: { type: 'string' },
-        url: { type: 'string', description: 'Public http(s) URL of the file to download' },
-        name: { type: 'string', description: 'File name to save as on the phone (defaults to the name from the URL)' },
-        folder: { type: 'string', description: 'Destination folder under /storage/emulated/0 (default "Download")' },
-      },
-      required: ['deviceId', 'url'],
-    },
-  },
-];
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 function textResult(text, isError = false) {
   return { content: [{ type: 'text', text: typeof text === 'string' ? text : JSON.stringify(text, null, 2) }], isError };
@@ -435,12 +82,10 @@ async function shrinkScreenshot(jpeg, maxEdge = SCREENSHOT_MAX_EDGE) {
       .jpeg({ quality: SCREENSHOT_JPEG_QUALITY, mozjpeg: true })
       .toBuffer();
   } catch {
-    return jpeg; // never fail a capture because of resizing
+    return jpeg;
   }
 }
 
-// Android throttles AccessibilityService.takeScreenshot to ~1/sec; a chain of
-// act-and-see calls can trip that intermittently, so retry once after a beat.
 async function captureScreenshotWithRetry(userId, deviceId) {
   try {
     return await signaling.captureScreenshot(userId, deviceId);
@@ -451,10 +96,6 @@ async function captureScreenshotWithRetry(userId, deviceId) {
   }
 }
 
-// A capture taken mid-animation (shade opening/closing), on a locked/off
-// screen, or over protected content comes back as a near-uniform frame the
-// model reads as "blank". Real UI always has texture, so a tiny per-channel
-// standard deviation is a reliable blank detector.
 async function looksBlank(jpeg) {
   try {
     const st = await sharp(jpeg).stats();
@@ -466,10 +107,6 @@ async function looksBlank(jpeg) {
 
 const BLANK_NOTE = '(warning: this screenshot appears blank/uniform. The screen may be off or locked, mid-animation, or showing content the device refuses to capture. Try press_key "home", or wait ~2s and take_screenshot again.)';
 
-// Capture and only accept a screenshot with real content on it: on a blank
-// frame, wait out the animation (and Android's 1-shot/sec throttle) and try
-// again, up to 3 attempts. If it's still blank, return it anyway with a note
-// telling the model what a blank frame means — never leave it guessing.
 async function captureVerifiedScreenshot(userId, deviceId) {
   let jpeg;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -480,7 +117,6 @@ async function captureVerifiedScreenshot(userId, deviceId) {
   return { jpeg, note: BLANK_NOTE };
 }
 
-// Append a fresh screenshot to a result when the caller asked for act-and-see.
 async function maybeScreenshot(userId, deviceId, baseResult, want) {
   if (!want || baseResult.isError) return baseResult;
   await sleep(SCREENSHOT_SETTLE_MS);
@@ -491,42 +127,25 @@ async function maybeScreenshot(userId, deviceId, baseResult, want) {
     if (note) content.push({ type: 'text', text: note });
     return { content, isError: false };
   } catch (e) {
-    return { content: [...baseResult.content, { type: 'text', text: `(action succeeded, but the confirmation screenshot failed: ${e.message}. Call take_screenshot to see the current screen.)` }], isError: false };
+    return {
+      content: [...baseResult.content, { type: 'text', text: `(action succeeded, but the confirmation screenshot failed: ${e.message}. Call take_screenshot to see the current screen.)` }],
+      isError: false,
+    };
   }
 }
 
-// Why a command didn't run, in terms the model can act on. The phone reports a
-// short code; each maps to the actual next step rather than a bare failure.
 const CONTROL_ERRORS = {
-  accessibility_not_enabled:
-    "Nothing happened: the phone's Accessibility Service is off, which is what performs taps and typing. Turn it on at Settings → Accessibility → Phone Remote. Until then every touch command will no-op.",
-  no_focused_text_field:
-    'Nothing was typed: no text field is focused. Tap the field first (tap with screenshot:true to confirm the cursor is in it), then type_text again.',
-  gesture_rejected_by_system:
-    'Android refused the gesture. The screen is likely off or locked, or a system dialog is capturing input. Take a screenshot to see the current screen; press_key "home" often clears it.',
-  screen_size_unknown:
-    'The phone has not reported its screen size yet, so the coordinates could not be resolved. Wait a second and retry.',
+  accessibility_not_enabled: "Nothing happened: the phone's Accessibility Service is off, which is what performs taps and typing. Turn it on at Settings → Accessibility → Phone Remote. Until then every touch command will no-op.",
+  no_focused_text_field: 'Nothing was typed: no text field is focused. Tap the field first (tap with screenshot:true to confirm the cursor is in it), then type_text again.',
+  gesture_rejected_by_system: 'Android refused the gesture. The screen is likely off or locked, or a system dialog is capturing input. Take a screenshot to see the current screen; press_key "home" often clears it.',
+  screen_size_unknown: 'The phone has not reported its screen size yet, so the coordinates could not be resolved. Wait a second and retry.',
   key_not_accepted: 'The phone did not accept that key press.',
-  paste_rejected:
-    'The focused field refused the paste. Make sure a text field is focused (tap it first). If it is, the app may block pasting — try type_text without method:"paste".',
+  paste_rejected: 'The focused field refused the paste. Make sure a text field is focused (tap it first). If it is, the app may block pasting — try type_text without method:"paste".',
   unknown_action: 'The phone did not recognise that command — its app build is likely older than this server.',
 };
 
-// Appended when the phone is an older build with no ack support: the command
-// was sent, but claiming it "worked" would be the exact false success we're
-// trying to eliminate.
-const UNCONFIRMED_NOTE =
-  ' (Sent, but this phone build cannot confirm whether it actually ran — update the app for confirmed actions.)';
+const UNCONFIRMED_NOTE = ' (Sent, but this phone build cannot confirm whether it actually ran — update the app for confirmed actions.)';
 
-/**
- * Send a control command and hold the tool call until the phone confirms it
- * executed. Replaces bare sendToPhone for anything a user would notice failing:
- * sendToPhone only proved the bytes left the server, so a tap that never landed
- * still reported "Tapped".
- *
- * @returns {Promise<{err: object|null, note: string}>} err is a ready-to-return
- *   error result; when null the command genuinely ran.
- */
 async function runControl(userId, deviceId, msg, timeoutMs) {
   let verdict;
   try {
@@ -538,66 +157,49 @@ async function runControl(userId, deviceId, msg, timeoutMs) {
         offlineNow
           ? 'Device is offline.'
           : `The phone never confirmed the command (${e.message}). It may have dropped offline mid-command — the action may or may not have run. Take a screenshot to check before retrying.`,
-        true,
+        true
       ),
       note: '',
     };
   }
   if (!verdict.ok) {
     return {
-      err: textResult(
-        CONTROL_ERRORS[verdict.error] || `The phone could not run the command (${verdict.error || 'unknown reason'}).`,
-        true,
-      ),
+      err: textResult(CONTROL_ERRORS[verdict.error] || `The phone could not run the command (${verdict.error || 'unknown reason'}).`, true),
       note: '',
     };
   }
   return { err: null, note: verdict.confirmed ? '' : UNCONFIRMED_NOTE };
 }
 
-// How often wait_for re-reads the tree. A tree read is cheap (text, no capture
-// throttle), so this can be far tighter than a screenshot poll would allow.
 const WAIT_POLL_MS = 600;
 
-/** Read the phone's accessibility tree. Shared by get_ui_tree and wait_for. */
 function fetchUiTree(userId, deviceId, all = false, timeoutMs = 10000, filter = null) {
   return signaling.requestFromPhone(
     userId, deviceId,
     (id) => ({ type: 'ui_tree', id, all: !!all, ...(filter ? { filter } : {}) }),
-    timeoutMs, 'ui_tree',
+    timeoutMs, 'ui_tree'
   );
 }
 
-/** Ask the phone for its status. Shared by get_device_status/get_foreground_app. */
 function fetchDeviceStatus(userId, deviceId, timeoutMs = 8000) {
   return signaling.requestFromPhone(
-    userId, deviceId, (id) => ({ type: 'device_status', id }), timeoutMs, 'device_status',
+    userId, deviceId, (id) => ({ type: 'device_status', id }), timeoutMs, 'device_status'
   );
 }
 
-/** Does this tree satisfy the caller's condition? Exactly one of text/id/app. */
 function treeMatches(tree, { text, id, app }) {
   if (app) return String(tree.package || '').toLowerCase().includes(app.toLowerCase());
   const nodes = tree.nodes || [];
   if (id) return nodes.some((n) => String(n.id || '').toLowerCase().includes(id.toLowerCase()));
   const needle = String(text).toLowerCase();
-  // Match the accessibility label too — plenty of buttons are icon-only and
-  // carry their name in contentDescription rather than text.
   return nodes.some((n) => `${n.text || ''} ${n.desc || ''}`.toLowerCase().includes(needle));
 }
 
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-
-// Android shared-storage root. list_files is confined here — resolve . / ..
-// and snap anything above/outside back to the base, so the file tool can't
-// wander into system directories. Mirrors the browser's confineToBase().
 const PHONE_BASE = '/storage/emulated/0';
 function confineToBase(path) {
   let raw = (path || PHONE_BASE).replace(/\\/g, '/').replace(/\/+/g, '/').trim();
   if (!raw.startsWith('/')) raw = '/' + raw;
-  if (!raw.startsWith(PHONE_BASE)) {
-    raw = PHONE_BASE + raw;
-  }
+  if (!raw.startsWith(PHONE_BASE)) raw = PHONE_BASE + raw;
   const parts = [];
   for (const seg of raw.split('/')) {
     if (seg === '' || seg === '.') continue;
@@ -607,12 +209,6 @@ function confineToBase(path) {
   const abs = '/' + parts.join('/');
   return (abs === PHONE_BASE || abs.startsWith(PHONE_BASE + '/')) ? abs : PHONE_BASE;
 }
-
-// ── send_url: SSRF-safe server-side download ────────────────────────────────
-// Fetching an arbitrary URL server-side is dangerous — it could hit the EC2
-// instance-metadata endpoint (169.254.169.254 → IAM creds) or internal hosts.
-// We validate the *connect* IP (not just the hostname) so DNS rebinding can't
-// slip a public name that resolves to a private address past us.
 
 function isBlockedIp(ip) {
   if (net.isIPv4(ip)) {
@@ -629,16 +225,14 @@ function isBlockedIp(ip) {
   if (net.isIPv6(ip)) {
     const l = ip.toLowerCase();
     if (l === '::1' || l === '::') return true;
-    if (l.startsWith('fe80') || l.startsWith('fc') || l.startsWith('fd')) return true; // link-local / unique-local
-    const m = l.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/); // IPv4-mapped
+    if (l.startsWith('fe80') || l.startsWith('fc') || l.startsWith('fd')) return true;
+    const m = l.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
     if (m) return isBlockedIp(m[1]);
     return false;
   }
-  return true; // unparseable → block
+  return true;
 }
 
-// Custom DNS resolver used as the socket `lookup` — the address it returns is
-// the one Node actually connects to, so validating here blocks rebinding.
 function safeLookup(hostname, options, callback) {
   if (typeof options === 'function') { callback = options; options = {}; }
   dns.lookup(hostname, { all: true, family: options.family || 0 }, (err, addresses) => {
@@ -655,8 +249,6 @@ function downloadUrl(rawUrl, maxBytes, timeoutMs = 20000, redirectsLeft = 5) {
     let url;
     try { url = new URL(rawUrl); } catch { return reject(new Error('Invalid URL')); }
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return reject(new Error('Only http(s) URLs are allowed'));
-    // IP-literal hosts never hit the custom lookup (nothing to resolve), so
-    // they must be checked here or 127.0.0.1 / 169.254.169.254 would slip past.
     if (net.isIP(url.hostname) && isBlockedIp(url.hostname)) {
       return reject(new Error('Refusing to fetch a private/loopback address'));
     }
@@ -694,7 +286,6 @@ function downloadUrl(rawUrl, maxBytes, timeoutMs = 20000, redirectsLeft = 5) {
   });
 }
 
-// Directional scroll → a center-anchored swipe. direction = where content moves.
 function scrollGesture(direction, amount) {
   const a = clamp(amount ?? 0.6, 0.1, 0.9);
   switch (direction) {
@@ -706,16 +297,23 @@ function scrollGesture(direction, amount) {
   }
 }
 
-async function callTool(userId, name, args = {}, ctx = {}) {
-  const { deviceId } = args;
+/**
+ * Creates an McpServer instance with all 26 phone-remote tools registered using Zod.
+ */
+function createPhoneRemoteServer() {
+  const server = new McpServer({ name: 'phone-remote', version: SERVER_VERSION });
   const offline = () => textResult('Device is offline.', true);
 
-  switch (name) {
-    case 'list_devices': {
-      const devices = await db.listDevices(userId);
+  // 1. list_devices
+  server.tool(
+    'list_devices',
+    'List the Android phones linked to this account, with online/offline status and (when online) live screen resolution.',
+    {},
+    async (_args, { authInfo }) => {
+      const devices = await db.listDevices(authInfo.userId);
       return textResult(devices.map((d) => {
-        const online = signaling.presence.isOnline(userId, d.id);
-        const size = online ? signaling.getDeviceScreenSize(userId, d.id) : null;
+        const online = signaling.presence.isOnline(authInfo.userId, d.id);
+        const size = online ? signaling.getDeviceScreenSize(authInfo.userId, d.id) : null;
         return {
           deviceId: d.id, name: d.name, model: d.model, online,
           screenWidth: size?.screenW ?? null, screenHeight: size?.screenH ?? null,
@@ -723,236 +321,32 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         };
       }));
     }
+  );
 
-    case 'get_location': {
-      const loc = signaling.getLastLocation(userId, deviceId);
+  // 2. get_location
+  server.tool(
+    'get_location',
+    'Get the most recent known GPS location of a device. Returns the cached last fix — may be a few minutes old.',
+    { deviceId: z.string().describe('Device id from list_devices') },
+    async ({ deviceId }, { authInfo }) => {
+      const loc = signaling.getLastLocation(authInfo.userId, deviceId);
       if (!loc) return textResult('No location has been reported for this device yet.', true);
       return textResult({ lat: loc.lat, lng: loc.lng, accuracy: loc.accuracy, altitude: loc.altitude, at: new Date(loc.timestamp).toISOString() });
     }
+  );
 
-    case 'get_ui_tree': {
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
-      if (!signaling.deviceSupports(userId, deviceId, 'ui_tree')) {
-        return textResult('This phone build cannot read the UI tree — update the app.', true);
-      }
-      try {
-        const t = await fetchUiTree(userId, deviceId, args.all, 10000, args.filter);
-        if (t.error) return textResult(CONTROL_ERRORS[t.error] || t.error, true);
-        const nodes = t.nodes || [];
-        if (!nodes.length) {
-          return textResult(args.filter
-            ? `No elements matched "${args.filter}". Try a different substring, or call get_ui_tree without filter to see everything currently on screen.`
-            : 'The screen reported no readable elements. It is probably off or locked, or showing content that blocks accessibility. Try press_key "home", or take_screenshot to look.', true);
-        }
-        const out = { app: t.package, nodes };
-        if (t.truncated) out.note = `Truncated: only the first ${nodes.length} elements are listed. Scroll, or add filter to narrow the search.`;
-        return textResult(out);
-      } catch (e) {
-        return textResult(e.message, true);
-      }
-    }
-
-    case 'wait_for': {
-      const given = ['text', 'id', 'app'].filter((k) => args[k]);
-      if (given.length !== 1) return textResult('Give exactly one of text, id, or app.', true);
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
-      if (!signaling.deviceSupports(userId, deviceId, 'ui_tree')) {
-        return textResult('This phone build cannot wait on screen state — update the app. (The dumb wait tool still works.)', true);
-      }
-      const timeoutMs = clamp(args.timeout ?? 10, 1, 60) * 1000;
-      const want = !args.gone; // false => wait for it to disappear
-      const what = args.text ? `"${args.text}"` : args.id ? `id "${args.id}"` : `app ${args.app}`;
-      const started = Date.now();
-      let last = null;
-      while (Date.now() - started < timeoutMs) {
-        try {
-          const t = await fetchUiTree(userId, deviceId, false, 8000);
-          // A hard error (accessibility off) will never resolve itself — fail
-          // now rather than burning the whole timeout on it.
-          if (t.error) return textResult(CONTROL_ERRORS[t.error] || t.error, true);
-          last = t;
-          if (treeMatches(t, args) === want) {
-            const secs = ((Date.now() - started) / 1000).toFixed(1);
-            return maybeScreenshot(
-              userId, deviceId,
-              textResult(`${what} ${want ? 'appeared' : 'disappeared'} after ${secs}s.`),
-              args.screenshot,
-            );
-          }
-        } catch (_) {
-          // Transient: the phone can miss a poll mid-transition. Keep trying
-          // until the deadline rather than failing the whole wait.
-        }
-        await sleep(WAIT_POLL_MS);
-      }
-      // Say what IS on screen — a bare timeout leaves the model guessing.
-      const seen = (last?.nodes || []).map((n) => n.text || n.desc).filter(Boolean).slice(0, 8);
-      const hint = last
-        ? ` Currently in ${last.package || 'an unknown app'}; visible: ${seen.length ? seen.join(' | ') : '(nothing readable)'}.`
-        : ' The phone never returned a readable screen.';
-      return textResult(`Timed out after ${timeoutMs / 1000}s waiting for ${what} to ${want ? 'appear' : 'disappear'}.${hint}`, true);
-    }
-
-    case 'list_apps': {
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
-      if (!signaling.deviceSupports(userId, deviceId, 'list_apps')) {
-        return textResult('This phone build cannot list apps — update the app.', true);
-      }
-      try {
-        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'list_apps', id }), 15000, 'list_apps');
-        if (r.error) return textResult(`The phone could not list apps: ${r.error}`, true);
-        let apps = r.apps || [];
-        if (args.filter) {
-          const f = String(args.filter).toLowerCase();
-          apps = apps.filter((a) => `${a.name} ${a.package}`.toLowerCase().includes(f));
-          if (!apps.length) return textResult(`No installed app matches "${args.filter}".`, true);
-        }
-        return textResult(apps);
-      } catch (e) {
-        return textResult(e.message, true);
-      }
-    }
-
-    case 'open_url': {
-      if (!args.url) return textResult('A url is required.', true);
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
-      if (!signaling.deviceSupports(userId, deviceId, 'open_url')) {
-        return textResult('This phone build cannot open URLs — update the app.', true);
-      }
-      try {
-        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'open_url', id, url: args.url }), 12000, 'open_url');
-        if (!r.ok) return textResult(r.error || 'Could not open the URL.', true);
-        return maybeScreenshot(userId, deviceId, textResult(`Opened ${args.url}`), args.screenshot !== false);
-      } catch (e) {
-        return textResult(e.message, true);
-      }
-    }
-
-    case 'read_notifications': {
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
-      if (!signaling.deviceSupports(userId, deviceId, 'notifications')) {
-        return textResult('This phone build cannot read notifications — update the app.', true);
-      }
-      try {
-        const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'notifications', id }), 12000, 'notifications');
-        if (r.error === 'notification_access_not_granted') {
-          return textResult('Notification access has not been granted on the phone. Grant it at Settings → Notifications → Device & app notifications → Phone Remote → Allow notification access. This is a separate permission from the Accessibility Service.', true);
-        }
-        if (r.error) return textResult(`The phone could not read notifications: ${r.error}`, true);
-        // Merge active + recent, newest first, de-duped: an active notification
-        // is usually also in history, and the model shouldn't see it twice.
-        const seen = new Set();
-        const all = [...(r.active || []).map((n) => ({ ...n, active: true })), ...(r.recent || [])]
-          .sort((a, b) => (b.postedAt || 0) - (a.postedAt || 0))
-          .filter((n) => {
-            const k = `${n.package}|${n.title}|${n.text}|${n.postedAt}`;
-            if (seen.has(k)) return false;
-            seen.add(k);
-            return true;
-          });
-        let list = all;
-        if (args.filter) {
-          const f = String(args.filter).toLowerCase();
-          list = list.filter((n) => `${n.package} ${n.title || ''} ${n.text || ''}`.toLowerCase().includes(f));
-        }
-        list = list.slice(0, clamp(args.limit ?? 20, 1, 50));
-        if (!list.length) {
-          return textResult(args.filter
-            ? `No notifications match "${args.filter}". (${all.length} total seen.)`
-            : 'No notifications. Note that history only covers what arrived while the app was running.');
-        }
-        return textResult(list.map((n) => ({
-          app: n.package,
-          title: n.title,
-          text: n.text,
-          at: n.postedAt ? new Date(n.postedAt).toISOString() : undefined,
-          showing: !!n.active,
-        })));
-      } catch (e) {
-        return textResult(e.message, true);
-      }
-    }
-
-    case 'take_screenshot': {
-      try {
-        const { jpeg, note } = await captureVerifiedScreenshot(userId, deviceId);
-        const result = imageResult(await shrinkScreenshot(jpeg));
-        if (note) result.content.push({ type: 'text', text: note });
-        return result;
-      } catch (e) {
-        return textResult(e.message, true);
-      }
-    }
-
-    case 'tap': {
-      const r = await runControl(userId, deviceId, { type: 'control', action: 'tap', x: args.x, y: args.y });
-      if (r.err) return r.err;
-      return maybeScreenshot(userId, deviceId, textResult(`Tapped (${args.x}, ${args.y}).${r.note}`), args.screenshot);
-    }
-
-    case 'long_press': {
-      const ms = clamp(args.ms ?? 700, 400, 3000);
-      // A hold-in-place gesture: tiny 2px move over a long duration reads as a long press.
-      const r = await runControl(userId, deviceId, {
-        type: 'control', action: 'swipe',
-        x1: args.x, y1: args.y, x2: clamp(args.x + 0.002, 0, 1), y2: clamp(args.y + 0.002, 0, 1), ms,
-      }, ms + 5000); // the phone only acks once the hold finishes
-      if (r.err) return r.err;
-      return maybeScreenshot(userId, deviceId, textResult(`Long-pressed (${args.x}, ${args.y}) for ${ms}ms.${r.note}`), args.screenshot);
-    }
-
-    case 'swipe': {
-      const r = await runControl(userId, deviceId, {
-        type: 'control', action: 'swipe',
-        x1: args.x1, y1: args.y1, x2: args.x2, y2: args.y2, ms: args.ms,
-      }, (args.ms || 300) + 5000);
-      if (r.err) return r.err;
-      return maybeScreenshot(userId, deviceId, textResult(`Swiped (${args.x1}, ${args.y1}) → (${args.x2}, ${args.y2}).${r.note}`), args.screenshot);
-    }
-
-    case 'scroll': {
-      const g = scrollGesture(args.direction, args.amount);
-      if (!g) return textResult('direction must be up, down, left, or right.', true);
-      const r = await runControl(userId, deviceId, { type: 'control', action: 'swipe', ...g, ms: 260 });
-      if (r.err) return r.err;
-      return maybeScreenshot(userId, deviceId, textResult(`Scrolled ${args.direction}.${r.note}`), args.screenshot);
-    }
-
-    case 'type_text': {
-      const paste = args.method === 'paste';
-      if (paste && !signaling.deviceSupports(userId, deviceId, 'paste')) {
-        return textResult('This phone build does not support paste-typing — update the app, or call type_text without method:"paste".', true);
-      }
-      const r = await runControl(userId, deviceId, {
-        type: 'control', action: paste ? 'paste' : 'text', value: args.text,
-      });
-      if (r.err) return r.err;
-      let submitted = '';
-      if (args.submit) {
-        await sleep(150);
-        const enter = await runControl(userId, deviceId, { type: 'control', action: 'keyevent', keycode: 'KEYCODE_ENTER' });
-        // The text landed even if Enter didn't — report the partial truth
-        // rather than failing the whole call.
-        submitted = enter.err ? ' (but Enter was not accepted — the text is typed but not submitted)' : ' and submitted';
-      }
-      return maybeScreenshot(userId, deviceId, textResult(`Text ${paste ? 'pasted' : 'typed'}${submitted}.${r.note}`), args.screenshot);
-    }
-
-    case 'press_key': {
-      const keycode = KEY_MAP[args.key];
-      if (!keycode) return textResult(`key must be one of: ${KEY_NAMES.join(', ')}.`, true);
-      const r = await runControl(userId, deviceId, { type: 'control', action: 'keyevent', keycode });
-      if (r.err) return r.err;
-      return maybeScreenshot(userId, deviceId, textResult(`Pressed ${args.key}.${r.note}`), args.screenshot);
-    }
-
-    case 'get_device_status': {
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
-      if (!signaling.deviceSupports(userId, deviceId, 'device_status')) {
+  // 3. get_device_status
+  server.tool(
+    'get_device_status',
+    'Check a device\'s health before acting on it: battery level, whether the screen is on, whether the Accessibility Service (which performs all taps and typing) is enabled, the current foreground app, and network type. Call this first when a tap or type seems to do nothing, or at the start of a session — it catches "accessibility is off" up front instead of after several silent no-ops.',
+    { deviceId: z.string().describe('Device id from list_devices') },
+    async ({ deviceId }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(authInfo.userId, deviceId, 'device_status')) {
         return textResult('This phone build is too old to report status — update the app.', true);
       }
       try {
-        const s = await fetchDeviceStatus(userId, deviceId);
+        const s = await fetchDeviceStatus(authInfo.userId, deviceId);
         if (s.error) return textResult(`The phone could not read its status: ${s.error}`, true);
         const status = {
           battery: `${s.battery}%${s.charging ? ' (charging)' : ''}`,
@@ -977,14 +371,20 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         return textResult(e.message, true);
       }
     }
+  );
 
-    case 'get_foreground_app': {
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
-      if (!signaling.deviceSupports(userId, deviceId, 'device_status')) {
+  // 4. get_foreground_app
+  server.tool(
+    'get_foreground_app',
+    'Get the package name of the app currently on screen (e.g. com.whatsapp). A cheap way to confirm you are still in the right app after an action, without the cost of a full screenshot.',
+    { deviceId: z.string().describe('Device id from list_devices') },
+    async ({ deviceId }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(authInfo.userId, deviceId, 'device_status')) {
         return textResult('This phone build is too old to report the foreground app — update the app.', true);
       }
       try {
-        const s = await fetchDeviceStatus(userId, deviceId);
+        const s = await fetchDeviceStatus(authInfo.userId, deviceId);
         if (!s.accessibilityEnabled) return textResult("Cannot tell: the phone's Accessibility Service is off. Enable it at Settings → Accessibility → Phone Remote.", true);
         if (!s.foregroundApp) return textResult('No foreground app reported — the screen may be off or locked.', true);
         return textResult(s.foregroundApp);
@@ -992,53 +392,441 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         return textResult(e.message, true);
       }
     }
+  );
 
-    case 'open_app': {
-      if (!args.name && !args.package) return textResult('Provide an app name or package.', true);
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+  // 5. get_ui_tree
+  server.tool(
+    'get_ui_tree',
+    'Read the screen as structured data instead of an image: every visible text, button and input field, with the normalized x/y you can pass straight to tap. PREFER THIS OVER take_screenshot for finding and acting on things — it is far cheaper, has no capture throttle, and gives exact coordinates instead of estimates from pixels. Use take_screenshot only when you need to see something genuinely visual (an image, a layout problem, a CAPTCHA). Each node has: i (index), text, desc (accessibility label), id (resource id), cls (widget class), x/y (normalized centre — pass to tap), f (flags: c=clickable, e=editable/text field, s=scrollable, k=checkable, K=checked, f=focused, d=disabled).',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      all: z.boolean().optional().describe('Include layout containers with no text or action (default false). Leave false unless the tree looks incomplete — it adds a lot of noise.'),
+      filter: z.string().optional().describe('Only return elements whose text, accessibility label, resource id, or widget class contains this (case-insensitive substring match). ALWAYS set this when you already know what you are looking for — e.g. filter:"send" to find a send button — instead of reading the whole screen. A chat or feed screen can carry many message bubbles; without a filter every one of them comes back just to report one button\'s coordinates. Omit only when you genuinely need to see everything on screen.'),
+    },
+    async ({ deviceId, all, filter }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(authInfo.userId, deviceId, 'ui_tree')) {
+        return textResult('This phone build cannot read the UI tree — update the app.', true);
+      }
       try {
-        const reply = await signaling.requestFromPhone(userId, deviceId, (id) => ({
-          type: 'open_app', id, query: args.name || '', package: args.package || '',
-        }));
-        if (!reply.ok) return textResult(reply.error || 'Could not open the app.', true);
-        const base = textResult(`Opened ${reply.launched} (${reply.package}).`);
-        return maybeScreenshot(userId, deviceId, base, args.screenshot !== false);
+        const t = await fetchUiTree(authInfo.userId, deviceId, all, 10000, filter);
+        if (t.error) return textResult(CONTROL_ERRORS[t.error] || t.error, true);
+        const nodes = t.nodes || [];
+        if (!nodes.length) {
+          return textResult(filter
+            ? `No elements matched "${filter}". Try a different substring, or call get_ui_tree without filter to see everything currently on screen.`
+            : 'The screen reported no readable elements. It is probably off or locked, or showing content that blocks accessibility. Try press_key "home", or take_screenshot to look.', true);
+        }
+        const out = { app: t.package, nodes };
+        if (t.truncated) out.note = `Truncated: only the first ${nodes.length} elements are listed. Scroll, or add filter to narrow the search.`;
+        return textResult(out);
       } catch (e) {
         return textResult(e.message, true);
       }
     }
+  );
 
-    case 'open_app_drawer': {
-      // Home first so the swipe reliably targets the launcher, then swipe up
-      // from the very bottom to open the app drawer (where app search lives).
-      const home = await runControl(userId, deviceId, { type: 'control', action: 'keyevent', keycode: 'KEYCODE_HOME' });
+  // 6. wait_for
+  server.tool(
+    'wait_for',
+    'Wait until something appears on screen, then return. Polls the UI tree, so it returns the moment the condition is met instead of guessing a sleep duration like wait does. Use after any action that triggers loading, navigation or an animation. Give exactly one of text, id, or app.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      text: z.string().optional().describe('Wait until this text (or accessibility label) appears — case-insensitive substring match'),
+      id: z.string().optional().describe('Wait until a view with this resource id appears, e.g. "send_button"'),
+      app: z.string().optional().describe('Wait until this package is in the foreground, e.g. "com.whatsapp"'),
+      gone: z.boolean().optional().describe('Invert: wait until the thing DISAPPEARS instead (e.g. a loading spinner). Default false.'),
+      timeout: z.number().optional().describe('Seconds to wait before giving up (default 10, max 60)'),
+      screenshot: z.boolean().optional().describe('If true, return a screenshot once the condition is met (default false)'),
+    },
+    async (args, { authInfo }) => {
+      const { deviceId } = args;
+      const given = ['text', 'id', 'app'].filter((k) => args[k]);
+      if (given.length !== 1) return textResult('Give exactly one of text, id, or app.', true);
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(authInfo.userId, deviceId, 'ui_tree')) {
+        return textResult('This phone build cannot wait on screen state — update the app. (The dumb wait tool still works.)', true);
+      }
+      const timeoutMs = clamp(args.timeout ?? 10, 1, 60) * 1000;
+      const want = !args.gone;
+      const what = args.text ? `"${args.text}"` : args.id ? `id "${args.id}"` : `app ${args.app}`;
+      const started = Date.now();
+      let last = null;
+      while (Date.now() - started < timeoutMs) {
+        try {
+          const t = await fetchUiTree(authInfo.userId, deviceId, false, 8000);
+          if (t.error) return textResult(CONTROL_ERRORS[t.error] || t.error, true);
+          last = t;
+          if (treeMatches(t, args) === want) {
+            const secs = ((Date.now() - started) / 1000).toFixed(1);
+            return maybeScreenshot(
+              authInfo.userId, deviceId,
+              textResult(`${what} ${want ? 'appeared' : 'disappeared'} after ${secs}s.`),
+              args.screenshot
+            );
+          }
+        } catch (_) {}
+        await sleep(WAIT_POLL_MS);
+      }
+      const seen = (last?.nodes || []).map((n) => n.text || n.desc).filter(Boolean).slice(0, 8);
+      const hint = last
+        ? ` Currently in ${last.package || 'an unknown app'}; visible: ${seen.length ? seen.join(' | ') : '(nothing readable)'}.`
+        : ' The phone never returned a readable screen.';
+      return textResult(`Timed out after ${timeoutMs / 1000}s waiting for ${what} to ${want ? 'appear' : 'disappear'}.${hint}`, true);
+    }
+  );
+
+  // 7. list_apps
+  server.tool(
+    'list_apps',
+    'List every app installed on the phone, with display name and package name. Use this when you are unsure what an app is called or whether it is installed, rather than guessing a package name at open_app.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      filter: z.string().optional().describe('Optional case-insensitive substring to match against the name or package'),
+    },
+    async ({ deviceId, filter }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(authInfo.userId, deviceId, 'list_apps')) {
+        return textResult('This phone build cannot list apps — update the app.', true);
+      }
+      try {
+        const r = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({ type: 'list_apps', id }), 15000, 'list_apps');
+        if (r.error) return textResult(`The phone could not list apps: ${r.error}`, true);
+        let apps = r.apps || [];
+        if (filter) {
+          const f = String(filter).toLowerCase();
+          apps = apps.filter((a) => `${a.name} ${a.package}`.toLowerCase().includes(f));
+          if (!apps.length) return textResult(`No installed app matches "${filter}".`, true);
+        }
+        return textResult(apps);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+  );
+
+  // 8. open_url
+  server.tool(
+    'open_url',
+    'Open a URL or app deep link on the phone (https://…, tel:, mailto:, geo:, or an app scheme like whatsapp://). Often the most reliable way to get somewhere: a deep link jumps straight to the target screen instead of tapping through several, so it cannot mis-tap. Prefer it over open_app + navigation when a link for the destination exists.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      url: z.string().describe('The URL or deep link to open'),
+      screenshot: z.boolean().optional().describe('If true, return a screenshot after opening (default true)'),
+    },
+    async ({ deviceId, url, screenshot }, { authInfo }) => {
+      if (!url) return textResult('A url is required.', true);
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(authInfo.userId, deviceId, 'open_url')) {
+        return textResult('This phone build cannot open URLs — update the app.', true);
+      }
+      try {
+        const r = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({ type: 'open_url', id, url }), 12000, 'open_url');
+        if (!r.ok) return textResult(r.error || 'Could not open the URL.', true);
+        return maybeScreenshot(authInfo.userId, deviceId, textResult(`Opened ${url}`), screenshot !== false);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+  );
+
+  // 9. read_notifications
+  server.tool(
+    'read_notifications',
+    'Read the phone\'s notifications — currently showing ones plus a short history of recent ones. This is how you get an OTP / 2FA code, a delivery confirmation, or an incoming message. Requires a separate one-time user grant on the phone (Settings → Notifications → Device & app notifications → Phone Remote), which is NOT the same as the Accessibility grant.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      filter: z.string().optional().describe('Optional case-insensitive substring to match against the package, title or body — e.g. "whatsapp" or "code"'),
+      limit: z.number().optional().describe('Max notifications to return (default 20)'),
+    },
+    async ({ deviceId, filter, limit }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(authInfo.userId, deviceId, 'notifications')) {
+        return textResult('This phone build cannot read notifications — update the app.', true);
+      }
+      try {
+        const r = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({ type: 'notifications', id }), 12000, 'notifications');
+        if (r.error === 'notification_access_not_granted') {
+          return textResult('Notification access has not been granted on the phone. Grant it at Settings → Notifications → Device & app notifications → Phone Remote → Allow notification access. This is a separate permission from the Accessibility Service.', true);
+        }
+        if (r.error) return textResult(`The phone could not read notifications: ${r.error}`, true);
+        const seen = new Set();
+        const all = [...(r.active || []).map((n) => ({ ...n, active: true })), ...(r.recent || [])]
+          .sort((a, b) => (b.postedAt || 0) - (a.postedAt || 0))
+          .filter((n) => {
+            const k = `${n.package}|${n.title}|${n.text}|${n.postedAt}`;
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+          });
+        let list = all;
+        if (filter) {
+          const f = String(filter).toLowerCase();
+          list = list.filter((n) => `${n.package} ${n.title || ''} ${n.text || ''}`.toLowerCase().includes(f));
+        }
+        list = list.slice(0, clamp(limit ?? 20, 1, 50));
+        if (!list.length) {
+          return textResult(filter
+            ? `No notifications match "${filter}". (${all.length} total seen.)`
+            : 'No notifications. Note that history only covers what arrived while the app was running.');
+        }
+        return textResult(list.map((n) => ({
+          app: n.package,
+          title: n.title,
+          text: n.text,
+          at: n.postedAt ? new Date(n.postedAt).toISOString() : undefined,
+          showing: !!n.active,
+        })));
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+  );
+
+  // 10. take_screenshot
+  server.tool(
+    'take_screenshot',
+    'Capture and return the current screen of a device as a JPEG image. Requires the phone\'s Accessibility Service to be enabled. Call this first to see the screen before tapping. In long multi-step sessions, don\'t screenshot after every action — act with screenshot:false on intermediate steps and take one screenshot when you need to check state.',
+    { deviceId: z.string().describe('Device id from list_devices') },
+    async ({ deviceId }, { authInfo }) => {
+      try {
+        const { jpeg, note } = await captureVerifiedScreenshot(authInfo.userId, deviceId);
+        const result = imageResult(await shrinkScreenshot(jpeg));
+        if (note) result.content.push({ type: 'text', text: note });
+        return result;
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+  );
+
+  // 11. tap
+  server.tool(
+    'tap',
+    'Tap the screen at a point. Coordinates are normalized 0.0-1.0 (fraction of screen width/height), not pixels — e.g. x=0.5, y=0.5 is the center. Set screenshot:true to get a fresh screenshot back after the tap so you can see the result in one call.',
+    {
+      deviceId: z.string(),
+      x: z.number().min(0).max(1).describe('Horizontal position, 0 = left edge, 1 = right edge'),
+      y: z.number().min(0).max(1).describe('Vertical position, 0 = top edge, 1 = bottom edge'),
+      screenshot: z.boolean().optional().describe('If true, return a fresh screenshot of the screen after tapping (default false).'),
+    },
+    async ({ deviceId, x, y, screenshot }, { authInfo }) => {
+      const r = await runControl(authInfo.userId, deviceId, { type: 'control', action: 'tap', x, y });
+      if (r.err) return r.err;
+      return maybeScreenshot(authInfo.userId, deviceId, textResult(`Tapped (${x}, ${y}).${r.note}`), screenshot);
+    }
+  );
+
+  // 12. long_press
+  server.tool(
+    'long_press',
+    'Press and hold at a point — opens context menus, enters selection/edit mode, moves icons. Coordinates are normalized 0.0-1.0.',
+    {
+      deviceId: z.string(),
+      x: z.number().min(0).max(1),
+      y: z.number().min(0).max(1),
+      ms: z.number().int().min(400).max(3000).optional().describe('Hold duration in ms (default 700)'),
+      screenshot: z.boolean().optional().describe('Return a fresh screenshot afterwards (default false)'),
+    },
+    async ({ deviceId, x, y, ms, screenshot }, { authInfo }) => {
+      const holdMs = clamp(ms ?? 700, 400, 3000);
+      const r = await runControl(authInfo.userId, deviceId, {
+        type: 'control', action: 'swipe',
+        x1: x, y1: y, x2: clamp(x + 0.002, 0, 1), y2: clamp(y + 0.002, 0, 1), ms: holdMs,
+      }, holdMs + 5000);
+      if (r.err) return r.err;
+      return maybeScreenshot(authInfo.userId, deviceId, textResult(`Long-pressed (${x}, ${y}) for ${holdMs}ms.${r.note}`), screenshot);
+    }
+  );
+
+  // 13. swipe
+  server.tool(
+    'swipe',
+    'Swipe from one point to another with precise coordinates (normalized 0.0-1.0). For simple list/page navigation prefer the `scroll` tool instead.',
+    {
+      deviceId: z.string(),
+      x1: z.number().min(0).max(1),
+      y1: z.number().min(0).max(1),
+      x2: z.number().min(0).max(1),
+      y2: z.number().min(0).max(1),
+      ms: z.number().int().min(50).max(5000).optional().describe('Swipe duration in milliseconds (default 300)'),
+      screenshot: z.boolean().optional().describe('Return a fresh screenshot afterwards (default false)'),
+    },
+    async ({ deviceId, x1, y1, x2, y2, ms, screenshot }, { authInfo }) => {
+      const durationMs = ms || 300;
+      const r = await runControl(authInfo.userId, deviceId, {
+        type: 'control', action: 'swipe', x1, y1, x2, y2, ms: durationMs,
+      }, durationMs + 5000);
+      if (r.err) return r.err;
+      return maybeScreenshot(authInfo.userId, deviceId, textResult(`Swiped (${x1}, ${y1}) → (${x2}, ${y2}).${r.note}`), screenshot);
+    }
+  );
+
+  // 14. scroll
+  server.tool(
+    'scroll',
+    'Scroll the screen in a direction — the easy way to move through lists, feeds, and home-screen pages. direction is where the CONTENT moves: "down" reveals content further down the page, "up" goes back up, "left"/"right" flip pages.',
+    {
+      deviceId: z.string(),
+      direction: z.enum(['up', 'down', 'left', 'right']),
+      amount: z.number().min(0.1).max(0.9).optional().describe('Fraction of the screen to travel (default 0.6). Larger = scrolls further.'),
+      screenshot: z.boolean().optional().describe('Return a fresh screenshot afterwards (default false)'),
+    },
+    async ({ deviceId, direction, amount, screenshot }, { authInfo }) => {
+      const g = scrollGesture(direction, amount);
+      if (!g) return textResult('direction must be up, down, left, or right.', true);
+      const r = await runControl(authInfo.userId, deviceId, { type: 'control', action: 'swipe', ...g, ms: 260 });
+      if (r.err) return r.err;
+      return maybeScreenshot(authInfo.userId, deviceId, textResult(`Scrolled ${direction}.${r.note}`), screenshot);
+    }
+  );
+
+  // 15. type_text
+  server.tool(
+    'type_text',
+    'Type text into the currently focused input field (tap the field first). Set submit:true to press Enter after typing — use this to run a search once the query is typed. IF TYPING REPORTS SUCCESS BUT THE TEXT DOES NOT APPEAR (WhatsApp and some other apps ignore the standard method), retry with method:"paste".',
+    {
+      deviceId: z.string(),
+      text: z.string(),
+      method: z.enum(['set', 'paste']).optional().describe('How to enter the text. "set" (default) writes it directly. "paste" puts it on the phone\'s clipboard and pastes it.'),
+      submit: z.boolean().optional().describe('Press Enter after typing, e.g. to execute a search (default false)'),
+      screenshot: z.boolean().optional().describe('Return a fresh screenshot afterwards (default false)'),
+    },
+    async ({ deviceId, text, method, submit, screenshot }, { authInfo }) => {
+      const paste = method === 'paste';
+      if (paste && !signaling.deviceSupports(authInfo.userId, deviceId, 'paste')) {
+        return textResult('This phone build does not support paste-typing — update the app, or call type_text without method:"paste".', true);
+      }
+      const r = await runControl(authInfo.userId, deviceId, {
+        type: 'control', action: paste ? 'paste' : 'text', value: text,
+      });
+      if (r.err) return r.err;
+      let submitted = '';
+      if (submit) {
+        await sleep(150);
+        const enter = await runControl(authInfo.userId, deviceId, { type: 'control', action: 'keyevent', keycode: 'KEYCODE_ENTER' });
+        submitted = enter.err ? ' (but Enter was not accepted — the text is typed but not submitted)' : ' and submitted';
+      }
+      return maybeScreenshot(authInfo.userId, deviceId, textResult(`Text ${paste ? 'pasted' : 'typed'}${submitted}.${r.note}`), screenshot);
+    }
+  );
+
+  // 16. press_key
+  server.tool(
+    'press_key',
+    'Press a system key or button. back/home/recents navigate; enter submits and delete backspaces in a focused text field; notifications/quick_settings open those shades; lock locks the screen; volume_up/volume_down change media volume.',
+    {
+      deviceId: z.string(),
+      key: z.enum(['back', 'home', 'recents', 'enter', 'delete', 'notifications', 'quick_settings', 'lock', 'volume_up', 'volume_down']),
+      screenshot: z.boolean().optional().describe('Return a fresh screenshot afterwards (default false)'),
+    },
+    async ({ deviceId, key, screenshot }, { authInfo }) => {
+      const keycode = KEY_MAP[key];
+      if (!keycode) return textResult(`key must be one of: ${KEY_NAMES.join(', ')}.`, true);
+      const r = await runControl(authInfo.userId, deviceId, { type: 'control', action: 'keyevent', keycode });
+      if (r.err) return r.err;
+      return maybeScreenshot(authInfo.userId, deviceId, textResult(`Pressed ${key}.${r.note}`), screenshot);
+    }
+  );
+
+  // 17. open_app
+  server.tool(
+    'open_app',
+    'Open an app on the device by name (e.g. "YouTube", "Settings", "WhatsApp") — matched against installed apps by label — or by exact package name. This is the fastest way to launch an app; prefer it over hunting through the app drawer.',
+    {
+      deviceId: z.string(),
+      name: z.string().optional().describe('App name to search for, e.g. "YouTube". Case-insensitive, matches partial names.'),
+      package: z.string().optional().describe('Exact package name (e.g. com.google.android.youtube), if you know it — overrides name.'),
+      screenshot: z.boolean().optional().describe('Return a screenshot after launching (default true)'),
+    },
+    async ({ deviceId, name, package: pkg, screenshot }, { authInfo }) => {
+      if (!name && !pkg) return textResult('Provide an app name or package.', true);
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      try {
+        const reply = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({
+          type: 'open_app', id, query: name || '', package: pkg || '',
+        }));
+        if (!reply.ok) return textResult(reply.error || 'Could not open the app.', true);
+        const base = textResult(`Opened ${reply.launched} (${reply.package}).`);
+        return maybeScreenshot(authInfo.userId, deviceId, base, screenshot !== false);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+  );
+
+  // 18. open_app_drawer
+  server.tool(
+    'open_app_drawer',
+    'Go to the home screen and open the app drawer (swipe up from the bottom), where the app search bar lives. Follow with take_screenshot, then tap the search bar and type an app name to find and open any app.',
+    {
+      deviceId: z.string(),
+      screenshot: z.boolean().optional().describe('Return a fresh screenshot afterwards (default true)'),
+    },
+    async ({ deviceId, screenshot }, { authInfo }) => {
+      const home = await runControl(authInfo.userId, deviceId, { type: 'control', action: 'keyevent', keycode: 'KEYCODE_HOME' });
       if (home.err) return home.err;
       await sleep(400);
-      const up = await runControl(userId, deviceId, { type: 'control', action: 'swipe', x1: 0.5, y1: 0.92, x2: 0.5, y2: 0.25, ms: 250 });
+      const up = await runControl(authInfo.userId, deviceId, { type: 'control', action: 'swipe', x1: 0.5, y1: 0.92, x2: 0.5, y2: 0.25, ms: 250 });
       if (up.err) return up.err;
-      const want = args.screenshot !== false; // defaults to true for this one
-      return maybeScreenshot(userId, deviceId, textResult(`Opened the app drawer. Tap the search bar and type an app name to find it.${up.note}`), want);
+      return maybeScreenshot(authInfo.userId, deviceId, textResult(`Opened the app drawer. Tap the search bar and type an app name to find it.${up.note}`), screenshot !== false);
     }
+  );
 
-    case 'wait': {
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
-      const secs = clamp(args.seconds ?? 1.5, 0.2, 15);
+  // 19. wait
+  server.tool(
+    'wait',
+    'Pause for a few seconds to let the screen finish loading or animating before the next action.',
+    {
+      deviceId: z.string(),
+      seconds: z.number().min(0.2).max(15).optional().describe('How long to wait (default 1.5)'),
+      screenshot: z.boolean().optional().describe('Return a screenshot after waiting (default false)'),
+    },
+    async ({ deviceId, seconds, screenshot }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      const secs = clamp(seconds ?? 1.5, 0.2, 15);
       await sleep(secs * 1000);
-      return maybeScreenshot(userId, deviceId, textResult(`Waited ${secs}s.`), args.screenshot);
+      return maybeScreenshot(authInfo.userId, deviceId, textResult(`Waited ${secs}s.`), screenshot);
     }
+  );
 
-    case 'ring':
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'ring' })) return offline();
+  // 20. ring
+  server.tool(
+    'ring',
+    'Play a ringtone on the device at full volume, even in silent mode — useful for locating a lost phone.',
+    { deviceId: z.string() },
+    async ({ deviceId }, { authInfo }) => {
+      if (!signaling.sendToPhone(authInfo.userId, deviceId, { type: 'ring' })) return offline();
       return textResult('Ringing device.');
+    }
+  );
 
-    case 'flash_light':
-      if (!signaling.sendToPhone(userId, deviceId, { type: 'flash', count: args.count ?? 3 })) return offline();
+  // 21. flash_light
+  server.tool(
+    'flash_light',
+    'Blink the device\'s camera flash a few times.',
+    {
+      deviceId: z.string(),
+      count: z.number().int().min(1).max(10).optional().describe('Number of blinks (default 3)'),
+    },
+    async ({ deviceId, count }, { authInfo }) => {
+      if (!signaling.sendToPhone(authInfo.userId, deviceId, { type: 'flash', count: count ?? 3 })) return offline();
       return textResult('Flashing light.');
+    }
+  );
 
-    case 'list_files': {
+  // 22. list_files
+  server.tool(
+    'list_files',
+    'List files and folders in a directory of the device\'s shared storage. Browsing is confined to /storage/emulated/0 (the Android storage root) and its subfolders; paths outside it are clamped to the root.',
+    {
+      deviceId: z.string(),
+      path: z.string().optional().describe('Absolute path under /storage/emulated/0 (defaults to the root)'),
+    },
+    async ({ deviceId, path }, { authInfo }) => {
       try {
-        const safePath = confineToBase(args.path);
-        const reply = await signaling.requestFromPhone(userId, deviceId, (id) => ({
+        const safePath = confineToBase(path);
+        const reply = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({
           type: 'pf_list', id, path: safePath,
         }));
         return textResult(reply.entries.map((e) => ({ name: e.name, type: e.type, size: e.size, path: e.path })));
@@ -1046,70 +834,96 @@ async function callTool(userId, name, args = {}, ctx = {}) {
         return textResult(e.message, true);
       }
     }
+  );
 
-    case 'get_file': {
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
-      const path = confineToBase(args.path);
+  // 23. get_file
+  server.tool(
+    'get_file',
+    'Fetch a file FROM the phone. Step 1: call this tool with the file\'s absolute path (find it with list_files); the server pulls the file off the phone and returns a one-time download_url. Step 2: with a shell, curl -sS -o "<local-path>" "<download_url>"; without a shell, give the user the download_url to click. Max 100 MB.',
+    {
+      deviceId: z.string(),
+      path: z.string().describe('Absolute file path on the phone under /storage/emulated/0'),
+    },
+    async ({ deviceId, path }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      const safePath = confineToBase(path);
       try {
         let buffer;
         try {
-          buffer = await signaling.downloadFromPhone(userId, deviceId, path, { maxBytes: MAX_GET_FILE_BYTES });
+          buffer = await signaling.downloadFromPhone(authInfo.userId, deviceId, safePath, { maxBytes: MAX_GET_FILE_BYTES });
         } catch (e) {
-          // "No data at all" usually means the request landed on a socket
-          // that had just died and the heartbeat hadn't cleared it yet.
-          // Wait out the zombie window (~30s from death) and try once more
-          // on whatever socket is primary by then.
           if (!/no data from the phone|lost in transit/i.test(e.message)) throw e;
           await sleep(10000);
-          if (!signaling.presence.isOnline(userId, deviceId)) return offline();
-          buffer = await signaling.downloadFromPhone(userId, deviceId, path, { maxBytes: MAX_GET_FILE_BYTES });
+          if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+          buffer = await signaling.downloadFromPhone(authInfo.userId, deviceId, safePath, { maxBytes: MAX_GET_FILE_BYTES });
         }
-        if (!buffer.length) return textResult(`${path} is empty (0 bytes) — nothing to download.`, true);
+        if (!buffer.length) return textResult(`${safePath} is empty (0 bytes) — nothing to download.`, true);
         pruneDownloads();
         const token = crypto.randomBytes(24).toString('base64url');
-        const name = path.split('/').pop() || 'file';
+        const name = safePath.split('/').pop() || 'file';
         pendingDownloads.set(token, { buffer, name, expiresAt: Date.now() + DOWNLOAD_TTL_MS });
-        const downloadUrl = `${ctx.baseUrl}/mcp/download/${token}`;
+        const downloadUrl = `${authInfo.baseUrl}/mcp/download/${token}`;
         return textResult({
           download_url: downloadUrl,
-          file: path,
+          file: safePath,
           bytes: buffer.length,
           expires_in_seconds: DOWNLOAD_TTL_MS / 1000,
-          next_step: `With a shell: curl -sS -o "${name}" "${downloadUrl}". WITHOUT a shell (e.g. claude.ai chat): give the user the download_url to click — the browser saves the file. Either way the URL works once.`,
+          next_step: `With a shell: curl -sS -o "${name}" "${downloadUrl}". WITHOUT a shell: give the user the download_url to click.`,
         });
       } catch (e) {
         return textResult(e.message, true);
       }
     }
+  );
 
-    case 'send_local_file': {
-      const fileName = String(args.name || '').replace(/[/\\]/g, '').trim();
+  // 24. send_local_file
+  server.tool(
+    'send_local_file',
+    'Send a file from the user\'s computer to the phone — the right tool for files on disk, no base64 needed. Step 1: call this tool with the destination file name (and optional folder); it returns a one-time upload_url. Step 2: POST the raw bytes to the upload_url. Saves to /storage/emulated/0/<folder>/<name>. Max 100 MB.',
+    {
+      deviceId: z.string(),
+      name: z.string().describe('File name to save as on the phone, e.g. "photo.png"'),
+      folder: z.string().optional().describe('Destination folder under /storage/emulated/0 (default "Download")'),
+    },
+    async ({ deviceId, name, folder }, { authInfo }) => {
+      const fileName = String(name || '').replace(/[/\\]/g, '').trim();
       if (!fileName) return textResult('name must be a plain file name (no slashes).', true);
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
       const destFolder = confineToBase(
-        args.folder
-          ? (String(args.folder).startsWith('/') ? args.folder : `${PHONE_BASE}/${args.folder}`)
+        folder
+          ? (String(folder).startsWith('/') ? folder : `${PHONE_BASE}/${folder}`)
           : `${PHONE_BASE}/Download`
       );
       pruneUploads();
       const token = crypto.randomBytes(24).toString('base64url');
       const dest = `${destFolder}/${fileName}`;
-      pendingUploads.set(token, { userId, deviceId, dest, expiresAt: Date.now() + UPLOAD_TTL_MS });
-      const uploadUrl = `${ctx.baseUrl}/mcp/upload/${token}`;
+      pendingUploads.set(token, { userId: authInfo.userId, deviceId, dest, expiresAt: Date.now() + UPLOAD_TTL_MS });
+      const uploadUrl = `${authInfo.baseUrl}/mcp/upload/${token}`;
       return textResult({
         upload_url: uploadUrl,
         saves_to: dest,
         expires_in_seconds: UPLOAD_TTL_MS / 1000,
-        next_step: `With a shell: curl -sS -X POST -H "Content-Type: application/octet-stream" --data-binary @"<local-file-path>" "${uploadUrl}" — the JSON response confirms the save. WITHOUT a shell (e.g. claude.ai chat): give the user the upload_url to open in their browser — it shows a file picker that uploads straight to the phone.`,
+        next_step: `With a shell: curl -sS -X POST -H "Content-Type: application/octet-stream" --data-binary @"<local-file-path>" "${uploadUrl}". WITHOUT a shell: open the upload_url in a browser.`,
       });
     }
+  );
 
-    case 'send_file': {
-      const name = String(args.name || '').replace(/[/\\]/g, '').trim();
-      if (!name) return textResult('name must be a plain file name (no slashes).', true);
+  // 25. send_file
+  server.tool(
+    'send_file',
+    'Send a small file to the device\'s shared storage with the content passed inline as base64. Saves to /storage/emulated/0/<folder>/<name> (folder defaults to Download). Max 18 MB.',
+    {
+      deviceId: z.string(),
+      name: z.string().describe('File name to save as, e.g. "photo.png"'),
+      data_base64: z.string().describe('File content, base64-encoded'),
+      folder: z.string().optional().describe('Destination folder under /storage/emulated/0 (default "Download")'),
+    },
+    async ({ deviceId, name, data_base64, folder }, { authInfo }) => {
+      const fileName = String(name || '').replace(/[/\\]/g, '').trim();
+      if (!fileName) return textResult('name must be a plain file name (no slashes).', true);
       let bytes;
       try {
-        bytes = Buffer.from(args.data_base64, 'base64');
+        bytes = Buffer.from(data_base64, 'base64');
       } catch {
         return textResult('data_base64 is not valid base64.', true);
       }
@@ -1117,55 +931,66 @@ async function callTool(userId, name, args = {}, ctx = {}) {
       if (bytes.length > MAX_SEND_FILE_BYTES) {
         return textResult(`File is ${(bytes.length / 1048576).toFixed(1)} MB — max is ${MAX_SEND_FILE_BYTES / 1048576} MB.`, true);
       }
-      const folder = confineToBase(
-        args.folder
-          ? (String(args.folder).startsWith('/') ? args.folder : `${PHONE_BASE}/${args.folder}`)
+      const destFolder = confineToBase(
+        folder
+          ? (String(folder).startsWith('/') ? folder : `${PHONE_BASE}/${folder}`)
           : `${PHONE_BASE}/Download`
       );
       try {
-        const dest = await signaling.uploadToPhone(userId, deviceId, `${folder}/${name}`, bytes);
-        return textResult(`Saved ${name} (${bytes.length} bytes) to ${dest} on the phone.`);
+        const dest = await signaling.uploadToPhone(authInfo.userId, deviceId, `${destFolder}/${fileName}`, bytes);
+        return textResult(`Saved ${fileName} (${bytes.length} bytes) to ${dest} on the phone.`);
       } catch (e) {
         return textResult(e.message, true);
       }
     }
+  );
 
-    case 'send_url': {
-      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
-      if (!args.url || !/^https?:\/\//i.test(String(args.url))) return textResult('Provide a valid http(s) URL.', true);
+  // 26. send_url
+  server.tool(
+    'send_url',
+    'Download a file from a public http(s) URL and save it to the phone. The server fetches the bytes itself — saves to /storage/emulated/0/<folder>/<name>. Max 100 MB.',
+    {
+      deviceId: z.string(),
+      url: z.string().describe('Public http(s) URL of the file to download'),
+      name: z.string().optional().describe('File name to save as on the phone (defaults to the name from the URL)'),
+      folder: z.string().optional().describe('Destination folder under /storage/emulated/0 (default "Download")'),
+    },
+    async ({ deviceId, url, name, folder }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      if (!url || !/^https?:\/\//i.test(String(url))) return textResult('Provide a valid http(s) URL.', true);
       let fetched;
       try {
-        fetched = await downloadUrl(String(args.url), MAX_TRANSFER_BYTES);
+        fetched = await downloadUrl(String(url), MAX_TRANSFER_BYTES);
       } catch (e) {
         return textResult(`Couldn't fetch that URL: ${e.message}`, true);
       }
       if (!fetched.buffer.length) return textResult('The downloaded file is empty.', true);
-      const name = String(args.name || fetched.urlName || 'file').replace(/[/\\]/g, '').trim() || 'file';
-      const folder = confineToBase(
-        args.folder
-          ? (String(args.folder).startsWith('/') ? args.folder : `${PHONE_BASE}/${args.folder}`)
+      const fileName = String(name || fetched.urlName || 'file').replace(/[/\\]/g, '').trim() || 'file';
+      const destFolder = confineToBase(
+        folder
+          ? (String(folder).startsWith('/') ? folder : `${PHONE_BASE}/${folder}`)
           : `${PHONE_BASE}/Download`
       );
       try {
-        const dest = await signaling.uploadToPhone(userId, deviceId, `${folder}/${name}`, fetched.buffer);
+        const dest = await signaling.uploadToPhone(authInfo.userId, deviceId, `${destFolder}/${fileName}`, fetched.buffer);
         return textResult(`Downloaded ${fetched.buffer.length} bytes and saved to ${dest} on the phone.`);
       } catch (e) {
         return textResult(e.message, true);
       }
     }
+  );
 
-    default:
-      return null; // unknown tool — caller returns a protocol-level error
-  }
+  return server;
 }
 
+// Singleton server instance for internal tool dispatching and tool introspection
+const internalServerInstance = createPhoneRemoteServer();
+
 function setupMcpRoutes(app) {
-  // One-time upload target for send_local_file. Raw bytes in, no auth header —
-  // the unguessable single-use token (24 random bytes, 10-min TTL) is the
-  // credential, so a plain `curl --data-binary` works from any shell.
+  // One-time upload target for send_local_file
   app.post('/mcp/upload/:token', express.raw({ type: () => true, limit: '110mb' }), async (req, res) => {
     const upload = pendingUploads.get(req.params.token);
-    if (upload) pendingUploads.delete(req.params.token); // single use, even on failure
+    if (upload) pendingUploads.delete(req.params.token);
     if (!upload || upload.expiresAt < Date.now()) {
       return res.status(410).json({ ok: false, error: 'Upload link is invalid or expired — call the send_local_file tool again for a fresh one.' });
     }
@@ -1184,13 +1009,7 @@ function setupMcpRoutes(app) {
     }
   });
 
-  // Browser dashboard upload — the web app POSTs the whole file here in one
-  // request, and the server streams it to the phone with uploadToPhone (the
-  // same battle-tested per-chunk-ack + retry path MCP uses). This replaces
-  // the old browser→server→phone WS chunk relay, which doubled the round
-  // trips over the internet and died whenever the phone reconnected
-  // mid-transfer. Auth via ?token= (browsers can't set Authorization on a
-  // streamed fetch as easily; the JWT is the same one the WS uses).
+  // Browser dashboard upload
   app.post('/api/phone-files/upload', express.raw({ type: () => true, limit: '110mb' }), async (req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer /, '') || req.query.token;
     const payload = token && verifyToken(token);
@@ -1216,9 +1035,7 @@ function setupMcpRoutes(app) {
     }
   });
 
-  // Browser face of the same upload token — for MCP clients with no shell
-  // (claude.ai chat): opening the link shows a file picker that POSTs the
-  // bytes to this same URL. GET does NOT consume the token; only POST does.
+  // Browser HTML face of upload token
   app.get('/mcp/upload/:token', (req, res) => {
     const upload = pendingUploads.get(req.params.token);
     if (!upload || upload.expiresAt < Date.now()) {
@@ -1248,11 +1065,10 @@ document.getElementById('go').onclick = async () => {
 </script></body>`);
   });
 
-  // One-time download source for get_file — mirror of /mcp/upload above:
-  // the unguessable single-use token is the credential.
+  // One-time download source for get_file
   app.get('/mcp/download/:token', (req, res) => {
     const d = pendingDownloads.get(req.params.token);
-    if (d) pendingDownloads.delete(req.params.token); // single use, even on failure
+    if (d) pendingDownloads.delete(req.params.token);
     if (!d || d.expiresAt < Date.now()) {
       return res.status(410).json({ ok: false, error: 'Download link is invalid or expired — call the get_file tool again for a fresh one.' });
     }
@@ -1261,24 +1077,17 @@ document.getElementById('go').onclick = async () => {
     res.send(d.buffer);
   });
 
-  // Internal endpoint for FastMCP Python companion service
+  // Internal endpoint for FastMCP Python companion service / scripts
   app.post('/api/internal/call-tool', async (req, res) => {
     try {
-      // 1. Strict loopback IP check: only local processes (FastMCP) can call this
       const clientIp = req.socket.remoteAddress;
       const isLoopback = clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === '::ffff:127.0.0.1';
-      if (!isLoopback) {
-        return res.status(403).json({ error: 'Access denied: loopback only' });
-      }
+      if (!isLoopback) return res.status(403).json({ error: 'Access denied: loopback only' });
 
-      // 2. Validate internal bridge secret
       const expectedSecret = process.env.INTERNAL_BRIDGE_SECRET || 'phone-remote-internal-bridge-secret-key-2026';
       const providedSecret = req.headers['x-internal-secret'];
-      if (providedSecret !== expectedSecret) {
-        return res.status(401).json({ error: 'Unauthorized: invalid bridge secret' });
-      }
+      if (providedSecret !== expectedSecret) return res.status(401).json({ error: 'Unauthorized: invalid bridge secret' });
 
-      // 3. User identification & multi-tenant scoping
       const authHeader = req.headers.authorization;
       const token = authHeader?.replace(/^Bearer /, '') || req.body?.token;
       let userId = null;
@@ -1286,14 +1095,16 @@ document.getElementById('go').onclick = async () => {
         const payload = verifyToken(token);
         if (payload) userId = payload.uid;
       }
-      if (!userId) {
-        // Fallback to default owner UUID if running in single-user FastMCP mode
-        userId = process.env.DEFAULT_USER_ID || '34256f0e-a22f-42ea-9f26-344cf5c3354a';
-      }
+      if (!userId) userId = process.env.DEFAULT_USER_ID || '34256f0e-a22f-42ea-9f26-344cf5c3354a';
 
       const { name, args } = req.body || {};
       const baseUrl = `${process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`}`.replace(/\/$/, '');
-      const result = await callTool(userId, name, args || {}, { baseUrl });
+      const tool = internalServerInstance._registeredTools[name];
+      if (!tool) {
+        return res.status(404).json({ content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true });
+      }
+
+      const result = await tool.handler(args || {}, { authInfo: { userId, baseUrl } });
       res.json(result);
     } catch (err) {
       console.error('Internal call-tool error:', err);
@@ -1301,25 +1112,22 @@ document.getElementById('go').onclick = async () => {
     }
   });
 
-  // Streamable HTTP transport (2025-06-18): this server answers in single-
-  // JSON-response mode only — no server-initiated SSE stream, no session
-  // deletion to track. The spec requires a server that doesn't offer those
-  // to say so explicitly with 405, not let the request fall through to a
-  // generic 404. Cursor's MCP client probes GET /mcp for that SSE stream
-  // right after connecting; a plain 404 there reads to it as the session
-  // having been invalidated, so it tears the connection down and retries
-  // until it gives up, even though auth and the POST calls all succeeded.
-  app.get('/mcp', (req, res) => {
+  // Cursor/Claude compatibility probes
+  const notAllowedSse = (_req, res) => {
     res.set('Allow', 'POST').status(405).json({
       jsonrpc: '2.0', error: { code: -32000, message: 'Method Not Allowed: this server does not support server-initiated SSE.' },
     });
-  });
-  app.delete('/mcp', (req, res) => {
+  };
+  const notAllowedDelete = (_req, res) => {
     res.set('Allow', 'POST').status(405).json({
       jsonrpc: '2.0', error: { code: -32000, message: 'Method Not Allowed: this server has no session to delete (single-request mode).' },
     });
-  });
+  };
 
+  app.get('/mcp', notAllowedSse);
+  app.delete('/mcp', notAllowedDelete);
+
+  // Main MCP JSON-RPC handler powered by Anthropic's official SDK
   app.post('/mcp', async (req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer /, '');
     const payload = token && verifyToken(token);
@@ -1328,42 +1136,43 @@ document.getElementById('go').onclick = async () => {
       res.set('WWW-Authenticate', `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`);
       return res.status(401).json({ error: 'unauthorized' });
     }
-    const userId = payload.uid;
 
-    const msg = req.body;
-    // Notifications carry no `id` and expect no response body.
-    if (msg.id === undefined) return res.status(202).end();
+    // Notifications carry no `id` and expect no response body
+    if (req.body && req.body.id === undefined && req.body.method?.startsWith('notifications/')) {
+      return res.status(202).end();
+    }
 
-    const reply = (result) => res.json({ jsonrpc: '2.0', id: msg.id, result });
-    const replyError = (code, message) => res.json({ jsonrpc: '2.0', id: msg.id, error: { code, message } });
+    // Ensure Accept header includes text/event-stream so SDK's HTTP transport validation passes
+    if (!req.headers.accept?.includes('application/json')) {
+      req.headers.accept = 'application/json, text/event-stream';
+    } else if (!req.headers.accept.includes('text/event-stream')) {
+      req.headers.accept = req.headers.accept + ', text/event-stream';
+    }
+
+    // Attach authInfo to req so the SDK transport attaches it to extra.authInfo in tool handlers
+    req.auth = {
+      userId: payload.uid,
+      email: payload.email,
+      baseUrl,
+    };
 
     try {
-      switch (msg.method) {
-        case 'initialize':
-          return reply({
-            protocolVersion: PROTOCOL_VERSION,
-            capabilities: { tools: {} },
-            serverInfo: { name: 'phone-remote', version: SERVER_VERSION },
-          });
+      // Create stateless Streamable HTTP transport with JSON response mode
+      const transport = new StreamableHTTPServerTransport({
+        enableJsonResponse: true,
+        sessionIdGenerator: undefined,
+      });
 
-        case 'tools/list':
-          return reply({ tools: TOOLS });
-
-        case 'tools/call': {
-          const { name, arguments: args } = msg.params || {};
-          if (!TOOLS.some((t) => t.name === name)) return replyError(-32602, `Unknown tool: ${name}`);
-          const result = await callTool(userId, name, args || {}, { baseUrl });
-          return reply(result);
-        }
-
-        default:
-          return replyError(-32601, `Method not found: ${msg.method}`);
-      }
+      const server = createPhoneRemoteServer();
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
     } catch (e) {
-      console.error('MCP request failed:', e);
-      return replyError(-32603, 'Internal error');
+      console.error('MCP SDK request failed:', e);
+      if (!res.headersSent) {
+        res.status(500).json({ jsonrpc: '2.0', id: req.body?.id || null, error: { code: -32603, message: 'Internal error' } });
+      }
     }
   });
 }
 
-module.exports = { setupMcpRoutes };
+module.exports = { setupMcpRoutes, createPhoneRemoteServer };

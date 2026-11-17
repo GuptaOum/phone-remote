@@ -7,6 +7,7 @@
     "dev": "nodemon src/index.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.3",
     "@ngrok/ngrok": "^1.7.0",
     "archiver": "^6.0.1",
     "bcryptjs": "^3.0.3",
@@ -21,7 +22,8 @@
     "qrcode": "^1.5.3",
     "sharp": "^0.35.3",
     "uuid": "^9.0.0",
-    "ws": "^8.16.0"
+    "ws": "^8.16.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"

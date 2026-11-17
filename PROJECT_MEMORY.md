@@ -67,9 +67,10 @@ phone-remote/
 │   │   ├── routes/
 │   │   │   ├── auth.js         # JWT login, registration, token verification
 │   │   │   ├── files.js        # File upload/download streaming endpoints
-│   │   │   └── mcp.js          # Node.js internal bridge router (/api/internal/call-tool)
+│   │   │   ├── mcp.js          # Anthropic @modelcontextprotocol/sdk + Zod (Streamable HTTP /mcp)
+│   │   │   └── mcp_legacy.js   # Legacy monolithic router backup
 │   │   └── index.js            # Express server entry point (port 3000)
-│   ├── fastmcp_server.py       # ⚡ FastMCP Python Server (port 8001, SSE transport)
+│   ├── fastmcp_server.py       # FastMCP Python Server (port 8001, idle/fallback)
 │   ├── requirements-mcp.txt    # fastmcp, httpx, uvicorn
 │   └── data/
 │       └── phoneremote.db      # SQLite database file
@@ -450,6 +451,14 @@ When the user gives a local PC file (e.g. `C:\Users\hp\Desktop\...\image.png` or
   8. **Tap Matching Row**: WhatsApp isolates the file immediately under `Recents`. Tap the row directly (`desc: "filename"` or row `FrameLayout` at `x ≈ 0.39, y ≈ 0.54`). WhatsApp's in-app views accept synthetic clicks 100% reliably.
   9. **Confirm & Dispatch**: WhatsApp opens the Send preview screen. Tap the green Send button (`desc: "Send"`, `x ≈ 0.911, y ≈ 0.552`).
   10. Confirm delivery status (`"Sent"` or `"Delivered"`).
+
+---
+
+## 🧭 11. MCP Navigation & Deep Link Master Directory
+> **Dedicated Companion Reference**: For an exhaustive, zero-friction catalog of all Android package names (`open_app`), deep link URL schemes (`open_url`), system setting shortcuts, and in-app navigation maps for WhatsApp, Telegram, and Google Apps, see:
+> 👉 **[`MCP_PHONE_NAVIGATION.md`](file:///E:/phnrtm/phone-remote/MCP_PHONE_NAVIGATION.md)**
+
+All phone interactions MUST strictly use the 26 standard `phone-remote` MCP tools documented in Section 6 and `MCP_PHONE_NAVIGATION.md`.
 
 ---
 *Created & Maintained by Google Antigravity & User Team. Last Updated: October 30, 2026.*
