@@ -1,6 +1,7 @@
 package com.phoneremote
 
 import android.content.Context
+import android.graphics.Matrix
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -10,23 +11,38 @@ import org.json.JSONObject
 import org.webrtc.*
 
 /**
- * Screen → WebRTC, fully native: lives in the foreground service, so it keeps
- * streaming with the Flutter UI closed. Frames come from the same VirtualDisplay
- * as the JPEG path (the display is pointed at [surface] instead of the JPEG
- * ImageReader), so one projection consent covers both.
+ * One captured source (screen or camera) → WebRTC, fully native: lives in the
+ * foreground services, so it keeps streaming with the Flutter UI closed.
+ *
+ * Frames arrive on [surface]: the capturer that already feeds the JPEG path
+ * (VirtualDisplay for the screen, the camera session for the camera) is pointed
+ * at this Surface instead of its JPEG ImageReader, so one permission covers
+ * both and switching transport never reopens the source.
  *
  * Each browser tab gets its own PeerConnection (keyed by the server's tab id);
  * all of them share one video track. The browser offers, we answer.
  */
-class WebRtcScreenStreamer(
+class WebRtcStreamer(
     private val ctx: Context,
+    private val kind: Kind,
     private val send: (String) -> Unit,
     private val onPeersChanged: () -> Unit,
-) : ScreenCaptureService.SurfaceSink {
+) : ScreenCaptureService.SurfaceSink, CameraForegroundService.CameraSink {
+
+    enum class Kind(
+        val label: String,
+        val screencast: Boolean,
+        val maxBitrateBps: Int,
+        val degradation: RtpParameters.DegradationPreference,
+    ) {
+        // Screen content is mostly text: under pressure drop frames, never resolution.
+        SCREEN("screen", true, 2_500_000, RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION),
+        // Camera is motion: keep it fluid, let resolution adapt on weak links.
+        CAMERA("camera", false, 1_500_000, RtpParameters.DegradationPreference.BALANCED),
+    }
 
     companion object {
         private const val TAG = "PhoneRemote"
-        private const val MAX_BITRATE_BPS = 2_500_000
         private var initialized = false
     }
 
@@ -38,7 +54,7 @@ class WebRtcScreenStreamer(
     }
 
     // All state below is touched only on this thread.
-    private val thread = HandlerThread("RtcScreen").also { it.start() }
+    private val thread = HandlerThread("Rtc-${kind.label}").also { it.start() }
     private val h = Handler(thread.looper)
     private val peers = HashMap<String, Peer>()
 
@@ -50,15 +66,29 @@ class WebRtcScreenStreamer(
     @Volatile private var surface: Surface? = null
     private var unusable = false
 
+    // Camera only: the OS rotates the camera texture to the device's natural
+    // orientation and mirrors the front lens. Like libwebrtc's own Camera2Session
+    // we undo both and send the sensor rotation as metadata instead — otherwise a
+    // rotated image would be squeezed into the sensor-shaped buffer.
+    @Volatile private var camOrientation = 0
+    @Volatile private var camFront = false
+
     @Volatile var connectedCount = 0
         private set
 
-    // Called by ScreenCaptureService under its lock, from any thread.
+    // Screen: called by ScreenCaptureService under its lock, from any thread.
     override fun surface(w: Int, h: Int): Surface? {
         val th = helper ?: return null
         if (w <= 0 || h <= 0) return null
         th.setTextureSize(w, h)
         return surface ?: Surface(th.surfaceTexture).also { surface = it }
+    }
+
+    // Camera: called by CameraForegroundService on its camera thread.
+    override fun cameraSurface(w: Int, h: Int, sensorOrientation: Int, front: Boolean): Surface? {
+        camOrientation = sensorOrientation
+        camFront = front
+        return surface(w, h)
     }
 
     fun onMessage(json: JSONObject) {
@@ -89,12 +119,14 @@ class WebRtcScreenStreamer(
         if (factory != null) return true
         if (unusable) return false
         return try {
-            if (!initialized) {
-                PeerConnectionFactory.initialize(
-                    PeerConnectionFactory.InitializationOptions.builder(ctx.applicationContext)
-                        .createInitializationOptions()
-                )
-                initialized = true
+            synchronized(WebRtcStreamer::class.java) {
+                if (!initialized) {
+                    PeerConnectionFactory.initialize(
+                        PeerConnectionFactory.InitializationOptions.builder(ctx.applicationContext)
+                            .createInitializationOptions()
+                    )
+                    initialized = true
+                }
             }
             val e = EglBase.create()
             egl = e
@@ -103,22 +135,41 @@ class WebRtcScreenStreamer(
                 .setVideoDecoderFactory(DefaultVideoDecoderFactory(e.eglBaseContext))
                 .createPeerConnectionFactory()
             factory = f
-            val src = f.createVideoSource(true)
+            val src = f.createVideoSource(kind.screencast)
             source = src
-            val th = SurfaceTextureHelper.create("RtcScreenCapture", e.eglBaseContext)
+            val th = SurfaceTextureHelper.create("Rtc-${kind.label}-capture", e.eglBaseContext)
                 ?: throw IllegalStateException("no SurfaceTextureHelper")
-            th.startListening(VideoSink { frame -> src.capturerObserver.onFrameCaptured(frame) })
+            th.startListening(VideoSink { frame ->
+                if (kind == Kind.CAMERA) {
+                    val fixed = cameraFrame(frame)
+                    src.capturerObserver.onFrameCaptured(fixed)
+                    fixed.release()
+                } else {
+                    src.capturerObserver.onFrameCaptured(frame)
+                }
+            })
             helper = th
             src.capturerObserver.onCapturerStarted(true)
-            track = f.createVideoTrack("screen0", src)
+            track = f.createVideoTrack("${kind.label}0", src)
             true
         } catch (t: Throwable) {
             // Includes UnsatisfiedLinkError: no native lib for this ABI → JPEG only.
-            Log.e(TAG, "WebRTC unavailable: $t")
+            Log.e(TAG, "WebRTC ${kind.label} unavailable: $t")
             unusable = true
             releaseMedia()
             false
         }
+    }
+
+    /** Same correction libwebrtc's Camera2Session applies (device held upright). */
+    private fun cameraFrame(frame: VideoFrame): VideoFrame {
+        val buf = frame.buffer as? TextureBufferImpl ?: return frame.also { it.retain() }
+        val m = Matrix()
+        m.preTranslate(0.5f, 0.5f)
+        if (camFront) m.preScale(-1f, 1f)
+        m.preRotate(-camOrientation.toFloat())
+        m.preTranslate(-0.5f, -0.5f)
+        return VideoFrame(buf.applyTransformMatrix(m, buf.width, buf.height), camOrientation, frame.timestampNs)
     }
 
     private fun releaseMedia() {
@@ -177,16 +228,14 @@ class WebRtcScreenStreamer(
         peer.pendingIce.forEach { peer.pc.addIceCandidate(it) }
         peer.pendingIce.clear()
         // After the remote offer, so addTrack reuses the browser's recvonly transceiver.
-        peer.pc.addTrack(track, listOf("screen"))?.let(::tuneSender)
+        peer.pc.addTrack(track, listOf(kind.label))?.let(::tuneSender)
         peer.pc.createAnswer(object : SdpCallback() {
             override fun onCreateSuccess(answer: SessionDescription) {
                 h.post {
                     if (peers[from] !== peer) return@post
                     peer.pc.setLocalDescription(object : SdpCallback() {
                         override fun onSetSuccess() {
-                            send(JSONObject()
-                                .put("type", "rtc_answer").put("to", from)
-                                .put("sdp", answer.description).toString())
+                            send(msg("rtc_answer", from).put("sdp", answer.description).toString())
                         }
                         override fun onSetFailure(e: String?) { h.post { fail(from, peer, "answer_failed") } }
                     }, answer)
@@ -196,12 +245,11 @@ class WebRtcScreenStreamer(
         }, MediaConstraints())
     }
 
-    // Screen content is mostly text: under pressure drop frames, never resolution.
     private fun tuneSender(sender: RtpSender) {
         try {
             val p = sender.parameters
-            p.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
-            p.encodings.forEach { it.maxBitrateBps = MAX_BITRATE_BPS; it.maxFramerate = 30 }
+            p.degradationPreference = kind.degradation
+            p.encodings.forEach { it.maxBitrateBps = kind.maxBitrateBps; it.maxFramerate = 30 }
             sender.parameters = p
         } catch (_: Exception) {}
     }
@@ -244,14 +292,16 @@ class WebRtcScreenStreamer(
         sendError(from, reason)
     }
 
+    private fun msg(type: String, to: String) =
+        JSONObject().put("type", type).put("kind", kind.label).put("to", to)
+
     private fun sendError(to: String, reason: String) {
-        send(JSONObject().put("type", "rtc_error").put("to", to).put("reason", reason).toString())
+        send(msg("rtc_error", to).put("reason", reason).toString())
     }
 
     private fun observer(from: String, peer: Peer) = object : PeerConnection.Observer {
         override fun onIceCandidate(c: IceCandidate) {
-            send(JSONObject()
-                .put("type", "rtc_ice").put("to", from)
+            send(msg("rtc_ice", from)
                 .put("candidate", JSONObject()
                     .put("candidate", c.sdp)
                     .put("sdpMid", c.sdpMid)

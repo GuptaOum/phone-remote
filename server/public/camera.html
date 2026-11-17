@@ -51,6 +51,8 @@
   box-shadow: 0 8px 48px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.05);
 }
 
+video.cam-canvas { background: #000; }
+
 .cam-placeholder {
   color: var(--muted);
   font-size: 13.5px;
@@ -109,6 +111,8 @@
   </div>
 
   <canvas id="cam-canvas" class="cam-canvas"></canvas>
+  <!-- WebRTC view; shown instead of the JPEG canvas while video frames arrive -->
+  <video id="cam-video" class="cam-canvas" autoplay playsinline muted></video>
 
   <div class="cam-placeholder" id="cam-placeholder">
     <div class="cam-icon">📷</div>
@@ -129,6 +133,7 @@
 <script src="/ws.js"></script>
 <script>
 const camCanvas      = document.getElementById('cam-canvas');
+const camVideo       = document.getElementById('cam-video');
 const camCtx         = camCanvas.getContext('2d');
 const camDot         = document.getElementById('cam-dot');
 const camLabel       = document.getElementById('cam-label');
@@ -151,17 +156,126 @@ function handleMsg(msg) {
       break;
 
     case 'camera_stopped':
+      stopRtc();
       setLive(false);
       break;
 
     case 'camera_error':
+      stopRtc();
       setLive(false);
       showAlert('Camera permission off. On the phone: Settings → Apps → Phone Remote → enable Camera.');
       break;
 
     case 'phone_disconnected':
       setLive(false);
+      stopRtc();
       break;
+
+    case 'rtc_config':
+      if (Array.isArray(msg.iceServers) && msg.iceServers.length) RTC_CONFIG = { iceServers: msg.iceServers };
+      break;
+
+    case 'rtc_answer':
+      if (!rtc || msg.kind !== 'camera') break;
+      rtc.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
+        .then(() => {
+          rtcPendingIce.splice(0).forEach(c => rtc && rtc.addIceCandidate(c).catch(() => {}));
+        })
+        .catch(rtcFail);
+      break;
+
+    case 'rtc_ice':
+      if (!rtc || !msg.candidate || msg.kind !== 'camera') break;
+      if (rtc.remoteDescription) rtc.addIceCandidate(msg.candidate).catch(() => {});
+      else rtcPendingIce.push(msg.candidate);
+      break;
+
+    case 'rtc_error':
+    case 'rtc_unsupported':
+      if (msg.kind === 'camera') rtcFail();
+      break;
+  }
+}
+
+// ── WebRTC: JPEG starts the view instantly; we then offer a peer connection
+// and the server moves the phone's camera over to it once we're connected
+// (direct, or relayed by our TURN server on strict networks like cellular).
+// Whichever source delivered the latest frame is shown, so falling back to
+// JPEG needs no extra signalling here.
+let RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+let rtc = null;
+let rtcGaveUp = false;
+let rtcTimer = null;
+let rtcPendingIce = [];
+let lastVideoFrameAt = 0;
+
+function showVideo(on) {
+  camVideo.style.display  = on && live ? 'block' : 'none';
+  camCanvas.style.display = !on && live ? 'block' : 'none';
+}
+
+function startRtc() {
+  if (rtc || rtcGaveUp || !window.RTCPeerConnection) return;
+  const pc = rtc = new RTCPeerConnection(RTC_CONFIG);
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.onicecandidate = ({ candidate }) => {
+    if (candidate && candidate.candidate) ws.send({ type: 'rtc_ice', kind: 'camera', candidate: candidate.toJSON() });
+  };
+  pc.ontrack = ({ streams, track }) => {
+    camVideo.srcObject = streams[0] || new MediaStream([track]);
+    watchVideoFrames(pc);
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc !== rtc) return;
+    const s = pc.connectionState;
+    if (s === 'connected') {
+      clearTimeout(rtcTimer);
+      ws.send({ type: 'rtc_ready', kind: 'camera' });
+    } else if (s === 'failed') {
+      rtcFail();
+    } else if (s === 'disconnected') {
+      // Often recovers on its own; JPEG covers the gap meanwhile.
+      clearTimeout(rtcTimer);
+      rtcTimer = setTimeout(() => { if (pc === rtc && pc.connectionState !== 'connected') rtcFail(); }, 5000);
+    }
+  };
+  // Relay included, so 15s is generous; after that, stay on JPEG.
+  rtcTimer = setTimeout(() => { if (pc === rtc && pc.connectionState !== 'connected') rtcFail(); }, 15000);
+  pc.createOffer()
+    .then(o => pc.setLocalDescription(o))
+    .then(() => { if (pc === rtc) ws.send({ type: 'rtc_offer', kind: 'camera', sdp: pc.localDescription.sdp }); })
+    .catch(rtcFail);
+}
+
+function rtcFail() {
+  const had = !!rtc;
+  stopRtc();
+  rtcGaveUp = true;  // retried on the next Front/Back
+  if (had) ws.send({ type: 'rtc_failed', kind: 'camera' });
+}
+
+function stopRtc() {
+  clearTimeout(rtcTimer);
+  rtcPendingIce = [];
+  if (rtc) { const pc = rtc; rtc = null; pc.close(); }
+  camVideo.srcObject = null;
+  lastVideoFrameAt = 0;
+  showVideo(false);
+}
+
+function watchVideoFrames(pc) {
+  const onFrame = () => {
+    if (pc !== rtc || Date.now() < suppressFramesUntil) return;
+    lastVideoFrameAt = Date.now();
+    setLive(true);
+    showVideo(true);
+  };
+  if (camVideo.requestVideoFrameCallback) {
+    const tick = () => { if (pc !== rtc) return; onFrame(); camVideo.requestVideoFrameCallback(tick); };
+    camVideo.requestVideoFrameCallback(tick);
+  } else {
+    camVideo.onresize = onFrame;
+    camVideo.onplaying = onFrame;
   }
 }
 
@@ -169,16 +283,20 @@ function setLive(on) {
   live = on;
   camDot.className   = 'cam-dot ' + (on ? 'live' : 'off');
   camLabel.textContent = on ? 'Live' : 'Camera off';
-  camCanvas.style.display      = on ? 'block' : 'none';
   camPlaceholder.style.display = on ? 'none'  : 'block';
+  showVideo(on && !!rtc && Date.now() - lastVideoFrameAt < 1000);
 }
 
 function handleBinary(buffer) {
   const bytes = new Uint8Array(buffer);
   if (bytes[0] !== 0x02) return;  // not a camera frame
   if (Date.now() < suppressFramesUntil) return;  // stale frames after Stop
+  // Just switched to WebRTC: a JPEG still in flight must not cover the video.
+  if (rtc && Date.now() - lastVideoFrameAt < 1000) return;
   // Always sync live state — handles BFCache/reconnect scenarios
   setLive(true);
+  showVideo(false);
+  startRtc();
   createImageBitmap(new Blob([bytes.subarray(1)], { type: 'image/jpeg' }))
     .then(bitmap => {
       camCanvas.width  = bitmap.height;
@@ -197,9 +315,13 @@ function handleBinary(buffer) {
     });
 }
 
-function startCamera(front) { suppressFramesUntil = 0; isFront = front; ws.send({ type: 'camera_start', front }); }
+function startCamera(front) {
+  suppressFramesUntil = 0; isFront = front;
+  stopRtc(); rtcGaveUp = false;  // fresh peer per start; the server restarts us on JPEG
+  ws.send({ type: 'camera_start', front });
+}
 function flipCamera()       { isFront = !isFront; ws.send({ type: 'camera_flip' }); }
-function stopCamera()       { ws.send({ type: 'camera_stop' }); setLive(false); suppressFramesUntil = Date.now() + 4000; }
+function stopCamera()       { ws.send({ type: 'camera_stop' }); stopRtc(); setLive(false); suppressFramesUntil = Date.now() + 4000; }
 
 function showAlert(msg) {
   alertEl.textContent = msg;

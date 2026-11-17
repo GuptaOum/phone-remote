@@ -236,7 +236,7 @@ class ConnectionForegroundService : Service() {
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
                                         "list_apps", "open_url", "notifications", "paste",
-                                        "frame_ack", "webrtc_screen",
+                                        "frame_ack", "webrtc_screen", "webrtc_camera",
                                     )))
                                 }
                                 webSocket.send(reg.toString())
@@ -287,12 +287,27 @@ class ConnectionForegroundService : Service() {
                                 return@post
                             }
                             "rtc_offer", "rtc_ice", "rtc_close" -> {
-                                screenRtc().onMessage(json)
+                                // Offers say which source they want; ICE/close for a
+                                // tab the streamer doesn't know are ignored by it.
+                                when (json.optString("kind")) {
+                                    "camera" -> cameraRtc().onMessage(json)
+                                    "screen" -> screenRtc().onMessage(json)
+                                    else -> if (json.optString("type") == "rtc_offer") {
+                                        screenRtc().onMessage(json)
+                                    } else {
+                                        rtcScreen?.onMessage(json); rtcCamera?.onMessage(json)
+                                    }
+                                }
                                 return@post
                             }
                             "screen_mode" -> {
                                 rtcModeWanted = json.optString("mode") == "rtc"
                                 applyScreenRoute()
+                                return@post
+                            }
+                            "camera_mode" -> {
+                                camRtcModeWanted = json.optString("mode") == "rtc"
+                                applyCameraRoute()
                                 return@post
                             }
                             "screenshot" -> {
@@ -484,11 +499,11 @@ class ConnectionForegroundService : Service() {
     // JPEG always runs first; the server sends screen_mode=rtc once every tab
     // watching has a live WebRTC connection, and we move the mirror over to it.
     // Any peer dropping (or a JPEG-only tab joining) moves it back.
-    private var rtcScreen: WebRtcScreenStreamer? = null
+    private var rtcScreen: WebRtcStreamer? = null
     @Volatile private var rtcModeWanted = false
 
-    private fun screenRtc(): WebRtcScreenStreamer =
-        rtcScreen ?: WebRtcScreenStreamer(this, ::send) { handler.post { applyScreenRoute() } }
+    private fun screenRtc(): WebRtcStreamer =
+        rtcScreen ?: WebRtcStreamer(this, WebRtcStreamer.Kind.SCREEN, ::send) { handler.post { applyScreenRoute() } }
             .also { rtcScreen = it }
 
     private fun applyScreenRoute() {
@@ -500,6 +515,30 @@ class ConnectionForegroundService : Service() {
     private fun stopScreenRtc() {
         rtcModeWanted = false
         rtcScreen?.closeAll()
+    }
+
+    // ── WebRTC camera path ───────────────────────────────────────────────────
+    // Same rule as the screen: JPEG first, camera_mode=rtc once every camera tab
+    // has a live peer. The camera stays open in CameraForegroundService (the
+    // camera-type foreground service Android requires for background capture);
+    // only its output surface moves between the JPEG reader and WebRTC.
+    private var rtcCamera: WebRtcStreamer? = null
+    @Volatile private var camRtcModeWanted = false
+
+    private fun cameraRtc(): WebRtcStreamer =
+        rtcCamera ?: WebRtcStreamer(this, WebRtcStreamer.Kind.CAMERA, ::send) { handler.post { applyCameraRoute() } }
+            .also { rtcCamera = it }
+
+    private fun applyCameraRoute() {
+        val rtc = rtcCamera
+        val useRtc = camRtcModeWanted && rtc != null && rtc.connectedCount > 0
+        CameraForegroundService.instance?.routeTo(if (useRtc) rtc else null)
+    }
+
+    private fun stopCameraRtc() {
+        camRtcModeWanted = false
+        CameraForegroundService.instance?.routeTo(null)
+        rtcCamera?.closeAll()
     }
 
     fun stopScreenStreaming() {
@@ -1206,6 +1245,7 @@ class ConnectionForegroundService : Service() {
     }
 
     private fun stopCamera() {
+        stopCameraRtc()
         CameraForegroundService.instance?.stopCamera()
         stopService(Intent(this, CameraForegroundService::class.java))
         send("""{"type":"camera_stopped"}""")
@@ -1421,6 +1461,8 @@ class ConnectionForegroundService : Service() {
         streamRequested = false
         rtcScreen?.release()
         rtcScreen = null
+        rtcCamera?.release()
+        rtcCamera = null
         ScreenCaptureService.instance?.stop()
         CameraForegroundService.instance?.stopCamera()
         try { stopService(Intent(this, CameraForegroundService::class.java)) } catch (_: Exception) {}
