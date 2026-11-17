@@ -1,10 +1,11 @@
 node_modules
-client/node_modules
+**/node_modules
 client/dist
-server/node_modules
-server/data/*.db*
+server/data
 server/logs
+server/__pycache__
 .git
 .env
+**/.env
 *.pem
 flutter_app

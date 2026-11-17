@@ -1,33 +1,43 @@
 # Deploying Phone Remote to AWS
 
-## ✅ Current deployment (2026-07-10)
+## ✅ Current deployment (2026-11-18, Docker)
 
 | Resource | Value |
 |---|---|
 | Region | ap-south-1 (Mumbai) |
-| EC2 instance | `i-0ec6440e1d7bd748c` (t3.medium, Ubuntu 24.04, 8GB swap) |
-| Elastic IP | 3.6.239.48 |
-| Public URL | **https://3-6-239-48.sslip.io** (free wildcard DNS resolving to the Elastic IP — no domain purchase needed) |
-| TLS | Let's Encrypt via certbot, auto-renews (expires 2026-10-08, renewed automatically before then) |
-| Security group | `sg-0291d93d24ad4f7c6` (22 from home IP — rotates with ISP, update as needed; 80/443 public) |
-| SSH key | `~/.ssh/phone-remote.pem` → `ssh -i ~/.ssh/phone-remote.pem ubuntu@3.6.239.48` |
-| Database | SQLite on instance (`~/phone-remote/server/data/phoneremote.db`) — no RDS |
-| Process | PM2 `phone-remote` (fork, 1 instance, starts on boot) |
-| Proxy | nginx :80 → :443 redirect → node :3000, WebSocket upgrade (wss://) enabled |
-| Build toolchain | Flutter 3.44.6 + Android SDK 36 + NDK 28.2 installed on-instance (`~/flutter`, `~/android-sdk`) for APK builds |
+| EC2 instance | `i-0a24a69528842b8ca` (t3.medium, Ubuntu 24.04, 40 GB disk, 2 GB swap) from AMI `phone-remote-ami-native` |
+| Elastic IP | 65.1.96.152 (`eipalloc-036395a673be2841e`) |
+| Public URL | **https://65-1-96-152.sslip.io** |
+| TLS | Let's Encrypt, host certbot in **webroot** mode (`/var/www/certbot`, mounted into the nginx container); deploy hook reloads `phone-remote-nginx` |
+| Security group | `sg-072b858b2f5b6e632` — 22/80/443 tcp, 3478 tcp+udp and 49160-49200 udp (reserved for TURN) |
+| SSH key | `ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152` |
+| Database | SQLite, bind-mounted `~/phone-remote/server/data` → container |
+| Process | **Docker Compose** — `phone-remote-nginx`, `phone-remote-app`, `phone-remote-mcp`, `phone-remote-turn` (coturn, host network) + one-shot `phone-remote-turn-init` (creates the TURN secret in volume `turn-secret` on first run). `restart: unless-stopped`. PM2 and host nginx are disabled. |
+| TURN | coturn 4.7.0 on 3478 udp/tcp, relay ports 49160-49200 udp, public IP auto-detected (override `TURN_EXTERNAL_IP`). App signs 24 h credentials (`server/src/services/turn.js`); private/loopback peers denied. |
+| Images | Docker Hub `oumgupta/phone-remote-{app,mcp,nginx}:latest` |
+| Build toolchain | Flutter 3.44.6 + Android SDK 36 + NDK 28.2 on-instance (`~/flutter`, `~/android-sdk`) |
+
+**Bring everything up (server, MCP, nginx, TURN):** `cd ~/phone-remote && sudo docker compose up -d --build`
 
 **Redeploy after code changes** (from repo root on Windows):
 
 ```bash
-tar --exclude=node_modules --exclude=data --exclude=logs --exclude=.env \
-    -czf /c/Users/hp/AppData/Local/Temp/phone-remote-server.tgz server
-scp -i ~/.ssh/phone-remote.pem /c/Users/hp/AppData/Local/Temp/phone-remote-server.tgz ubuntu@3.6.239.48:
-ssh -i ~/.ssh/phone-remote.pem ubuntu@3.6.239.48 \
-    "tar xzf phone-remote-server.tgz -C ~/phone-remote && cd ~/phone-remote/server && npm install --omit=dev && pm2 restart phone-remote"
+tar czf /tmp/pr-src.tgz --exclude=./.git --exclude='*/node_modules' --exclude=./client/dist     --exclude=./flutter_app/build --exclude=./flutter_app/.dart_tool --exclude=./server/data     --exclude=./server/logs --exclude=./server/.env --exclude='*.pem' .
+scp -i ~/.ssh/face-attendance.pem /tmp/pr-src.tgz ubuntu@65.1.96.152:
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152     "tar xzf pr-src.tgz -C ~/phone-remote && cd ~/phone-remote && sudo docker compose up -d --build"
 ```
 
-If you later buy a real domain: Route 53 A-record → 3.6.239.48, then
-`sudo certbot --nginx -d yourdomain.com` on the instance (section 4 below),
+**Build the APK on EC2:**
+
+```bash
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152     "cd ~/phone-remote/flutter_app && ANDROID_HOME=~/android-sdk ~/flutter/bin/flutter build apk --release"
+scp -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152:~/phone-remote/flutter_app/build/app/outputs/flutter-apk/app-release.apk .
+```
+
+**Push images:** `docker push oumgupta/phone-remote-app:latest` (same for `-mcp`, `-nginx`; the ubuntu user is logged in to Docker Hub).
+
+If you later buy a real domain: Route 53 A-record → 65.1.96.152, then
+`sudo certbot certonly --webroot -w /var/www/certbot -d yourdomain.com`, set `DOMAIN=yourdomain.com` for docker compose,
 and change `kDefaultServerUrl` to `https://yourdomain.com`. The sslip.io
 setup can be dropped once a real domain is live.
 
