@@ -209,7 +209,7 @@
   <div class="phone-frame">
     <div class="phone-wrap" id="phone-wrap">
       <canvas id="screen-canvas" width="360" height="720" class="screen-canvas"></canvas>
-      <video  id="rtc-video" autoplay playsinline style="display:none;border-radius:30px;width:100%;height:100%;position:absolute;inset:0;"></video>
+      <video  id="rtc-video" autoplay playsinline muted style="opacity:0;pointer-events:none;border-radius:30px;width:100%;height:100%;position:absolute;inset:0;object-fit:contain;"></video>
       <div class="overlay" id="overlay">
         <div class="spin" id="spin" style="display:none;"></div>
         <div class="overlay-msg">
@@ -283,8 +283,6 @@ let phoneH     = 1920;
 let phoneReady = false;
 let drag       = null;
 let kbMode     = false;
-let pc         = null;   // RTCPeerConnection
-
 const ctrlBar  = document.getElementById('ctrl-bar');
 
 function setStreaming(active) {
@@ -301,13 +299,9 @@ function onStreamStopped() {
   streamBtn.style.background = 'var(--accent)';
   streamBtn.style.display = 'block';
   overlay.classList.remove('gone');
-  pc && pc.close(); pc = null;
-  video.srcObject = null;
-  video.style.display = 'none';
-  canvas.style.display = 'block';
+  stopRtc();
 }
 
-const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 let suppressFramesUntil = 0;
 
 // ── WebSocket ─────────────────────────────────────────────────────
@@ -333,10 +327,7 @@ function handleMsg(msg) {
       setOverlay('Phone disconnected', 'Waiting for phone to reconnect...');
       streamBtn.style.display = 'none';
       showStopBtn(false);
-      pc && pc.close(); pc = null;
-      video.srcObject = null;
-      video.style.display = 'none';
-      canvas.style.display = 'block';
+      stopRtc();
       break;
 
     case 'stream_stopped':
@@ -351,13 +342,114 @@ function handleMsg(msg) {
         : 'Screenshot failed — try again');
       break;
 
-    case 'offer':
-      handleOffer(msg.sdp);
+    case 'rtc_config':
+      if (Array.isArray(msg.iceServers) && msg.iceServers.length) RTC_CONFIG = { iceServers: msg.iceServers };
       break;
 
-    case 'ice':
-      pc && msg.candidate && pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+    case 'rtc_answer':
+      if (!rtc) break;
+      rtc.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
+        .then(() => {
+          rtcPendingIce.splice(0).forEach(c => rtc && rtc.addIceCandidate(c).catch(() => {}));
+        })
+        .catch(rtcFail);
       break;
+
+    case 'rtc_ice':
+      if (!rtc || !msg.candidate) break;
+      if (rtc.remoteDescription) rtc.addIceCandidate(msg.candidate).catch(() => {});
+      else rtcPendingIce.push(msg.candidate);
+      break;
+
+    case 'rtc_error':
+      rtcFail();
+      break;
+
+    case 'rtc_unsupported':
+      rtcGaveUp = true;
+      stopRtc();
+      break;
+  }
+}
+
+// ── WebRTC (preferred) with JPEG fallback ─────────────────────────
+// JPEG frames always come first. Once the stream is up we try WebRTC; the
+// server moves the phone over only after our peer connects. Whichever source
+// delivered the most recent frame is what's shown, so a fallback to JPEG
+// (peer drop, another tab without WebRTC) needs no extra signalling here.
+// Replaced by the server's rtc_config (adds our TURN relay with short-lived credentials).
+let RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+let rtc = null;
+let rtcGaveUp = false;
+let rtcTimer = null;
+let rtcPendingIce = [];
+let lastVideoFrameAt = 0;
+
+function startRtc() {
+  if (rtc || rtcGaveUp || !window.RTCPeerConnection) return;
+  const pc = rtc = new RTCPeerConnection(RTC_CONFIG);
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.onicecandidate = ({ candidate }) => {
+    if (candidate && candidate.candidate) ws.send({ type: 'rtc_ice', candidate: candidate.toJSON() });
+  };
+  pc.ontrack = ({ streams, track }) => {
+    video.srcObject = streams[0] || new MediaStream([track]);
+    watchVideoFrames(pc);
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc !== rtc) return;
+    const s = pc.connectionState;
+    if (s === 'connected') {
+      clearTimeout(rtcTimer);
+      ws.send({ type: 'rtc_ready' });
+    } else if (s === 'failed') {
+      rtcFail();
+    } else if (s === 'disconnected') {
+      // Often recovers on its own; JPEG covers the gap meanwhile.
+      clearTimeout(rtcTimer);
+      rtcTimer = setTimeout(() => { if (pc === rtc && pc.connectionState !== 'connected') rtcFail(); }, 5000);
+    }
+  };
+  // No direct path (strict NAT, no TURN) → stay on JPEG.
+  rtcTimer = setTimeout(() => { if (pc === rtc && pc.connectionState !== 'connected') rtcFail(); }, 10000);
+  pc.createOffer()
+    .then(o => pc.setLocalDescription(o))
+    .then(() => { if (pc === rtc) ws.send({ type: 'rtc_offer', sdp: pc.localDescription.sdp }); })
+    .catch(rtcFail);
+}
+
+function rtcFail() {
+  const had = !!rtc;
+  stopRtc();
+  rtcGaveUp = true;  // retried on the next Start Streaming
+  if (had) ws.send({ type: 'rtc_failed' });
+}
+
+function stopRtc() {
+  clearTimeout(rtcTimer);
+  rtcPendingIce = [];
+  if (rtc) { const pc = rtc; rtc = null; pc.close(); }
+  video.srcObject = null;
+  lastVideoFrameAt = 0;
+  video.style.opacity = '0';
+}
+
+function watchVideoFrames(pc) {
+  const onFrame = () => {
+    if (pc !== rtc || Date.now() < suppressFramesUntil) return;
+    lastVideoFrameAt = Date.now();
+    video.style.opacity = '1';
+    setStreaming(true);
+    spin.style.display = 'none';
+    overlay.classList.add('gone');
+    showStopBtn(true);
+  };
+  if (video.requestVideoFrameCallback) {
+    const tick = () => { if (pc !== rtc) return; onFrame(); video.requestVideoFrameCallback(tick); };
+    video.requestVideoFrameCallback(tick);
+  } else {
+    video.onresize = onFrame;
+    video.onplaying = onFrame;
   }
 }
 
@@ -369,6 +461,7 @@ function toggleStream() {
 
 function startStream() {
   suppressFramesUntil = 0;
+  rtcGaveUp = false;
   spin.style.display = 'block';
   setOverlay('Starting stream...', 'Grant screen permission on phone');
   streamBtn.style.display = 'none';
@@ -379,6 +472,7 @@ function startStream() {
 function stopStream() {
   setStreaming(false);
   showStopBtn(false);
+  stopRtc();
   ws.send({ type: 'stream_stop' });
   // Ignore in-flight frames for a moment so the view stops instantly
   // instead of replaying the socket backlog.
@@ -394,29 +488,6 @@ function setOverlay(title, sub) {
   oTitle.textContent = title;
   oSub.textContent   = sub;
   overlay.classList.remove('gone');
-}
-
-// ── WebRTC ────────────────────────────────────────────────────────
-async function handleOffer(sdp) {
-  pc = new RTCPeerConnection(ICE);
-  pc.onicecandidate = ({ candidate }) => candidate && ws.send({ type: 'ice', candidate });
-  pc.ontrack = ({ streams, track }) => {
-    video.srcObject = streams[0];
-    video.style.display = 'block';
-    canvas.style.display = 'none';
-    overlay.classList.add('gone');
-    setStreaming(true);
-    showStopBtn(true);
-    track.onended = () => { if (streaming) onStreamStopped(); };
-  };
-  pc.onconnectionstatechange = () => {
-    if (['failed', 'disconnected'].includes(pc?.connectionState) && streaming)
-      onStreamStopped();
-  };
-  await pc.setRemoteDescription({ type: 'offer', sdp });
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  ws.send({ type: 'answer', sdp: answer.sdp });
 }
 
 // ── Screenshot ────────────────────────────────────────────────────
@@ -469,12 +540,16 @@ function handleBinary(buffer) {
   }
   if (bytes[0] !== 0x01) return;  // not a screen frame
   if (Date.now() < suppressFramesUntil) return;  // stale frames after Stop
+  // Just switched to WebRTC: a JPEG still in flight must not cover the video.
+  if (rtc && Date.now() - lastVideoFrameAt < 1000) return;
   // Always sync overlay state to actual frame arrival — covers BFCache restores
   // and any reconnect scenario where streaming flag may be stale.
   setStreaming(true);
   spin.style.display = 'none';
   overlay.classList.add('gone');
   showStopBtn(true);
+  video.style.opacity = '0';
+  startRtc();
   createImageBitmap(new Blob([bytes.subarray(1)], { type: 'image/jpeg' }))
     .then(bitmap => {
       canvas.width  = bitmap.width;

@@ -10,8 +10,12 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:-65-1-96-152.sslip.io}
     volumes:
       - /etc/letsencrypt:/etc/letsencrypt:ro
+      # certbot (on the host) writes HTTP-01 challenges here for renewals
+      - /var/www/certbot:/var/www/certbot:ro
     depends_on:
       - app
       - mcp
@@ -33,9 +37,14 @@ services:
     environment:
       - PORT=3000
       - FILE_DIR=/app/filestore
+      - TURN_SECRET_FILE=/run/turn/secret
     volumes:
       - ./server/data:/app/server/data
       - /home/ubuntu/PhoneRemote:/app/filestore
+      - turn-secret:/run/turn:ro
+    depends_on:
+      turn-init:
+        condition: service_completed_successfully
 
   # 3. FastMCP Python Server (AI Agent Tool Endpoint)
   mcp:
@@ -56,3 +65,75 @@ services:
       - BACKEND_URL=http://app:3000
     depends_on:
       - app
+
+  # 4. One-shot: creates the TURN shared secret on first run, keeps it after.
+  #    The app signs short-lived TURN credentials with it; coturn verifies them.
+  turn-init:
+    image: coturn/coturn:4.7.0
+    container_name: phone-remote-turn-init
+    user: "0"
+    restart: "no"
+    volumes:
+      - turn-secret:/run/turn
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ ! -s /run/turn/secret ]; then
+          head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > /run/turn/secret
+          echo "TURN secret created"
+        fi
+        chmod 444 /run/turn/secret
+
+  # 5. TURN/STUN relay for WebRTC when a direct phone↔browser path is blocked.
+  #    Host networking: the relay needs the 49160-49200 UDP range and the real
+  #    public address. EC2 security group must allow 3478 tcp/udp + that range.
+  coturn:
+    image: coturn/coturn:4.7.0
+    container_name: phone-remote-turn
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - DOMAIN=${DOMAIN:-65-1-96-152.sslip.io}
+      # Leave empty to auto-detect the instance's public IP.
+      - TURN_EXTERNAL_IP=${TURN_EXTERNAL_IP:-}
+    volumes:
+      - turn-secret:/run/turn:ro
+    depends_on:
+      turn-init:
+        condition: service_completed_successfully
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        EXT="$${TURN_EXTERNAL_IP:-$$(detect-external-ip)}"
+        [ -n "$$EXT" ] || { echo "could not detect public IP; set TURN_EXTERNAL_IP"; exit 1; }
+        cat > /tmp/turnserver.conf <<EOF
+        listening-port=3478
+        min-port=49160
+        max-port=49200
+        external-ip=$$EXT
+        realm=$$DOMAIN
+        use-auth-secret
+        static-auth-secret=$$(cat /run/turn/secret)
+        fingerprint
+        no-cli
+        no-tls
+        no-dtls
+        no-multicast-peers
+        no-loopback-peers
+        denied-peer-ip=0.0.0.0-0.255.255.255
+        denied-peer-ip=10.0.0.0-10.255.255.255
+        denied-peer-ip=100.64.0.0-100.127.255.255
+        denied-peer-ip=127.0.0.0-127.255.255.255
+        denied-peer-ip=169.254.0.0-169.254.255.255
+        denied-peer-ip=172.16.0.0-172.31.255.255
+        denied-peer-ip=192.168.0.0-192.168.255.255
+        user-quota=12
+        total-quota=200
+        log-file=stdout
+        simple-log
+        EOF
+        echo "coturn: realm=$$DOMAIN external-ip=$$EXT"
+        exec turnserver -c /tmp/turnserver.conf
+
+volumes:
+  turn-secret:

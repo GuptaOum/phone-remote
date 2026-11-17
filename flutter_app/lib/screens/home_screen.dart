@@ -101,7 +101,7 @@ class _HomeScreenState extends State<HomeScreen>
         onMessage: _onMsg,
       );
 
-      _stream    = ScreenStreamService(signaling: _sig!);
+      _stream    = ScreenStreamService();
       _camera    = CameraStreamService(signaling: _sig!);
       _phoneFiles = PhoneFilesService(signaling: _sig!);
       _location  = LocationService(sig: _sig!);
@@ -173,12 +173,6 @@ class _HomeScreenState extends State<HomeScreen>
         break;
       case '_screen_stopped':
         setState(() { _loading = false; _streaming = false; });
-        break;
-      case 'answer':
-        _stream?.handleAnswer(msg['sdp'] as String);
-        break;
-      case 'ice':
-        _stream?.handleIce(msg['candidate'] as Map<String, dynamic>);
         break;
       case 'control':
         {

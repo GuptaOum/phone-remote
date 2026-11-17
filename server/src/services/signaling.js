@@ -1,6 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('./db');
 const { verifyToken, requireAuth } = require('../middleware/auth');
+const { iceServers } = require('./turn');
 
 /**
  * Multi-account signaling + control relay.
@@ -128,6 +129,31 @@ function scheduleIdleCheck(userId, deviceId) {
       console.log(`🛑 Auto-stopped camera (no viewers) user=${userId.slice(0, 8)} device=${deviceId.slice(0, 8)}`);
     }
   }, IDLE_STOP_GRACE_MS);
+}
+
+/**
+ * Screen transport: WebRTC only when EVERY tab that wants the stream has a
+ * live peer connection; otherwise JPEG (the phone's mirror can feed only one
+ * of them at a time). `force` re-sends even if unchanged — used after a phone
+ * reconnect, when the phone's idea of the mode is unknown.
+ */
+function updateScreenMode(userId, deviceId, force = false) {
+  const a = accounts.get(userId);
+  if (!a || !deviceId) return;
+  const m = mediaState(a, deviceId);
+  const viewers = viewersOf(a, deviceId).filter((b) => b.wantsStream);
+  const rtc = viewers.length > 0 && viewers.every((b) => b.rtcReady);
+  if (!force && m.rtcMode === rtc) return;
+  m.rtcMode = rtc;
+  getPhoneSocket(userId, deviceId, 'webrtc_screen')?.send(j({ type: 'screen_mode', mode: rtc ? 'rtc' : 'jpeg' }));
+}
+
+/** Tell the phone to drop this tab's WebRTC peer, if it had one. */
+function closeTabRtc(ws, deviceId = ws.watchId) {
+  if (!ws.rtcReady && !ws.rtcOffered) return;
+  ws.rtcReady = false;
+  ws.rtcOffered = false;
+  getPhoneSocket(ws.userId, deviceId, 'webrtc_screen')?.send(j({ type: 'rtc_close', from: ws.id }));
 }
 
 /** Cancel phone→browser downloads this browser socket was receiving. */
@@ -495,6 +521,13 @@ function setupSignaling(wss, app) {
     };
 
     const relayToPhone = (msg) => { if (ws.role === 'browser') myPhone()?.send(j(msg)); };
+    // Phone → one specific tab (WebRTC answers/candidates are per peer).
+    const sendToTab = (tabId, msg) => {
+      const a = accounts.get(ws.userId);
+      for (const b of a?.browsers || []) {
+        if (b.id === tabId && b.watchId === ws.deviceId && b.readyState === 1) { b.send(j(msg)); return; }
+      }
+    };
     const relayToWatchers = (msg) => { if (ws.role === 'phone') bcast(watchers(), msg); };
 
     // Phone → server: frames prove capture is running even if the server
@@ -683,6 +716,8 @@ function setupSignaling(wss, app) {
               ws.wantsStream = false;
               ws.wantsCamera = false;
               if (prevWatch) {
+                closeTabRtc(ws, prevWatch);
+                updateScreenMode(ws.userId, prevWatch);
                 cancelOwnedDownloads(a, ws, prevWatch);
                 scheduleIdleCheck(ws.userId, prevWatch);
               }
@@ -701,24 +736,46 @@ function setupSignaling(wss, app) {
               if (loc) ws.send(j(loc));
             }
             console.log(`🖥️  Browser connected user=${ws.userId.slice(0, 8)} watching=${ws.watchId?.slice(0, 8) || 'dashboard'} (account tabs: ${a.browsers.size})`);
+            ws.send(j({ type: 'rtc_config', iceServers: iceServers(ws.userId) }));
           }
           break;
         }
 
-        // ── WebRTC negotiation ────────────────────────────────────────────
-        case 'offer':
-        case 'camera_offer':
-          relayToWatchers({ type: msg.type, sdp: msg.sdp });
+        // ── WebRTC screen: tab offers, phone answers, one peer per tab ────
+        // Media goes peer-to-peer, or through our coturn relay when a direct
+        // path is blocked; only this negotiation goes through us. The offer
+        // carries fresh ICE servers (incl. TURN credentials) for the phone.
+        // If WebRTC can't connect at all, the tab stays on JPEG.
+        case 'rtc_offer':
+        case 'rtc_ice': {
+          if (ws.role === 'browser') {
+            const phone = ws.watchId && getPhoneSocket(ws.userId, ws.watchId, 'webrtc_screen');
+            if (!phone) {
+              if (msg.type === 'rtc_offer') ws.send(j({ type: 'rtc_unsupported' }));
+              break;
+            }
+            if (msg.type === 'rtc_offer') ws.rtcOffered = true;
+            phone.send(j({
+              type: msg.type, from: ws.id, sdp: msg.sdp, candidate: msg.candidate,
+              iceServers: msg.type === 'rtc_offer' ? iceServers(ws.userId) : undefined,
+            }));
+          } else if (ws.role === 'phone' && msg.type === 'rtc_ice') {
+            sendToTab(msg.to, { type: 'rtc_ice', candidate: msg.candidate });
+          }
           break;
-        case 'answer':
-        case 'camera_answer':
-          relayToPhone({ type: msg.type, sdp: msg.sdp });
+        }
+        case 'rtc_answer':
+        case 'rtc_error':
+          if (ws.role === 'phone') sendToTab(msg.to, { type: msg.type, sdp: msg.sdp, reason: msg.reason });
           break;
-        case 'ice':
-        case 'camera_ice':
-          if (ws.role === 'phone') relayToWatchers({ type: msg.type, candidate: msg.candidate });
-          else relayToPhone({ type: msg.type, candidate: msg.candidate });
+        case 'rtc_ready':
+        case 'rtc_failed': {
+          if (ws.role !== 'browser' || !ws.watchId) return;
+          if (msg.type === 'rtc_ready') ws.rtcReady = true;
+          else closeTabRtc(ws);
+          updateScreenMode(ws.userId, ws.watchId);
           break;
+        }
 
         // ── JPEG frame fallback (legacy JSON path) ────────────────────────
         case 'frame':
@@ -737,6 +794,8 @@ function setupSignaling(wss, app) {
           m.streamOnAt = Date.now();
           relayToWatchers({ type: 'stream_started' });
           scheduleIdleCheck(ws.userId, ws.deviceId);
+          // Also sent on phone reconnect: re-state the mode so both sides agree.
+          updateScreenMode(ws.userId, ws.deviceId, true);
           break;
         }
         case 'stream_stopped':
@@ -755,7 +814,8 @@ function setupSignaling(wss, app) {
           if (staleStop) break;
           m.stream = 'off';
           m.streamStopAt = now;
-          viewersOf(a, ws.deviceId).forEach((b) => { b.wantsStream = false; });
+          m.rtcMode = false;
+          viewersOf(a, ws.deviceId).forEach((b) => { b.wantsStream = false; b.rtcReady = false; b.rtcOffered = false; });
           relayToWatchers(msg.type === 'stream_error'
             ? { type: 'stream_error', reason: msg.reason || 'failed' }
             : { type: 'stream_stopped' });
@@ -794,6 +854,9 @@ function setupSignaling(wss, app) {
         case 'stream_start': {
           if (ws.role !== 'browser' || !ws.watchId) return;
           ws.wantsStream = true;
+          // A fresh viewer starts on JPEG until its own WebRTC peer connects.
+          closeTabRtc(ws);
+          updateScreenMode(ws.userId, ws.watchId);
           const m = mediaState(acct(ws.userId), ws.watchId);
           if (m.stream === 'on') {
             ws.send(j({ type: 'stream_started' }));
@@ -813,6 +876,8 @@ function setupSignaling(wss, app) {
         case 'stream_stop': {
           if (ws.role !== 'browser' || !ws.watchId) return;
           ws.wantsStream = false;
+          closeTabRtc(ws);
+          updateScreenMode(ws.userId, ws.watchId);
           const a = acct(ws.userId);
           const others = viewersOf(a, ws.watchId).some((b) => b !== ws && b.wantsStream);
           if (!others) {
@@ -1074,7 +1139,7 @@ function setupSignaling(wss, app) {
             // reports any capture still running when it re-registers, and
             // watchers keep their wantsStream/wantsCamera so they re-claim it.
             const m = a.media.get(ws.deviceId);
-            if (m) { m.stream = 'off'; m.camera = 'off'; m.streamStopAt = 0; m.cameraStopAt = 0; }
+            if (m) { m.stream = 'off'; m.camera = 'off'; m.streamStopAt = 0; m.cameraStopAt = 0; m.rtcMode = false; }
             for (const [id, owner] of a.downloadOwners) {
               if (owner.watchId === ws.deviceId) { owner.downloads?.delete(id); a.downloadOwners.delete(id); }
             }
@@ -1087,6 +1152,10 @@ function setupSignaling(wss, app) {
       } else if (ws.role === 'browser') {
         a.browsers.delete(ws);
         cancelOwnedDownloads(a, ws);
+        if (ws.watchId) {
+          closeTabRtc(ws);
+          updateScreenMode(ws.userId, ws.watchId);
+        }
         if (ws.watchId && (ws.wantsStream || ws.wantsCamera)) scheduleIdleCheck(ws.userId, ws.watchId);
       }
       cleanupAcct(ws.userId);

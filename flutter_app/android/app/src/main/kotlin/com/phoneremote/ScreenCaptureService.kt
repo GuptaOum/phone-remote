@@ -42,6 +42,9 @@ class ScreenCaptureService : Service() {
         private const val MIN_FRAME_INTERVAL_MS = 50L
     }
 
+    /** Alternate frame destination for the mirror (WebRTC). Null surface = not ready. */
+    interface SurfaceSink { fun surface(w: Int, h: Int): android.view.Surface? }
+
     inner class LocalBinder : Binder() { val service get() = this@ScreenCaptureService }
     override fun onBind(i: Intent): IBinder = LocalBinder()
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -55,6 +58,8 @@ class ScreenCaptureService : Service() {
     private var reader: ImageReader? = null
     private var capW = 0
     private var capH = 0
+    // When set (and ready), the mirror renders into it instead of the JPEG reader.
+    private var sink: SurfaceSink? = null
     @Volatile private var onFrame: ((ByteArray) -> Unit)? = null
     @Volatile private var running = false
     /** Checked BEFORE grabbing and encoding a frame: false = the link is full, skip. */
@@ -120,6 +125,22 @@ class ScreenCaptureService : Service() {
         return true
     }
 
+    /**
+     * Point the mirror at [s] (WebRTC) or, with null, back at the JPEG reader.
+     * Same display, same consent — no new permission dialog. Always re-attaches:
+     * a fresh surface makes the compositor push a new frame, which a newly
+     * joined viewer needs even while the screen is still.
+     */
+    fun routeTo(s: SurfaceSink?) {
+        synchronized(lock) {
+            sink = s
+            val d = display ?: return
+            val target = s?.surface(capW, capH) ?: reader?.surface
+            d.surface = null
+            d.surface = target
+        }
+    }
+
     /** Consent arrived but nobody wants the stream anymore — keep the token, drop the notification. */
     fun idle() {
         if (!running) try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
@@ -128,7 +149,10 @@ class ScreenCaptureService : Service() {
     fun stop() {
         running = false
         onFrame = null
-        synchronized(lock) { releaseDisplayLocked() }
+        synchronized(lock) {
+            sink = null
+            releaseDisplayLocked()
+        }
         // Before Android 14 the token can drive a new display later, so the
         // next start needs no permission dialog. From 14 on it is single-use.
         if (Build.VERSION.SDK_INT >= 34) dropProjection()
@@ -186,7 +210,7 @@ class ScreenCaptureService : Service() {
         if (w <= 0 || h <= 0 || (w == capW && h == capH)) return
         val newReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
         d.resize(w, h, resources.displayMetrics.densityDpi)
-        d.surface = newReader.surface
+        d.surface = sink?.surface(w, h) ?: newReader.surface
         try { reader?.close() } catch (_: Exception) {}
         reader = newReader
         capW = w

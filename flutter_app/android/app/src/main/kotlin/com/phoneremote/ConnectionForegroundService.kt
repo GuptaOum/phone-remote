@@ -236,7 +236,7 @@ class ConnectionForegroundService : Service() {
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
                                         "list_apps", "open_url", "notifications", "paste",
-                                        "frame_ack",
+                                        "frame_ack", "webrtc_screen",
                                     )))
                                 }
                                 webSocket.send(reg.toString())
@@ -284,6 +284,15 @@ class ConnectionForegroundService : Service() {
                             }
                             "stream_start", "stream_stop" -> {
                                 handleScreenCapture(json)
+                                return@post
+                            }
+                            "rtc_offer", "rtc_ice", "rtc_close" -> {
+                                screenRtc().onMessage(json)
+                                return@post
+                            }
+                            "screen_mode" -> {
+                                rtcModeWanted = json.optString("mode") == "rtc"
+                                applyScreenRoute()
                                 return@post
                             }
                             "screenshot" -> {
@@ -471,8 +480,31 @@ class ConnectionForegroundService : Service() {
         clearProjectionPrompt()
     }
 
+    // ── WebRTC screen path ───────────────────────────────────────────────────
+    // JPEG always runs first; the server sends screen_mode=rtc once every tab
+    // watching has a live WebRTC connection, and we move the mirror over to it.
+    // Any peer dropping (or a JPEG-only tab joining) moves it back.
+    private var rtcScreen: WebRtcScreenStreamer? = null
+    @Volatile private var rtcModeWanted = false
+
+    private fun screenRtc(): WebRtcScreenStreamer =
+        rtcScreen ?: WebRtcScreenStreamer(this, ::send) { handler.post { applyScreenRoute() } }
+            .also { rtcScreen = it }
+
+    private fun applyScreenRoute() {
+        val rtc = rtcScreen
+        val useRtc = rtcModeWanted && rtc != null && rtc.connectedCount > 0
+        ScreenCaptureService.instance?.routeTo(if (useRtc) rtc else null)
+    }
+
+    private fun stopScreenRtc() {
+        rtcModeWanted = false
+        rtcScreen?.closeAll()
+    }
+
     fun stopScreenStreaming() {
         streamRequested = false
+        stopScreenRtc()
         ScreenCaptureService.instance?.stop()
         send("""{"type":"stream_stopped"}""")
         onMessage?.invoke("""{"type":"_screen_stopped"}""")
@@ -491,6 +523,7 @@ class ConnectionForegroundService : Service() {
     fun onProjectionStopped() {
         handler.post {
             streamRequested = false
+            stopScreenRtc()
             send("""{"type":"stream_error","reason":"projection_stopped"}""")
             onMessage?.invoke("""{"type":"_screen_stopped"}""")
         }
@@ -1386,6 +1419,8 @@ class ConnectionForegroundService : Service() {
         // Logout, the notification's Stop, or a removed device: nobody can
         // watch anymore, so don't leave the screen or camera being captured.
         streamRequested = false
+        rtcScreen?.release()
+        rtcScreen = null
         ScreenCaptureService.instance?.stop()
         CameraForegroundService.instance?.stopCamera()
         try { stopService(Intent(this, CameraForegroundService::class.java)) } catch (_: Exception) {}
