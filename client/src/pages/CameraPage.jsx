@@ -175,6 +175,11 @@ export default function CameraPage() {
               : 'Camera permission off. On the phone: Settings → Apps → Phone Remote → enable Camera permission.'
           );
           break;
+        case 'rtc_unsupported':
+          if (msg.kind === 'camera' && mine()) {
+            setErrorMessage('This phone app version cannot stream video. Install the latest app from /phone-remote.apk');
+          }
+          break;
         case 'phone_disconnected':
         case '_ws_closed':
           // Keep the intent: the camera is re-requested when the phone is back.
@@ -290,6 +295,7 @@ export default function CameraPage() {
           muted
           style={{ visibility: rtc.videoActive ? 'visible' : 'hidden' }}
         />
+        {!rtc.videoActive && <div className="cam-connecting">Connecting video…</div>}
       </div>
 
       {!live && (
@@ -399,6 +405,15 @@ export default function CameraPage() {
           overflow: hidden;
           background: #000;
           box-shadow: 0 8px 48px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.05);
+        }
+        .cam-connecting {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #9ca3af;
+          font-size: 13px;
         }
         .cam-media {
           position: absolute;

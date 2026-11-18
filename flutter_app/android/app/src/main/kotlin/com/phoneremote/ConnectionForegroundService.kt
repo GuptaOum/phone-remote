@@ -22,6 +22,15 @@ import java.util.concurrent.TimeUnit
 class ConnectionForegroundService : Service() {
 
     companion object {
+        /**
+         * JPEG-over-WebSocket streaming of the screen/camera — switched OFF:
+         * both stream over WebRTC only (direct, or via our TURN relay incl.
+         * TLS/443), and a dropped call is repaired/retried as WebRTC. Set true
+         * to bring back JPEG as the fallback. Screenshots are unaffected.
+         * Pairs with JPEG_FALLBACK in client/src/hooks/useRtcStream.js.
+         */
+        const val JPEG_FALLBACK = false
+
         var instance: ConnectionForegroundService? = null
         var onMessage: ((String) -> Unit)? = null
         const val NOTIF_ID = 3
@@ -503,6 +512,9 @@ class ConnectionForegroundService : Service() {
     }
 
     private fun sendScreenFrame(jpegBytes: ByteArray) {
+        // JPEG fallback switched off: screen goes over WebRTC only. (The capture
+        // loop keeps running — it also tracks rotation for the WebRTC surface.)
+        if (!JPEG_FALLBACK) return
         if (!screenFrameAllowed()) return
         val payload = ByteArray(jpegBytes.size + 1)
         payload[0] = 0x01
@@ -1269,6 +1281,7 @@ class ConnectionForegroundService : Service() {
                 }
             },
         ) { jpegBytes ->
+            if (!JPEG_FALLBACK) return@startCamera  // camera goes over WebRTC only
             val now = System.currentTimeMillis()
             if (now - lastCameraFrameMs < 83L) return@startCamera  // 12fps cap
             if ((ws?.queueSize() ?: 1L) > 0L) return@startCamera   // drop if wire busy

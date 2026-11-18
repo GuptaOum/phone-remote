@@ -26,9 +26,16 @@ const UPGRADE_DELAYS_MS = [5000, 15000];
 // A video frame newer than this means WebRTC is what the user is seeing.
 const VIDEO_FRESH_MS = 1000;
 const FRAME_POLL_MS = 250;
-// After a fallback, retry WebRTC (as a probe, JPEG keeps playing) with backoff.
-const RETRY_FIRST_MS = 4000;
-const RETRY_MAX_MS = 30000;
+// JPEG-over-WebSocket fallback — switched OFF: the screen/camera are shown
+// only as WebRTC video. If the call can't be (re)established, we keep retrying
+// WebRTC and the page shows "Connecting video…" meanwhile. Set true to bring
+// back JPEG as the fallback (pairs with JPEG_FALLBACK in the phone's
+// ConnectionForegroundService.kt).
+const JPEG_FALLBACK = false;
+// After a failed call, retry WebRTC with backoff. With JPEG on, a retry is a
+// probe (JPEG keeps playing); without it, a normal offer.
+const RETRY_FIRST_MS = JPEG_FALLBACK ? 4000 : 2000;
+const RETRY_MAX_MS = JPEG_FALLBACK ? 30000 : 10000;
 
 /**
  * WebRTC receive side for one phone source (`kind`: 'screen' | 'camera').
@@ -121,7 +128,7 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
     retryTimerRef.current = setTimeout(() => {
       if (pcRef.current || !shouldRetryRef.current?.()) return;
       gaveUpRef.current = false;
-      startRef.current?.({ probe: true });
+      startRef.current?.({ probe: JPEG_FALLBACK });
     }, delay);
   }, [stop, sendRaw, kind]);
 
@@ -204,9 +211,20 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
     setTimeout(poll, 500);
   }, [finishRecovery]);
 
-  const restartIce = useCallback(() => {
+  // An ICE-restart offer can be lost: if the browser notices the dead path
+  // before the phone's NEW socket has registered, the server still delivers
+  // the offer to the phone's old, dead socket. Withdraw the unanswered offer
+  // (rollback) so a fresh one can be sent.
+  const rollbackOffer = async (pc) => {
+    if (pc.signalingState !== 'have-local-offer') return true;
+    try { await pc.setLocalDescription({ type: 'rollback' }); return true; } catch (_) { return false; }
+  };
+
+  const restartIce = useCallback(async () => {
     const pc = pcRef.current;
-    if (!pc || !pc.remoteDescription || pc.signalingState !== 'stable') return;
+    if (!pc || !pc.remoteDescription) return;
+    if (!(await rollbackOffer(pc)) || pc !== pcRef.current) return;
+    if (pc.signalingState !== 'stable') return;
     if (restartAttemptsRef.current >= RESTART_MAX_ATTEMPTS) { fail(); return; }
     restartAttemptsRef.current += 1;
     if (!recoveringRef.current) {
@@ -229,12 +247,10 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
         watchRecovery(pc, baseline);
       })
       .catch(() => { if (pc === pcRef.current) fail(); });
-    // No new path in time → try again (new network may still be coming up).
+    // No new path in time → try again (new network may still be coming up, or
+    // the offer went to a dead socket — restartIce withdraws it first).
     restartTimerRef.current = setTimeout(() => {
-      if (pc === pcRef.current && recoveringRef.current) {
-        if (pc.signalingState !== 'stable') { fail(); return; } // answer never came
-        restartIce();
-      }
+      if (pc === pcRef.current && recoveringRef.current) restartIceRef.current?.();
     }, RESTART_TIMEOUT_MS);
   }, [fail, sendRaw, kind, watchRecovery]);
   const restartIceRef = useRef(null);
@@ -300,6 +316,7 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
   }, [stop]);
 
   const acceptJpeg = useCallback(() => {
+    if (!JPEG_FALLBACK) return false;         // WebRTC only
     if (!pcRef.current) return true;          // no WebRTC (failed / unsupported)
     if (!hadVideoRef.current) return probeRef.current; // connecting: WebRTC first; a retry keeps JPEG
     return Date.now() - lastFrameAtRef.current >= VIDEO_FRESH_MS; // video stalled
@@ -315,6 +332,8 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
       switch (msg.type) {
         case 'rtc_answer':
           if (!pc || !mine) break;
+          // A late answer to an offer we already withdrew (rollback): ignore.
+          if (pc.signalingState !== 'have-local-offer') break;
           pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
             .then(() => {
               pendingIceRef.current.splice(0).forEach((c) => pc.addIceCandidate(c).catch(() => {}));
@@ -337,7 +356,9 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
         case 'rtc_restart':
           // Server: the phone just re-registered (network switch) — the old
           // path is dead even if the browser hasn't noticed yet.
-          if (ICE_RESTART && pc && mine && hadVideoRef.current && !recoveringRef.current) {
+          // Also while already recovering: our offer may have gone to the
+          // phone's old socket — resend it to the new one.
+          if (ICE_RESTART && pc && mine && hadVideoRef.current) {
             restartAttemptsRef.current = 0;
             upgradeStepRef.current = 0;
             clearTimeout(upgradeTimerRef.current);

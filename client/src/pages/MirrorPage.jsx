@@ -247,6 +247,11 @@ export default function MirrorPage() {
         case 'device_offline':
           if (!msg.deviceId || msg.deviceId === selectedDeviceId) handleLinkLost();
           break;
+        case 'rtc_unsupported':
+          if ((msg.kind || 'screen') === 'screen' && mine()) {
+            showNotice('This phone app version cannot stream video. Install the latest app from /phone-remote.apk');
+          }
+          break;
         case 'screenshot_error':
           clearTimeout(screenshotTimeoutRef.current);
           setTakingScreenshot(false);
@@ -610,6 +615,13 @@ export default function MirrorPage() {
             </div>
           )}
 
+          {streaming && !rtc.videoActive && (
+            <div className="video-connecting">
+              <span className="spinner"></span>
+              <span>Connecting video…</span>
+            </div>
+          )}
+
           {notice && <div className="stream-notice">{notice}</div>}
         </div>
       </div>
@@ -859,6 +871,22 @@ export default function MirrorPage() {
           width: 100%;
           height: 100%;
           object-fit: contain;
+        }
+        .video-connecting {
+          position: absolute;
+          left: 50%;
+          top: 50%;
+          transform: translate(-50%, -50%);
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 10px 16px;
+          border-radius: 12px;
+          background: rgba(0, 0, 0, 0.6);
+          color: #d1d5db;
+          font-size: 13px;
+          pointer-events: none;
+          z-index: 5;
         }
         .phone-video {
           position: absolute;

@@ -836,7 +836,7 @@ function setupSignaling(wss, app) {
           if (msg.type === 'rtc_ready') ws[RTC_KINDS[kind].ready] = true;
           else closeTabRtc(ws, ws.watchId, kind);
           updateRtcMode(kind, ws.userId, ws.watchId);
-          console.log(`🔗 WebRTC ${kind} ${msg.type === 'rtc_ready' ? 'connected' : 'failed → JPEG'} user=${ws.userId.slice(0, 8)} device=${ws.watchId.slice(0, 8)}`);
+          console.log(`🔗 WebRTC ${kind} ${msg.type === 'rtc_ready' ? 'connected' : 'failed (tab retries)'} user=${ws.userId.slice(0, 8)} device=${ws.watchId.slice(0, 8)}`);
           break;
         }
 
