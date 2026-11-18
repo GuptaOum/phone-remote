@@ -96,6 +96,25 @@ async function main() {
     console.log(`📡 Listening: http://0.0.0.0:${PORT}`);
     console.log(`🔐 Login:     http://localhost:${PORT}/login`);
   });
+
+  // Blue-green deploys stop the old instance with SIGTERM once the new one is
+  // live. Close every socket right away (1012 = service restart) so phones and
+  // browsers reconnect at once — through nginx, to the new instance.
+  let stopping = false;
+  const shutdown = (sig) => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`👋 ${sig}: closing ${wss.clients.size} socket(s), shutting down`);
+    server.close(() => process.exit(0));
+    wss.clients.forEach((ws) => {
+      try { ws.close(1012, 'server restart'); } catch { /* already gone */ }
+    });
+    setTimeout(() => wss.clients.forEach((ws) => ws.terminate()), 2000).unref();
+    server.closeIdleConnections?.();
+    setTimeout(() => process.exit(0), 8000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 main().catch((e) => {

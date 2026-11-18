@@ -19,21 +19,24 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
       # certbot (on the host) writes HTTP-01 challenges here for renewals
       - /var/www/certbot:/var/www/certbot:ro
-    depends_on:
-      - app
+      # Which app colour is live (written by deploy/deploy.sh)
+      - ./.deploy:/etc/nginx/live:ro
 
-  # 2. Web Frontend (React + Vite) & Express Node.js Backend
-  app:
+  # 2. Web Frontend (React + Vite) & Express Node.js Backend — blue-green.
+  #    Two identical services share one image; only the live colour runs and
+  #    gets traffic. A deploy starts the other colour with the new image,
+  #    health-checks it, switches nginx to it, then stops the old one.
+  #    Deploy with deploy/deploy.sh (or a push to main), not `compose up`.
+  app-blue: &app
     build:
       context: .
       dockerfile: Dockerfile
     image: oumgupta/phone-remote-app:latest
-    container_name: phone-remote-app
+    container_name: phone-remote-app-blue
     restart: unless-stopped
+    stop_grace_period: 15s
     expose:
       - "3000"
-    ports:
-      - "127.0.0.1:3000:3000"
     env_file:
       - ./server/.env
     environment:
@@ -53,6 +56,10 @@ services:
     depends_on:
       turn-init:
         condition: service_completed_successfully
+
+  app-green:
+    <<: *app
+    container_name: phone-remote-app-green
 
   # 3. One-shot: creates the TURN shared secret on first run, keeps it after.
   #    The app signs short-lived TURN credentials with it; coturn verifies them.

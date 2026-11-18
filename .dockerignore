@@ -11,3 +11,4 @@ server/__pycache__
 flutter_app
 *.apk
 downloads
+.deploy

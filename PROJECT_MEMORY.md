@@ -104,7 +104,7 @@ Docker Hub user **`oumgupta`**:
 | Container | Image | Purpose |
 | :--- | :--- | :--- |
 | `phone-remote-nginx` | `oumgupta/phone-remote-nginx:latest` | TLS, SNI router, reverse proxy |
-| `phone-remote-app` | `oumgupta/phone-remote-app:latest` | React bundle + Node server + MCP |
+| `phone-remote-app-blue` / `-green` | `oumgupta/phone-remote-app:latest` | React bundle + Node server + MCP — blue-green pair, one live |
 | `phone-remote-turn` | `coturn/coturn:4.7.0` | TURN/STUN relay (host network) |
 | `phone-remote-turn-init` | `coturn/coturn:4.7.0` | one-shot: creates TURN secret in volume `turn-secret` |
 
@@ -112,7 +112,7 @@ Docker Hub user **`oumgupta`**:
 `.github/workflows/deploy.yml`:
 1. **CI** — builds client, syntax-checks server, validates compose. Failure → production untouched.
 2. **Deploy** — SSH with a key locked (forced command) to `~/bin/phone-remote-deploy`, which runs `deploy/deploy.sh` from `origin/main`:
-   fast-forward → map `git diff` to services → build while old containers serve → recreate **only changed** services → nginx graceful reload → health check → **auto-rollback** on failure → push changed images to Docker Hub.
+   fast-forward → map `git diff` to services → build while the live colour serves → start the idle colour (`app-blue` ↔ `app-green`) → health-check it → graceful nginx switch → public check → stop old colour → push images. Failures before the switch-over completes roll back with zero downtime.
 
 | Files changed | Restarted |
 | :--- | :--- |
@@ -173,7 +173,7 @@ ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote/flutter_
 # Status
 ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && docker compose ps"
 # Logs
-ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && docker compose logs --tail 100 app"
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && docker compose logs --tail 100 app-blue app-green"
 # Health
 curl https://65-1-96-152.sslip.io/health        # {"ok":true}
 # Rebuild everything
@@ -185,7 +185,7 @@ Code changes: commit + push to `main`; CI/CD does the rest (section 5). Watch it
 
 ## 🚨 9. Known Quirks & Open Issues
 
-1. **Restarting `app` drops open WebSockets for a few seconds** — phones/browsers reconnect; WebRTC recovers via ICE restart.
+1. **App deploys are blue-green** — no failed requests; only live WebSockets reconnect (1–2 s) when the old colour stops. Live colour: `cat ~/phone-remote/.deploy/app-upstream.conf`. Use `deploy/deploy.sh`, not a bare `docker compose up`.
 2. **Disk space** — `docker image prune -f` runs after each deploy; keep swap at 2 GB.
 3. **Killing processes over SSH** — `pkill -f <name>` matches the SSH command itself; use `grep '[G]radleDaemon'` or `./gradlew --stop`.
 4. **Open issues (deferred)**:

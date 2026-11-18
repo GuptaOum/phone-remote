@@ -13,7 +13,7 @@
 | Security group | `sg-072b858b2f5b6e632` — 22/80/443 tcp, 3478 tcp+udp, 49160-49200 udp (TURN relay). 22 is open to all on purpose (key-only SSH) |
 | SSH key | `ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152` |
 | Database | SQLite, bind-mounted `~/phone-remote/server/data` → container |
-| Process | **Docker Compose** — `phone-remote-nginx`, `phone-remote-app` (also serves MCP at `/mcp`), `phone-remote-turn` (coturn, host network) + one-shot `phone-remote-turn-init` (creates the TURN secret in volume `turn-secret` on first run). `restart: unless-stopped`. PM2 and host nginx are disabled. |
+| Process | **Docker Compose** — `phone-remote-nginx`, `phone-remote-app-blue` / `phone-remote-app-green` (blue-green pair, only the live one runs; also serves MCP at `/mcp`), `phone-remote-turn` (coturn, host network) + one-shot `phone-remote-turn-init` (creates the TURN secret in volume `turn-secret` on first run). `restart: unless-stopped`. PM2 and host nginx are disabled. |
 | TURN | coturn 4.7.0 on 3478 udp/tcp **and TLS on 443** (`turns:turn.<domain>:443`, via nginx). Relay ports 49160-49200 udp, relays only on the instance's private IP (`relay-ip`, `external-ip=public/private`, own IP allowed as peer so relay↔relay works). Public/private IP auto-detected (override `TURN_EXTERNAL_IP` / `TURN_PRIVATE_IP`). App signs 24 h credentials (`server/src/services/turn.js`, `TURN_TLS_HOST`); private/loopback peers denied. |
 | WebRTC | Screen + camera stream WebRTC-first (direct → relay UDP/TCP → relay TLS 443), WebRTC-only (`JPEG_FALLBACK=false`). ICE restart on network switch (flags: `ICE_RESTART` in `client/src/hooks/useRtcStream.js`, `ICE_RESTART_HINT` in `server/src/services/signaling.js`) |
 | APK download | `https://65-1-96-152.sslip.io/phone-remote.apk` served from **`~/phone-remote/downloads/`** (mounted read-only, not in the image) |
@@ -30,18 +30,26 @@
 2. **Deploy**: SSHes to the EC2 with a key that can only run
    `~/bin/phone-remote-deploy` (forced command in `authorized_keys`), which runs
    [`deploy/deploy.sh`](deploy/deploy.sh) from `origin/main`:
-   fast-forward → build new images **while the old containers keep serving** →
-   recreate only changed containers → graceful nginx reload → health check
-   (app + public HTTPS) → **automatic rollback** to the previous commit if
-   unhealthy → push images to Docker Hub.
+   fast-forward → build the new app image **while the live colour keeps
+   serving** → start the other colour (`app-blue` ↔ `app-green`) and
+   health-check it → point nginx at it with a graceful reload
+   (`.deploy/app-upstream.conf`) → public health check → stop the old colour →
+   push images to Docker Hub. Any failure before the old colour stops rolls
+   back with **no downtime** (nginx is pointed back; the old one never stopped).
+   Only the parts whose files changed are touched: `client/` `server/`
+   `Dockerfile` → app, `nginx/` → nginx, `docker-compose.yml` → everything.
 
 Docs-only (`*.md`) and Android-only (`flutter_app/**`) pushes skip the deploy.
 Re-run by hand: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on the
 server `~/phone-remote/deploy/deploy.sh` (`FORCE=1` to rebuild an unchanged
 commit). Secrets: `EC2_HOST`, `EC2_SSH_KEY`, `EC2_KNOWN_HOSTS`.
 
-A restart of `app` drops open WebSockets for a few seconds; phones and
-browsers reconnect on their own and WebRTC calls recover via ICE restart.
+**Downtime:** none for page loads, REST and MCP calls. When the old app stops
+it closes its WebSockets (code 1012); phones and browsers reconnect to the new
+one within a second or two, and live streams recover via ICE restart (that
+state lives in process memory and can't be handed over). An `nginx/` change
+recreates nginx (~1 s). Use `deploy/deploy.sh`, not a bare `docker compose up`,
+which would start both colours. Which colour is live: `cat ~/phone-remote/.deploy/app-upstream.conf`.
 `~/phone-remote` is a git checkout; `server/.env`, `server/data/`, `downloads/`
 and build output are gitignored, so deploys never touch them.
 

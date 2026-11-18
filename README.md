@@ -357,7 +357,7 @@ adb logcat -s PhoneRemote
 **WebRTC in the browser:** each step is reported to the server log:
 
 ```bash
-sudo docker logs phone-remote-app | grep -E "🔗|🧭"
+cd ~/phone-remote && docker compose logs app-blue app-green | grep -E "🔗|🧭"
 # 🧭 rtc screen ice-restart attempt 1
 # 🧭 rtc screen answer
 # 🔗 WebRTC screen connected

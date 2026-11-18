@@ -43,3 +43,6 @@ Thumbs.db
 week7_submission/
 
 
+
+# Blue-green deploy state (which app colour is live) — EC2 only
+.deploy/
