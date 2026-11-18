@@ -129,8 +129,12 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
     pc.onicecandidate = ({ candidate }) => {
       if (candidate && candidate.candidate) sendRaw({ type: 'rtc_ice', kind, candidate: candidate.toJSON() });
     };
-    pc.ontrack = ({ streams, track }) => {
+    pc.ontrack = ({ receiver, streams, track }) => {
       if (pc !== pcRef.current || !videoRef.current) return;
+      // Remote control: show each frame as soon as it arrives. Chrome otherwise
+      // buffers video to smooth jitter, which adds delay on cellular.
+      try { receiver.jitterBufferTarget = 0; } catch (_) {}
+      try { receiver.playoutDelayHint = 0; } catch (_) {}
       videoRef.current.srcObject = streams[0] || new MediaStream([track]);
       watchVideoFrames(pc);
     };

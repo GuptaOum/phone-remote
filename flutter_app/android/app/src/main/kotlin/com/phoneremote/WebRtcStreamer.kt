@@ -35,8 +35,11 @@ class WebRtcStreamer(
         val maxBitrateBps: Int,
         val degradation: RtpParameters.DegradationPreference,
     ) {
-        // Screen content is mostly text: under pressure drop frames, never resolution.
-        SCREEN("screen", true, 2_500_000, RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION),
+        // Remote control needs low latency more than sharp text: real-time mode
+        // (not "screencast", which lets fps collapse to keep detail) and, when
+        // bandwidth is tight (cellular start), lower the resolution — never the
+        // frame rate.
+        SCREEN("screen", false, 2_500_000, RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE),
         // Camera is motion: keep it fluid, let resolution adapt on weak links.
         CAMERA("camera", false, 1_500_000, RtpParameters.DegradationPreference.BALANCED),
     }
@@ -275,13 +278,47 @@ class WebRtcStreamer(
         if (peers[from] !== peer) return
         when (s) {
             PeerConnection.PeerConnectionState.CONNECTED ->
-                if (!peer.connected) { peer.connected = true; recount() }
+                if (!peer.connected) { peer.connected = true; recount(); logStats(from, peer) }
             PeerConnection.PeerConnectionState.DISCONNECTED ->
                 if (peer.connected) { peer.connected = false; recount() }
             PeerConnection.PeerConnectionState.FAILED,
             PeerConnection.PeerConnectionState.CLOSED -> closePeer(from)
             else -> {}
         }
+    }
+
+    /**
+     * Every 5s while connected: what the encoder actually sends (fps, size,
+     * bitrate, why it is limited) and which network path the call uses.
+     * `adb logcat -s PhoneRemote` — for diagnosing lag without guessing.
+     */
+    private fun logStats(from: String, peer: Peer) {
+        var lastBytes = -1L
+        var lastAt = 0L
+        val tick = object : Runnable {
+            override fun run() {
+                if (peers[from] !== peer || !peer.connected) return
+                peer.pc.getStats { report ->
+                    val stats = report.statsMap.values
+                    val out = stats.firstOrNull { it.type == "outbound-rtp" && it.members["kind"] == "video" }
+                    val pair = stats.firstOrNull { it.type == "candidate-pair" && it.members["nominated"] == true && it.members["state"] == "succeeded" }
+                    val local = pair?.let { p -> stats.firstOrNull { it.id == p.members["localCandidateId"] } }
+                    val remote = pair?.let { p -> stats.firstOrNull { it.id == p.members["remoteCandidateId"] } }
+                    val bytes = (out?.members?.get("bytesSent") as? Number)?.toLong() ?: 0L
+                    val now = System.currentTimeMillis()
+                    val kbps = if (lastBytes >= 0 && now > lastAt) (bytes - lastBytes) * 8 / (now - lastAt) else 0
+                    lastBytes = bytes; lastAt = now
+                    Log.i(TAG, "rtc ${kind.label}: ${out?.members?.get("framesPerSecond")}fps " +
+                        "${out?.members?.get("frameWidth")}x${out?.members?.get("frameHeight")} ${kbps}kbps " +
+                        "limit=${out?.members?.get("qualityLimitationReason")} " +
+                        "path=${local?.members?.get("candidateType")}/${local?.members?.get("protocol")}" +
+                        "${local?.members?.get("relayProtocol")?.let { "($it)" } ?: ""}" +
+                        "→${remote?.members?.get("candidateType")} rtt=${pair?.members?.get("currentRoundTripTime")}")
+                }
+                h.postDelayed(this, 5000)
+            }
+        }
+        h.postDelayed(tick, 3000)
     }
 
     private fun recount() {
