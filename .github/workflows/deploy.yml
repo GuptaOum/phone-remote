@@ -1,0 +1,63 @@
+name: CI / Deploy
+
+# Every push to main is checked, then deployed to the EC2 host.
+# Docs-only and Android-only changes don't touch the server.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'flutter_app/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: Build & check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            client/package-lock.json
+            server/package-lock.json
+
+      - name: Client — install & build
+        working-directory: client
+        run: npm ci && npm run build
+
+      - name: Server — install & syntax check
+        working-directory: server
+        run: |
+          npm ci --omit=dev
+          find src -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Compose file is valid
+        run: DOMAIN=example.com docker compose config -q
+
+  deploy:
+    name: Deploy to EC2
+    needs: ci
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run deploy on the server
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # The key is locked to deploy/deploy.sh on the server (forced command),
+          # so it can't open a shell or run anything else.
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "ubuntu@$HOST"

@@ -22,16 +22,28 @@
 
 **Bring everything up (server, MCP, nginx, TURN):** `cd ~/phone-remote && sudo docker compose up -d --build`
 
-**Redeploy after code changes.** `~/phone-remote` on the EC2 is a git checkout
-of `main` (public repo, no credentials needed). Push to `main`, then:
+**Redeploy = push to `main`.** CI/CD is automatic
+(`.github/workflows/deploy.yml`):
 
-```bash
-ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && git pull --ff-only && sudo docker compose up -d --build --remove-orphans && docker push -q oumgupta/phone-remote-app:latest && docker push -q oumgupta/phone-remote-nginx:latest"
-```
+1. **CI** (GitHub runner): builds the React client, syntax-checks the server,
+   validates `docker-compose.yml`. A failure stops here; production is untouched.
+2. **Deploy**: SSHes to the EC2 with a key that can only run
+   `~/bin/phone-remote-deploy` (forced command in `authorized_keys`), which runs
+   [`deploy/deploy.sh`](deploy/deploy.sh) from `origin/main`:
+   fast-forward → build new images **while the old containers keep serving** →
+   recreate only changed containers → graceful nginx reload → health check
+   (app + public HTTPS) → **automatic rollback** to the previous commit if
+   unhealthy → push images to Docker Hub.
 
-`server/.env`, `server/data/`, `downloads/` and build output are gitignored, so
-`git pull` never touches them. Only containers whose image or config changed
-are restarted; coturn and the database are left alone.
+Docs-only (`*.md`) and Android-only (`flutter_app/**`) pushes skip the deploy.
+Re-run by hand: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on the
+server `~/phone-remote/deploy/deploy.sh` (`FORCE=1` to rebuild an unchanged
+commit). Secrets: `EC2_HOST`, `EC2_SSH_KEY`, `EC2_KNOWN_HOSTS`.
+
+A restart of `app` drops open WebSockets for a few seconds; phones and
+browsers reconnect on their own and WebRTC calls recover via ICE restart.
+`~/phone-remote` is a git checkout; `server/.env`, `server/data/`, `downloads/`
+and build output are gitignored, so deploys never touch them.
 
 **Build, check and publish the APK on EC2:**
 
