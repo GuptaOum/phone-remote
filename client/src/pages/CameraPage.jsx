@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useDevice } from '../context/DeviceContext';
 import { useRtcStream } from '../hooks/useRtcStream';
-import { Camera, SwitchCamera, Play, Square, AlertCircle } from 'lucide-react';
+import { Camera, Play, Square, AlertCircle } from 'lucide-react';
 
 // sessionStorage: { deviceId, front } of the camera this tab has open, so a
 // refresh re-attaches to it instead of leaving it running unseen.
@@ -23,6 +23,18 @@ export default function CameraPage() {
   const [starting, setStarting] = useState(false);
   const [isFront, setIsFront] = useState(() => readIntent(selectedDeviceId)?.front ?? true);
   const [errorMessage, setErrorMessage] = useState('');
+  // Shape of the camera picture (portrait 9:16 — WebRTC camera — until the first frame says
+  // otherwise). The stage has this size from the start, so the view never
+  // pops up small and then jumps to full size.
+  const [frameSize, setFrameSize] = useState({ w: 9, h: 16 });
+  const frameSizeRef = useRef({ w: 9, h: 16 });
+  const syncFrameSize = (w, h) => {
+    if (!w || !h) return;
+    const cur = frameSizeRef.current;
+    if (cur.w === w && cur.h === h) return;
+    frameSizeRef.current = { w, h };
+    setFrameSize({ w, h });
+  };
 
   const canvasRef = useRef(null);
   const videoRef = useRef(null);
@@ -39,8 +51,9 @@ export default function CameraPage() {
   const rtc = useRtcStream('camera', videoRef, {
     // Keep retrying WebRTC after a fallback while the camera is open here.
     shouldRetry: () => liveRef.current || startingRef.current,
-    onVideoFrame: () => {
+    onVideoFrame: (video) => {
       if (!liveRef.current && startingRef.current) markLive();
+      syncFrameSize(video.videoWidth, video.videoHeight);
     },
   });
 
@@ -88,6 +101,7 @@ export default function CameraPage() {
           const ctx = canvas.getContext('2d');
           canvas.width = bitmap.height;
           canvas.height = bitmap.width;
+          syncFrameSize(canvas.width, canvas.height);
           ctx.save();
           if (isFrontRef.current) {
             ctx.translate(0, bitmap.width);
@@ -208,13 +222,6 @@ export default function CameraPage() {
     };
   }, []);
 
-  const handleFlipCamera = () => {
-    const nextFront = !isFront;
-    applyFront(nextFront);
-    setIntent(nextFront);
-    sendRaw({ type: 'camera_flip' });
-  };
-
   const handleStopCamera = () => {
     clearIntent();
     setOff();
@@ -262,19 +269,28 @@ export default function CameraPage() {
         </div>
       )}
 
-      <canvas
-        ref={canvasRef}
-        className="cam-canvas"
-        style={{ display: live && !rtc.videoActive ? 'block' : 'none' }}
-      />
-      <video
-        ref={videoRef}
-        className="cam-canvas cam-video"
-        autoPlay
-        playsInline
-        muted
-        style={{ display: live && rtc.videoActive ? 'block' : 'none' }}
-      />
+      <div
+        className="cam-stage"
+        style={{
+          display: live ? 'block' : 'none',
+          aspectRatio: `${frameSize.w} / ${frameSize.h}`,
+          '--ar': frameSize.w / frameSize.h,
+        }}
+      >
+        <canvas
+          ref={canvasRef}
+          className="cam-media"
+          style={{ visibility: rtc.videoActive ? 'hidden' : 'visible' }}
+        />
+        <video
+          ref={videoRef}
+          className="cam-media"
+          autoPlay
+          playsInline
+          muted
+          style={{ visibility: rtc.videoActive ? 'visible' : 'hidden' }}
+        />
+      </div>
 
       {!live && (
         <div className="cam-placeholder">
@@ -309,14 +325,6 @@ export default function CameraPage() {
         >
           <Play size={14} fill="currentColor" />
           <span>Back</span>
-        </button>
-        <button
-          className="btn"
-          onClick={handleFlipCamera}
-          disabled={!live || !canControl}
-        >
-          <SwitchCamera size={14} />
-          <span>Flip</span>
         </button>
         <button
           className="btn danger"
@@ -381,16 +389,23 @@ export default function CameraPage() {
           letter-spacing: 0.3px;
         }
 
-        .cam-canvas {
-          object-fit: contain;
-          border-radius: 16px;
+        /* Fixed-size stage: sized from the picture's shape, as big as the
+           window allows, before any frame arrives. */
+        .cam-stage {
+          position: relative;
+          height: min(calc(95vh - 140px), calc(90vw / var(--ar)));
           max-width: 90vw;
-          max-height: calc(95vh - 120px);
+          border-radius: 16px;
+          overflow: hidden;
+          background: #000;
           box-shadow: 0 8px 48px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.05);
         }
-
-        .cam-video {
-          background: #000;
+        .cam-media {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
         }
 
         .cam-placeholder {

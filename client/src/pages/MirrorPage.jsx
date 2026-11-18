@@ -46,6 +46,9 @@ export default function MirrorPage() {
   } = useDevice();
 
   const [streaming, setStreaming] = useState(false);
+  // Shape of what the phone is sending (portrait, or landscape for a rotated
+  // video/game): the phone frame on screen follows it.
+  const [frameSize, setFrameSize] = useState({ w: 9, h: 19.5 });
   const [streamStarting, setStreamStarting] = useState(false);
   const [streamError, setStreamError] = useState('');
   const [notice, setNotice] = useState('');
@@ -58,6 +61,14 @@ export default function MirrorPage() {
 
   const canvasRef = useRef(null);
   const videoRef = useRef(null);
+  const frameSizeRef = useRef({ w: 9, h: 19.5 });
+  const syncFrameSize = (w, h) => {
+    if (!w || !h) return;
+    const cur = frameSizeRef.current;
+    if (cur.w === w && cur.h === h) return;
+    frameSizeRef.current = { w, h };
+    setFrameSize({ w, h });
+  };
   const pointerStartRef = useRef(null);
   const suppressFramesUntilRef = useRef(0);
   const renderingRef = useRef(false);
@@ -93,6 +104,7 @@ export default function MirrorPage() {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
       }
+      syncFrameSize(video.videoWidth, video.videoHeight);
     },
   });
 
@@ -112,6 +124,7 @@ export default function MirrorPage() {
             canvas.width = bitmap.width;
             canvas.height = bitmap.height;
           }
+          syncFrameSize(bitmap.width, bitmap.height);
           const ctx = canvas.getContext('2d');
           ctx.drawImage(bitmap, 0, 0);
         }
@@ -554,7 +567,10 @@ export default function MirrorPage() {
     <div className="mirror-view-container">
       {/* Phone Screen Frame */}
       <div className="phone-display-area">
-        <div className="phone-chassis">
+        <div
+          className={`phone-chassis ${frameSize.w > frameSize.h ? 'landscape' : 'portrait'}`}
+          style={{ aspectRatio: `${frameSize.w} / ${frameSize.h}`, '--ar': frameSize.w / frameSize.h }}
+        >
           <canvas
             ref={canvasRef}
             className={`phone-canvas ${streaming ? 'active-stream' : 'inert-stream'}`}
@@ -818,14 +834,26 @@ export default function MirrorPage() {
           background: #0a0a0a;
           border-radius: 36px;
           box-shadow: 0 0 0 2px #222, 0 0 0 5px #18181f, 0 30px 90px rgba(0, 0, 0, 0.9);
-          aspect-ratio: 9 / 19.5;
-          height: calc(100vh - 54px - 36px);
-          max-height: 840px;
+          /* aspect-ratio follows the incoming frames (set inline) */
+          transition: width 0.25s ease, height 0.25s ease;
           position: relative;
           overflow: hidden;
           display: flex;
           align-items: center;
           justify-content: center;
+        }
+        /* Portrait: as tall as the window allows. */
+        .phone-chassis.portrait {
+          height: min(calc(100vh - 54px - 36px), 840px);
+          width: auto;
+          max-width: 100%;
+        }
+        /* Landscape (rotated video, game, …): as wide as the area allows,
+           without getting taller than the window. */
+        .phone-chassis.landscape {
+          width: min(100%, calc((100vh - 54px - 36px) * var(--ar)));
+          height: auto;
+          border-radius: 28px;
         }
         .phone-canvas {
           width: 100%;
