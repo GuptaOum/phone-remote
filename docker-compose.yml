@@ -94,8 +94,9 @@ services:
     network_mode: host
     environment:
       - DOMAIN=${DOMAIN:-65-1-96-152.sslip.io}
-      # Leave empty to auto-detect the instance's public IP.
+      # Leave empty to auto-detect the instance's public / private IP.
       - TURN_EXTERNAL_IP=${TURN_EXTERNAL_IP:-}
+      - TURN_PRIVATE_IP=${TURN_PRIVATE_IP:-}
     volumes:
       - turn-secret:/run/turn:ro
     depends_on:
@@ -106,11 +107,20 @@ services:
       - |
         EXT="$${TURN_EXTERNAL_IP:-$$(detect-external-ip)}"
         [ -n "$$EXT" ] || { echo "could not detect public IP; set TURN_EXTERNAL_IP"; exit 1; }
+        PRIV="$${TURN_PRIVATE_IP:-$$(hostname -I | awk '{print $$1}')}"
+        [ -n "$$PRIV" ] || { echo "could not detect private IP; set TURN_PRIVATE_IP"; exit 1; }
         cat > /tmp/turnserver.conf <<EOF
         listening-port=3478
         min-port=49160
         max-port=49200
-        external-ip=$$EXT
+        # Relay only on the instance address (not Docker bridges); AWS 1:1 NAT
+        # maps it to the public IP.
+        relay-ip=$$PRIV
+        external-ip=$$EXT/$$PRIV
+        # Both peers relayed through us: their relay addresses are our own
+        # private IP, which the private-range deny below would otherwise block.
+        # Safe: app/MCP listen on 127.0.0.1 only, not on this address.
+        allowed-peer-ip=$$PRIV
         realm=$$DOMAIN
         use-auth-secret
         static-auth-secret=$$(cat /run/turn/secret)
