@@ -31,7 +31,8 @@ async function main() {
   app.use(express.urlencoded({ extended: false })); // OAuth token exchange uses form-encoded bodies
   app.use(logger);
 
-  // Serve static files from React build if present, otherwise legacy public
+  // The web UI is the React app (client/). server/public only holds the
+  // OAuth consent page used by the MCP connector, plus its stylesheet.
   const clientCandidates = [
     path.join(__dirname, '../../client/dist'),
     path.join(__dirname, '../dist'),
@@ -53,14 +54,10 @@ async function main() {
       res.sendFile(spaIndex);
     });
   } else {
-    app.get('/',          (_, res) => res.redirect('/dashboard'));
-    app.get('/login',     (_, res) => res.sendFile(path.join(PUBLIC, 'login.html')));
-    app.get('/dashboard', (_, res) => res.sendFile(path.join(PUBLIC, 'dashboard.html')));
-    app.get('/mirror',    (_, res) => res.sendFile(path.join(PUBLIC, 'mirror.html')));
-    app.get('/camera',    (_, res) => res.sendFile(path.join(PUBLIC, 'camera.html')));
-    app.get('/files',     (_, res) => res.sendFile(path.join(PUBLIC, 'files.html')));
-    app.get('/location',  (_, res) => res.sendFile(path.join(PUBLIC, 'location.html')));
-    app.get('/mcp-test',  (_, res) => res.sendFile(path.join(PUBLIC, 'mcp-test.html')));
+    console.warn('⚠️  React client not built (client/dist missing) — run `npm run build` in client/ or use the Docker image.');
+    app.get(['/', '/login', '/dashboard', '/mirror', '/camera', '/files', '/location', '/mcp-test'], (_, res) => {
+      res.status(503).send('Web UI not built. Build client/ (npm run build) or run the Docker image.');
+    });
   }
 
   app.get('/health', (_, res) => res.json({ ok: true }));
