@@ -137,16 +137,22 @@ function scheduleIdleCheck(userId, deviceId) {
  * message that moves the phone between JPEG and WebRTC.
  */
 const RTC_KINDS = {
-  screen: { ready: 'rtcReady', offered: 'rtcOffered', wants: 'wantsStream', mode: 'rtcMode', cap: 'webrtc_screen', msg: 'screen_mode' },
-  camera: { ready: 'camRtcReady', offered: 'camRtcOffered', wants: 'wantsCamera', mode: 'camRtcMode', cap: 'webrtc_camera', msg: 'camera_mode' },
+  screen: { ready: 'rtcReady', offered: 'rtcOffered', probing: 'rtcProbing', wants: 'wantsStream', mode: 'rtcMode', cap: 'webrtc_screen', msg: 'screen_mode' },
+  camera: { ready: 'camRtcReady', offered: 'camRtcOffered', probing: 'camRtcProbing', wants: 'wantsCamera', mode: 'camRtcMode', cap: 'webrtc_camera', msg: 'camera_mode' },
 };
 const rtcKind = (k) => (k === 'camera' ? 'camera' : 'screen');
 
 /**
- * Transport for one kind: WebRTC only when EVERY tab that wants it has a live
- * peer connection; otherwise JPEG (the phone's capture can feed only one of
- * them at a time). `force` re-sends even if unchanged — used after a phone
- * reconnect or capture restart, when the phone's idea of the mode is unknown.
+ * Transport for one kind — WebRTC first: as soon as EVERY tab that wants it
+ * has offered (or connected) a peer, the phone feeds WebRTC from the first
+ * frame. A tab whose attempt fails sends rtc_failed (or never offers), which
+ * drops it from the count and moves everyone to JPEG (the phone's capture can
+ * feed only one of them at a time). `force` re-sends even if unchanged — used
+ * after a phone reconnect or capture restart.
+ *
+ * A retry after a fallback is a *probe* (rtc_offer with probe:true): it does
+ * not count until rtc_ready, so the phone keeps sending JPEG — the picture
+ * never goes blank — and switches only once the new peer is connected.
  */
 function updateRtcMode(kind, userId, deviceId, force = false) {
   const k = RTC_KINDS[kind];
@@ -154,7 +160,7 @@ function updateRtcMode(kind, userId, deviceId, force = false) {
   if (!a || !deviceId) return;
   const m = mediaState(a, deviceId);
   const viewers = viewersOf(a, deviceId).filter((b) => b[k.wants]);
-  const rtc = viewers.length > 0 && viewers.every((b) => b[k.ready]);
+  const rtc = viewers.length > 0 && viewers.every((b) => b[k.ready] || b[k.offered]);
   if (!force && m[k.mode] === rtc) return;
   m[k.mode] = rtc;
   getPhoneSocket(userId, deviceId, k.cap)?.send(j({ type: k.msg, mode: rtc ? 'rtc' : 'jpeg' }));
@@ -166,9 +172,10 @@ const updateCameraMode = (userId, deviceId, force) => updateRtcMode('camera', us
 function closeTabRtc(ws, deviceId = ws.watchId, only = null) {
   for (const kind of only ? [only] : Object.keys(RTC_KINDS)) {
     const k = RTC_KINDS[kind];
-    if (!ws[k.ready] && !ws[k.offered]) continue;
+    if (!ws[k.ready] && !ws[k.offered] && !ws[k.probing]) continue;
     ws[k.ready] = false;
     ws[k.offered] = false;
+    ws[k.probing] = false;
     getPhoneSocket(ws.userId, deviceId, k.cap)?.send(j({ type: 'rtc_close', from: ws.id, kind }));
   }
 }
@@ -774,11 +781,15 @@ function setupSignaling(wss, app) {
               if (msg.type === 'rtc_offer') ws.send(j({ type: 'rtc_unsupported', kind }));
               break;
             }
-            if (msg.type === 'rtc_offer') ws[RTC_KINDS[kind].offered] = true;
             phone.send(j({
               type: msg.type, kind, from: ws.id, sdp: msg.sdp, candidate: msg.candidate,
               iceServers: msg.type === 'rtc_offer' ? iceServers(ws.userId) : undefined,
             }));
+            if (msg.type === 'rtc_offer') {
+              ws[RTC_KINDS[kind].offered] = !msg.probe;
+              ws[RTC_KINDS[kind].probing] = !!msg.probe;
+              updateRtcMode(kind, ws.userId, ws.watchId);
+            }
           } else if (ws.role === 'phone' && msg.type === 'rtc_ice') {
             sendToTab(msg.to, { type: 'rtc_ice', kind, candidate: msg.candidate });
           }
@@ -837,7 +848,7 @@ function setupSignaling(wss, app) {
           m.stream = 'off';
           m.streamStopAt = now;
           m.rtcMode = false;
-          viewersOf(a, ws.deviceId).forEach((b) => { b.wantsStream = false; b.rtcReady = false; b.rtcOffered = false; });
+          viewersOf(a, ws.deviceId).forEach((b) => { b.wantsStream = false; b.rtcReady = false; b.rtcOffered = false; b.rtcProbing = false; });
           relayToWatchers(msg.type === 'stream_error'
             ? { type: 'stream_error', reason: msg.reason || 'failed' }
             : { type: 'stream_stopped' });
@@ -862,7 +873,7 @@ function setupSignaling(wss, app) {
           m.camera = 'off';
           m.cameraStopAt = Date.now();
           m.camRtcMode = false;
-          viewersOf(a, ws.deviceId).forEach((b) => { b.wantsCamera = false; b.camRtcReady = false; b.camRtcOffered = false; });
+          viewersOf(a, ws.deviceId).forEach((b) => { b.wantsCamera = false; b.camRtcReady = false; b.camRtcOffered = false; b.camRtcProbing = false; });
           relayToWatchers(msg.type === 'camera_error'
             ? { type: 'camera_error', reason: msg.reason }
             : { type: 'camera_stopped' });

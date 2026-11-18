@@ -76,6 +76,14 @@ class WebRtcStreamer(
     @Volatile var connectedCount = 0
         private set
 
+    /**
+     * Peers negotiating or connected (removed on failure/close). WebRTC-first:
+     * the capture is routed here as soon as this is > 0, so the first frames
+     * already go to WebRTC; a failed peer drops it back to 0 → JPEG.
+     */
+    @Volatile var peerCount = 0
+        private set
+
     // Screen: called by ScreenCaptureService under its lock, from any thread.
     override fun surface(w: Int, h: Int): Surface? {
         val th = helper ?: return null
@@ -215,6 +223,7 @@ class WebRtcStreamer(
             ?: return sendError(from, "pc_failed")
         peer.pc = pc
         peers[from] = peer
+        recount() // capture can now be routed here (surface exists after ensureInit)
 
         pc.setRemoteDescription(object : SdpCallback() {
             override fun onSetSuccess() { h.post { onRemoteSet(from, peer) } }
@@ -277,13 +286,14 @@ class WebRtcStreamer(
 
     private fun recount() {
         connectedCount = peers.values.count { it.connected }
+        peerCount = peers.size
         onPeersChanged()
     }
 
     private fun closePeer(from: String) {
         val peer = peers.remove(from) ?: return
         try { peer.pc.dispose() } catch (_: Exception) {}
-        if (peer.connected) recount()
+        recount()
     }
 
     private fun fail(from: String, peer: Peer, reason: String) {

@@ -37,6 +37,8 @@ export default function CameraPage() {
   // WebRTC video (direct or via our TURN relay — smooth on cellular); JPEG on
   // the canvas is the instant start and the fallback.
   const rtc = useRtcStream('camera', videoRef, {
+    // Keep retrying WebRTC after a fallback while the camera is open here.
+    shouldRetry: () => liveRef.current || startingRef.current,
     onVideoFrame: () => {
       if (!liveRef.current && startingRef.current) markLive();
     },
@@ -108,7 +110,7 @@ export default function CameraPage() {
 
   const startCamera = (front) => {
     if (startingRef.current) return;
-    rtc.reset(); // fresh WebRTC attempt per start; the server restarts us on JPEG
+    rtc.reset(); // fresh WebRTC attempt per start
     suppressFramesUntilRef.current = 0;
     applyFront(front);
     setIntent(front);
@@ -116,6 +118,7 @@ export default function CameraPage() {
     startingRef.current = true;
     setStarting(true);
     sendRaw({ type: 'camera_start', front });
+    rtc.start(); // WebRTC first; JPEG only if this fails
     clearTimeout(startTimeoutRef.current);
     startTimeoutRef.current = setTimeout(() => {
       if (!startingRef.current || liveRef.current) return;
@@ -170,11 +173,11 @@ export default function CameraPage() {
           if (msg.typeByte !== 0x02) return; // Only process camera frames
           if (!liveRef.current && !startingRef.current) return;
           if (Date.now() < suppressFramesUntilRef.current) return;
-          // Just switched to WebRTC: a JPEG still in flight must not cover the video.
-          if (rtc.isVideoFresh()) return;
+          // WebRTC first: hold JPEG back while video is connecting or flowing;
+          // it is shown only when WebRTC failed or stalled.
+          if (!rtc.acceptJpeg()) return;
           if (!liveRef.current) markLive();
           rtc.showJpeg();
-          rtc.start();
           latestBlobRef.current = msg.blob;
           drawLatestFrame();
           break;

@@ -186,10 +186,12 @@ class ScreenCaptureService : Service() {
         reader = r
         capW = w
         capH = h
+        // WebRTC first: if a peer was already negotiating when capture started,
+        // the very first frames go to it instead of the JPEG reader.
         display = projection!!.createVirtualDisplay(
             "PhoneRemote", w, h, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            r.surface, null, null
+            sink?.surface(w, h) ?: r.surface, null, null
         )
     }
 

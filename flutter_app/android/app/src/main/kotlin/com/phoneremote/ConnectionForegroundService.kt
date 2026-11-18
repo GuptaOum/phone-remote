@@ -496,9 +496,12 @@ class ConnectionForegroundService : Service() {
     }
 
     // ── WebRTC screen path ───────────────────────────────────────────────────
-    // JPEG always runs first; the server sends screen_mode=rtc once every tab
-    // watching has a live WebRTC connection, and we move the mirror over to it.
-    // Any peer dropping (or a JPEG-only tab joining) moves it back.
+    // WebRTC first: the server sends screen_mode=rtc as soon as every watching
+    // tab has offered a peer, and we feed WebRTC from the first frame. A failed
+    // or closed peer (or a JPEG-only tab joining) moves the mirror back to JPEG.
+    // Re-routing on every peer change also re-attaches the display, which makes
+    // the compositor emit a fresh frame for a peer that just connected to a
+    // still screen.
     private var rtcScreen: WebRtcStreamer? = null
     @Volatile private var rtcModeWanted = false
 
@@ -508,7 +511,7 @@ class ConnectionForegroundService : Service() {
 
     private fun applyScreenRoute() {
         val rtc = rtcScreen
-        val useRtc = rtcModeWanted && rtc != null && rtc.connectedCount > 0
+        val useRtc = rtcModeWanted && rtc != null && rtc.peerCount > 0
         ScreenCaptureService.instance?.routeTo(if (useRtc) rtc else null)
     }
 
@@ -518,8 +521,8 @@ class ConnectionForegroundService : Service() {
     }
 
     // ── WebRTC camera path ───────────────────────────────────────────────────
-    // Same rule as the screen: JPEG first, camera_mode=rtc once every camera tab
-    // has a live peer. The camera stays open in CameraForegroundService (the
+    // Same rule as the screen: WebRTC first (camera_mode=rtc once every camera
+    // tab has offered a peer), JPEG when a peer fails. The camera stays open in CameraForegroundService (the
     // camera-type foreground service Android requires for background capture);
     // only its output surface moves between the JPEG reader and WebRTC.
     private var rtcCamera: WebRtcStreamer? = null
@@ -531,7 +534,7 @@ class ConnectionForegroundService : Service() {
 
     private fun applyCameraRoute() {
         val rtc = rtcCamera
-        val useRtc = camRtcModeWanted && rtc != null && rtc.connectedCount > 0
+        val useRtc = camRtcModeWanted && rtc != null && rtc.peerCount > 0
         CameraForegroundService.instance?.routeTo(if (useRtc) rtc else null)
     }
 

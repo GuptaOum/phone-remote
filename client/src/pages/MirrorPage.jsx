@@ -84,6 +84,8 @@ export default function MirrorPage() {
   // instant start and the fallback. Touch input always goes to the canvas, so
   // keep its pixel size in step with the video (rotation while on WebRTC).
   const rtc = useRtcStream('screen', videoRef, {
+    // Keep retrying WebRTC after a fallback while this tab is streaming.
+    shouldRetry: () => streamingRef.current || startingRef.current,
     onVideoFrame: (video) => {
       if (!streamingRef.current && startingRef.current) markStreaming();
       const canvas = canvasRef.current;
@@ -158,13 +160,14 @@ export default function MirrorPage() {
 
   const startStream = () => {
     if (startingRef.current || streamingRef.current) return;
-    rtc.reset(); // fresh WebRTC attempt per start; the server restarts us on JPEG
+    rtc.reset(); // fresh WebRTC attempt per start
     setIntent();
     setStreamError('');
     suppressFramesUntilRef.current = 0;
     startingRef.current = true;
     setStreamStarting(true);
     sendRaw({ type: 'stream_start' });
+    rtc.start(); // WebRTC first; JPEG only if this fails
 
     if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
     startingTimeoutRef.current = setTimeout(() => {
@@ -252,11 +255,11 @@ export default function MirrorPage() {
           if (msg.typeByte !== 0x01) return; // Only process screen frames
           if (!streamingRef.current && !startingRef.current) return;
           if (Date.now() < suppressFramesUntilRef.current) return;
-          // Just switched to WebRTC: a JPEG still in flight must not cover the video.
-          if (rtc.isVideoFresh()) return;
+          // WebRTC first: hold JPEG back while video is connecting or flowing;
+          // it is shown only when WebRTC failed or stalled.
+          if (!rtc.acceptJpeg()) return;
           if (!streamingRef.current) markStreaming();
           rtc.showJpeg();
-          rtc.start();
 
           latestBlobRef.current = msg.blob;
           drawLatestFrame();
