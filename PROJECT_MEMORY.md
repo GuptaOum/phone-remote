@@ -1,279 +1,199 @@
 # 🧠 PROJECT MEMORY & SYSTEM MASTER ARCHITECTURE
-> **Document Purpose**: Complete handover, infrastructure blueprint, access credentials, and operational manual for any incoming AI Agent or human engineer. Reading this single file allows you to immediately map out and operate the entire system.
+> **Document Purpose**: Handover and operating manual for any incoming AI agent or engineer. Infra details live in [`DEPLOY.md`](DEPLOY.md); user-facing docs in [`README.md`](README.md). This file is the map plus the agent playbook (sections 10–11).
 
 ---
 
 ## 📌 1. Executive Summary & Purpose
-* **Project Name**: Phone Remote (AI Agent Control Plane for Android)
-* **What it does**: Just like Claude Computer Use allows an LLM to control desktop computers, **Phone Remote** provides an autonomous AI agent control plane for physical Android devices via the **Model Context Protocol (MCP)**.
+* **Project Name**: Phone Remote — an **MCP server that gives AI agents a real Android phone**.
+* **What it does**: Like Claude Computer Use for desktops, Phone Remote lets any MCP client (claude.ai, Claude Desktop/Code, Cursor, Antigravity) see and drive a physical Android device. Each user signs up, links their own phones, and connects their agent with OAuth.
 * **Core Capabilities**:
-  - Live low-latency screen mirroring & touch dispatch (taps, swipes, typing, hardware keys).
-  - High-precision structured accessibility perception (`get_ui_tree`) providing normalized `(x, y)` coordinates directly from Android's `AccessibilityNodeInfo`.
-  - Reactive screen polling (`wait_for`) without expensive vision OCR loops.
-  - Bidirectional file transfers (PC $\leftrightarrow$ Phone `/storage/emulated/0`).
-  - Real-time GPS tracking and geofencing.
-  - Camera & notification inspection (reading OTPs, SMS, alerts).
+  - Screen mirroring and camera over **WebRTC** (direct → TURN relay → TURN-over-TLS 443), plus touch/keys/typing.
+  - Structured accessibility perception (`get_ui_tree`) with normalized `(x, y)` coordinates from `AccessibilityNodeInfo`.
+  - Reactive polling (`wait_for`) instead of screenshot/OCR loops.
+  - Bidirectional file transfer (PC ↔ phone `/storage/emulated/0`).
+  - GPS location, notification reading (OTPs, SMS), ring / flashlight.
 
 ---
 
-## ☁️ 2. AWS Cloud Infrastructure & Credentials
+## ☁️ 2. AWS Infrastructure (current, since 2026-11-16)
 
-| Parameter | Value / Location | Notes |
+| Parameter | Value | Notes |
 | :--- | :--- | :--- |
-| **Cloud Provider** | Amazon Web Services (AWS) | EC2 Virtual Machine |
-| **AWS Region** | `ap-south-1` (Mumbai) | Low latency across India/Asia |
-| **EC2 Instance ID** | `i-0ec6440e1d7bd748c` | `t3.medium`, Ubuntu 24.04 LTS (x86_64) |
-| **Elastic IP** | `3.6.239.48` | Static public IPv4 allocated |
-| **Public Hostname / Domain** | **`https://3-6-239-48.sslip.io`** | Free wildcard DNS resolving directly to Elastic IP |
-| **SSH User** | `ubuntu` | Standard Ubuntu AMI login |
-| **SSH Private Key (Local)** | `C:\Users\hp\.ssh\phone-remote.pem` | Perms 400 (do not lose or commit) |
-| **SSH Direct Command** | `ssh -i C:\Users\hp\.ssh\phone-remote.pem ubuntu@3.6.239.48` | Or via Git Bash `& "C:\Program Files\Git\usr\bin\ssh.exe" ...` |
-| **AWS Security Group** | `sg-0291d93d24ad4f7c6` | Inbound: `22` (SSH), `80` (HTTP), `443` (HTTPS) |
-| **Internal Firewall Isolation** | Ports `3000` (Node) & `8001` (FastMCP) | **Closed** to the public internet; reverse-proxied via Nginx |
-| **TLS / SSL Certificates** | Let's Encrypt (`certbot`) | Auto-renewing for `3-6-239-48.sslip.io` |
-| **Disk & Storage Layout** | 22 GB EBS Root Volume | ~16 GB free; 2 GB `/swapfile` (reduced from 8 GB) |
+| **Region** | `ap-south-1` (Mumbai) | |
+| **EC2 Instance** | `i-0a24a69528842b8ca` | t3.medium, Ubuntu 24.04, 40 GB disk, 2 GB swap |
+| **Elastic IP** | `65.1.96.152` | |
+| **Public URL** | **`https://65-1-96-152.sslip.io`** | sslip.io wildcard DNS; `turn.65-1-96-152.sslip.io` for TURN-TLS |
+| **SSH** | `ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152` | Port 22 open to all on purpose (key-only) |
+| **Security Group** | `sg-072b858b2f5b6e632` | 22/80/443 tcp, 3478 tcp+udp, 49160-49200 udp |
+| **TLS** | Let's Encrypt, host certbot (webroot `/var/www/certbot`) | One cert for site + `turn.` host |
+| **Database** | SQLite, `~/phone-remote/server/data` bind-mounted | Not in git |
+
+> The old instance (`i-0ec6440e1d7bd748c`, `3.6.239.48`, `phone-remote.pem`) **no longer exists**.
 
 ---
 
-## 🏛️ 3. Source Repositories & Workspaces
+## 🏛️ 3. Repositories & Layout
 
-* **GitHub Repository**: [https://github.com/GuptaOum/phone-remote](https://github.com/GuptaOum/phone-remote)
-* **Default Branch**: `main`
-* **Local Machine Workspace**: `E:\phnrtm\phone-remote` (Windows 11)
-* **Remote EC2 Workspace**: `/home/ubuntu/phone-remote` (Ubuntu 24.04)
+* **GitHub**: [GuptaOum/phone-remote](https://github.com/GuptaOum/phone-remote), branch `main` (commit straight to main)
+* **Local**: `E:\phnrtm\phone-remote` (Windows)
+* **EC2**: `~/phone-remote` — a **git checkout** of `main`. `server/.env`, `server/data/`, `downloads/` are gitignored and never touched by deploys.
 
-### Monorepo Structure:
 ```
 phone-remote/
-├── client/                     # React 19 + Vite Frontend SPA
-│   ├── src/
-│   │   ├── pages/
-│   │   │   ├── DashboardPage.jsx   # Device status, stats, quick launcher
-│   │   │   ├── MirrorPage.jsx      # Low-latency screen mirror & D-Pad gestures
-│   │   │   ├── FilesPage.jsx       # Segregated Phone Explorer & PC Transfer Hub
-│   │   │   ├── LocationPage.jsx    # Real-time GPS Leaflet Map
-│   │   │   ├── LoginPage.jsx       # Auth + Direct APK download links
-│   │   │   └── McpTestPage.jsx     # Interactive MCP tool testing suite
-│   │   ├── context/
-│   │   │   ├── AuthContext.jsx     # JWT management & user state
-│   │   │   └── DeviceContext.jsx   # WebSocket relay connection & message dispatch
-│   │   └── App.jsx
-│   └── package.json
-├── server/                     # Node.js Core Backend + Python FastMCP
-│   ├── src/
-│   │   ├── services/
-│   │   │   ├── signaling.js    # Multi-tenant WebSocket relay & frame router
-│   │   │   └── db.js           # SQLite local ORM & user/device registry
-│   │   ├── routes/
-│   │   │   ├── auth.js         # JWT login, registration, token verification
-│   │   │   ├── files.js        # File upload/download streaming endpoints
-│   │   │   ├── mcp.js          # Anthropic @modelcontextprotocol/sdk + Zod (Streamable HTTP /mcp)
-│   │   │   └── mcp_legacy.js   # Legacy monolithic router backup
-│   │   └── index.js            # Express server entry point (port 3000)
-│   ├── fastmcp_server.py       # FastMCP Python Server (port 8001, idle/fallback)
-│   ├── requirements-mcp.txt    # fastmcp, httpx, uvicorn
-│   └── data/
-│       └── phoneremote.db      # SQLite database file
-├── flutter_app/                # Android Companion App (Flutter 3.44.6)
-│   ├── android/                # Native Accessibility Service & Foreground Service
-│   └── lib/                    # Screen capture, WebSocket client, GPS reporter
-├── nginx/                      # Nginx configurations & Dockerfile
-│   └── default.conf            # SSL termination, WebSockets, /sse streaming
-├── docker-compose.yml          # Containerized multi-service deployment
-├── Dockerfile                  # Production build for Node + React
-├── Dockerfile.mcp              # Production build for FastMCP Python
-├── DEPLOY.md                   # Legacy AWS deployment documentation
-└── PROJECT_MEMORY.md           # 🧠 THIS FILE (Source of Truth)
+├── client/                    # React 19 + Vite SPA
+│   └── src/pages/             # Dashboard, Mirror, Camera, Files, Location, Login, McpTest
+├── server/                    # Node.js (Express + ws), port 3000
+│   ├── src/routes/
+│   │   ├── auth.js            # register / login / JWT, /api/me
+│   │   ├── files.js           # PC-side file upload/download
+│   │   ├── mcp.js             # MCP Streamable HTTP at /mcp (@modelcontextprotocol/sdk, 26 tools)
+│   │   └── oauth.js           # OAuth 2.1 + PKCE, dynamic client registration, discovery
+│   ├── src/services/
+│   │   ├── signaling.js       # multi-tenant WebSocket relay + WebRTC signaling
+│   │   ├── db.js              # SQLite users/devices
+│   │   ├── oauthStore.js      # OAuth clients / codes
+│   │   └── turn.js            # short-lived coturn credentials
+│   └── public/                # oauth-authorize.html (approval page), shared.css
+├── flutter_app/               # Android app (Flutter 3.44.6 + Kotlin services)
+├── nginx/                     # nginx image: TLS, SNI router (stream.conf), default.conf
+├── deploy/deploy.sh           # CI/CD deploy script (runs on EC2)
+├── .github/workflows/deploy.yml
+├── docker-compose.yml         # nginx, app, turn-init, coturn
+├── Dockerfile                 # app image (client build + server)
+├── DEPLOY.md · README.md · MCP_PHONE_NAVIGATION.md
+└── PROJECT_MEMORY.md          # this file
 ```
 
 ---
 
-## ⚙️ 4. Runtime Architecture & Network Topology
+## ⚙️ 4. Runtime Architecture
 
 ```mermaid
 flowchart TD
-    subgraph Clients [" AI Agents & End Users "]
-        Agent["🤖 AI Agent (Antigravity / Cursor / Claude)"]
-        Browser["💻 Web Browser (React 19 SPA)"]
-        Phone["📱 Android Physical Device (Companion App)"]
+    Agent["🤖 MCP client (claude.ai / Claude Code / Cursor)"]
+    Browser["💻 Browser (React SPA)"]
+    Phone["📱 Android app"]
+
+    subgraph EC2 [" EC2 65.1.96.152 — Docker Compose "]
+        Nginx["🌐 nginx :443 / :80<br/>SNI router + TLS"]
+        App["🟢 app :3000<br/>Express · WS signaling · /mcp · /oauth"]
+        DB[("🗄️ SQLite")]
+        Turn["🔁 coturn (host network)<br/>3478 + relay 49160-49200"]
     end
 
-    subgraph AWS [" AWS EC2 Host: 3.6.239.48 "]
-        Nginx["🌐 Nginx (:443 TLS)<br/>https://3-6-239-48.sslip.io"]
-        
-        subgraph Services [" Application Layer (PM2 or Docker) "]
-            Node["🟢 Node.js Core (:3000)<br/>Express + WebSocket Signaling"]
-            FastMCP["⚡ FastMCP Server (:8001)<br/>Python 3.12 (SSE Protocol)"]
-            SQLite[("🗄️ SQLite DB<br/>server/data/phoneremote.db")]
-        end
-    end
-
-    Agent -->|"GET /sse (MCP Protocol)"| Nginx
-    Browser -->|"HTTPS /assets + WSS"| Nginx
-    Phone -->|"WSS /ws (Encrypted Socket)"| Nginx
-
-    Nginx -->|"Proxy :3000 (HTTP/WS)"| Node
-    Nginx -->|"Proxy :8001 (/sse)"| FastMCP
-
-    FastMCP -->|"POST /api/internal/call-tool<br/>(127.0.0.1 + Bridge Secret)"| Node
-    Node <--> SQLite
-    Node <===>|"Bidirectional Binary & Control Frames"| Phone
+    Agent -->|"HTTPS /mcp (OAuth Bearer)"| Nginx
+    Browser -->|"HTTPS + WSS"| Nginx
+    Phone -->|"WSS /ws"| Nginx
+    Nginx -->|"turn.* host (TLS)"| Turn
+    Nginx --> App
+    App <--> DB
+    Phone <-.->|"WebRTC media (direct or via TURN)"| Browser
 ```
 
-### Internal Bridge Authentication:
-* **Secret**: `phone-remote-internal-bridge-secret-key-2026`
-* FastMCP communicates with the Node.js signaling core over loopback `127.0.0.1:3000` via header `x-internal-secret`. External requests cannot forge this.
+### MCP access
+* **Endpoint**: `https://65-1-96-152.sslip.io/mcp` — **Streamable HTTP only** (SSE, FastMCP and the internal bridge were removed 2026-11-18).
+* **Auth**: OAuth 2.1 + PKCE (S256) with dynamic client registration (`/oauth/register`), discovery at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server`. The approval page shows **"Signed in as … / Switch account"**; login returns to it via `?next=`. A plain `Authorization: Bearer <JWT>` also works. JWT TTL 30 days, no refresh tokens.
+* Unauthenticated `POST /mcp` → 401 with `WWW-Authenticate`, which starts the client's login flow.
 
 ---
 
-## 🐳 5. Docker Hub & Containerization
+## 🐳 5. Docker & CI/CD
 
-Docker Hub User: **`oumgupta`**
+Docker Hub user **`oumgupta`**:
 
-| Container | Image Tag | Purpose |
+| Container | Image | Purpose |
 | :--- | :--- | :--- |
-| **`phone-remote-app`** | `oumgupta/phone-remote-app:latest` | React production bundle + Express Node.js signaling core |
-| **`phone-remote-mcp`** | `oumgupta/phone-remote-mcp:latest` | Python 3.12 FastMCP server |
-| **`phone-remote-nginx`** | `oumgupta/phone-remote-nginx:latest` | Alpine Nginx with Let's Encrypt SSL & WebSocket proxy |
+| `phone-remote-nginx` | `oumgupta/phone-remote-nginx:latest` | TLS, SNI router, reverse proxy |
+| `phone-remote-app` | `oumgupta/phone-remote-app:latest` | React bundle + Node server + MCP |
+| `phone-remote-turn` | `coturn/coturn:4.7.0` | TURN/STUN relay (host network) |
+| `phone-remote-turn-init` | `coturn/coturn:4.7.0` | one-shot: creates TURN secret in volume `turn-secret` |
 
-### Orchestration:
-```bash
-# Run multi-container stack via Docker Compose
-docker compose up -d
+### Deploy = push to `main`
+`.github/workflows/deploy.yml`:
+1. **CI** — builds client, syntax-checks server, validates compose. Failure → production untouched.
+2. **Deploy** — SSH with a key locked (forced command) to `~/bin/phone-remote-deploy`, which runs `deploy/deploy.sh` from `origin/main`:
+   fast-forward → map `git diff` to services → build while old containers serve → recreate **only changed** services → nginx graceful reload → health check → **auto-rollback** on failure → push changed images to Docker Hub.
 
-# Check running containers
-docker compose ps
-```
+| Files changed | Restarted |
+| :--- | :--- |
+| `client/`, `server/`, `Dockerfile`, `.dockerignore` | app |
+| `nginx/` | nginx |
+| `docker-compose.yml` | whatever compose decides |
+| anything else (docs, CI, deploy script, Android) | nothing |
 
----
+Why git diff and not image IDs: the EC2 uses the containerd image store, where every build yields a new image ID even when fully cached, so compose would restart app + nginx on every deploy.
 
-## ⚡ 6. FastMCP Tool Catalog (All 26 Tools)
-
-The FastMCP server (`server/fastmcp_server.py`) exposes 26 standardized tools:
-
-### Device Perception & Inspection
-1. **`list_devices()`**: Returns all linked phones, online/offline status, model, and live screen resolution.
-2. **`get_location(deviceId)`**: Returns cached GPS fix (lat, lng, accuracy, altitude, timestamp).
-3. **`get_device_status(deviceId)`**: Checks battery level, screen state, network type, and Accessibility status.
-4. **`get_foreground_app(deviceId)`**: Returns active package name (e.g. `com.whatsapp`).
-5. **`get_ui_tree(deviceId, all=False, filter="")`**: **The Core Perception Engine**. Returns structured text tree of all visible buttons, input fields, labels, with **exact normalized `(x, y)` center coordinates (0.0 – 1.0)**.
-6. **`wait_for(deviceId, text, id, app, gone, timeout)`**: Polls accessibility tree every 600ms until condition is met.
-7. **`list_apps(deviceId, filter="")`**: Returns installed apps with display names and package identifiers.
-
-### Touch & Hardware Interaction
-8. **`take_screenshot(deviceId)`**: Returns raw screen image as JPEG.
-9. **`tap(deviceId, x, y)`**: Taps normalized coordinate `(0.0 - 1.0)`.
-10. **`long_press(deviceId, x, y, ms=700)`**: Press and hold gesture.
-11. **`swipe(deviceId, x1, y1, x2, y2, ms=300)`**: Precision drag/swipe gesture.
-12. **`scroll(deviceId, direction, amount=0.6)`**: Directional scroll (`up`, `down`, `left`, `right`).
-13. **`type_text(deviceId, text, method="set", submit=False)`**: Injects text into focused field; optional Enter submit.
-14. **`press_key(deviceId, key)`**: Physical buttons (`back`, `home`, `recents`, `lock`, `volume_up`, `volume_down`).
-
-### OS & Application Control
-15. **`open_app(deviceId, name, package)`**: Launches app by title or package name.
-16. **`open_app_drawer(deviceId)`**: Opens home screen application drawer.
-17. **`open_url(deviceId, url)`**: Opens web URL or scheme (`whatsapp://`, `tel:`, etc.).
-18. **`wait(deviceId, seconds=1.5)`**: Pauses execution for screen animations.
-
-### Hardware & Alerts
-19. **`ring(deviceId)`**: Rings phone at full volume (bypasses silent mode).
-20. **`flash_light(deviceId, count=3)`**: Strobe camera flash.
-21. **`read_notifications(deviceId, filter="", limit=20)`**: Reads incoming OTPs, SMS, and status bar alerts.
-
-### File System & Transfers
-22. **`list_files(deviceId, path="/")`**: Browses phone storage `/storage/emulated/0`.
-23. **`get_file(deviceId, path)`**: Generates secure download URL to fetch file from phone.
-24. **`send_local_file(deviceId, name, folder="Download")`**: Generates upload URL to send file to phone.
-25. **`send_file(deviceId, name, data_base64, folder="Download")`**: Sends base64 payload directly.
-26. **`send_url(deviceId, url, name, folder="Download")`**: Directs phone to download remote URL.
+Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/phone-remote/deploy/deploy.sh` (`FORCE=1` rebuilds everything). Secrets: `EC2_HOST`, `EC2_SSH_KEY`, `EC2_KNOWN_HOSTS`.
 
 ---
 
-## 📱 7. Android Companion App
-* **APK Download URL**: [`https://3-6-239-48.sslip.io/phone-remote.apk`](https://3-6-239-48.sslip.io/phone-remote.apk)
-* **Storage Location on EC2**: `/home/ubuntu/phone-remote/client/dist/phone-remote.apk` and `server/public/phone-remote.apk`
-* **Default Server URL configured**: `https://3-6-239-48.sslip.io`
-* **Required Device Permissions**:
-  1. **Accessibility Service**: Must be enabled in Android Settings $\rightarrow$ Accessibility $\rightarrow$ Phone Remote (allows taps, swipes, hardware keys, and UI tree extraction).
-  2. **Screen Recording (MediaProjection)**: Granted once when stream starts.
-  3. **Storage / All Files Access**: Required for `/storage/emulated/0` file explorer.
-  4. **Location**: Required for GPS tab.
-* **Current release**: v1.3.1 (versionCode 4) — [GitHub release](https://github.com/GuptaOum/phone-remote/releases/tag/v1.3.1).
-* **Live-frame flow control (v1.3.1)**: max 2 unacked frames per hop. Server sends `{"type":"fa"}` to phones with the `frame_ack` cap for every 0x01 frame; tabs registering with `frameAck: true` send `{"type":"fa","k":1|2}` on frame arrival and the server holds back frames to them while 2 are unacked (1.5 s stall reset). Phone skips capture/encode while its window is full and adapts JPEG quality 20–55 to ack RTT.
-* **Streaming ownership (v1.3.0)**: `ConnectionForegroundService` owns screen + camera capture; Flutter only mirrors state via `_screen_started` / `_screen_stopped`. `ScreenCaptureService` creates ONE virtual display per consent (Android 14 tokens are single-use) and drops the token on stop for API 34+, so the next start re-prompts. After every `auth_ok` the phone re-announces `stream_started` / `camera_streaming` if capture survived a socket blip.
+## ⚡ 6. MCP Tool Catalog (26 tools, `server/src/routes/mcp.js`)
 
-### Building the APK on EC2
-```bash
-# Upload sources (never overwrite android/local.properties on EC2):
-tar -czf flutter_src.tgz -C flutter_app --exclude=android/local.properties --exclude=android/.gradle --exclude=android/app/build --exclude=build --exclude=.dart_tool lib android pubspec.yaml
-# Build detached, ONE at a time (two concurrent builds share the build dir and crawl):
-ssh ... 'cd ~/phone-remote/flutter_app && nohup ~/flutter/bin/flutter build apk --release > /tmp/apk_build.log 2>&1 < /dev/null &'
-# ~10 min cold on t3.medium. Then copy build/app/outputs/flutter-apk/app-release.apk to
-# server/public/phone-remote.apk AND client/dist/phone-remote.apk.
-```
+### Perception
+1. **`list_devices()`** — linked phones, online status, model, screen size.
+2. **`get_location(deviceId)`** — last GPS fix.
+3. **`get_device_status(deviceId)`** — battery, screen, network, accessibility state.
+4. **`get_foreground_app(deviceId)`** — active package.
+5. **`get_ui_tree(deviceId, all, filter)`** — structured tree with normalized `(x, y)` centers.
+6. **`wait_for(deviceId, text, id, app, gone, timeout)`** — polls the tree until the condition holds.
+7. **`list_apps(deviceId, filter)`** — installed apps with packages.
 
----
+### Touch & keys
+8. **`take_screenshot`** · 9. **`tap`** · 10. **`long_press`** · 11. **`swipe`** · 12. **`scroll`** · 13. **`type_text`** (`method: set|paste`, `submit`) · 14. **`press_key`** (back, home, recents, lock, volume)
 
-## 🛠️ 8. Routine Operations & Deployment Runbook
+### Apps & OS
+15. **`open_app`** · 16. **`open_app_drawer`** · 17. **`open_url`** · 18. **`wait`**
 
-### A. Deploy Frontend Updates (Vite React SPA)
-```bash
-# 1. On local machine (E:\phnrtm\phone-remote\client):
-cd E:\phnrtm\phone-remote\client
-npm run build
+### Alerts
+19. **`ring`** · 20. **`flash_light`** · 21. **`read_notifications`**
 
-# 2. Sync built dist to EC2:
-& "C:\Program Files\Git\usr\bin\scp.exe" -i C:\Users\hp\.ssh\phone-remote.pem -r dist/* ubuntu@3.6.239.48:/home/ubuntu/phone-remote/client/dist/
-```
-
-### B. Deploy Server Updates (Node.js & Python)
-```bash
-# 1. Copy changed server files to EC2:
-& "C:\Program Files\Git\usr\bin\scp.exe" -i C:\Users\hp\.ssh\phone-remote.pem -r server/src server/fastmcp_server.py ubuntu@3.6.239.48:/home/ubuntu/phone-remote/server/
-
-# 2. Restart PM2 on EC2:
-& "C:\Program Files\Git\usr\bin\ssh.exe" -i C:\Users\hp\.ssh\phone-remote.pem ubuntu@3.6.239.48 "pm2 restart all && pm2 status"
-```
-
-### C. Check Logs & Health
-```bash
-# Check PM2 processes:
-ssh -i C:\Users\hp\.ssh\phone-remote.pem ubuntu@3.6.239.48 "pm2 status"
-
-# View real-time logs:
-ssh -i C:\Users\hp\.ssh\phone-remote.pem ubuntu@3.6.239.48 "pm2 logs --lines 50 --nostream"
-
-# Test health endpoint:
-curl -k https://3-6-239-48.sslip.io/health
-# Response: {"ok":true}
-```
+### Files
+22. **`list_files`** · 23. **`get_file`** · 24. **`send_local_file`** · 25. **`send_file`** (base64) · 26. **`send_url`**
 
 ---
 
-## 🚨 9. Known Quirks & Troubleshooting Guide
+## 📱 7. Android App
+* **APK**: [`https://65-1-96-152.sslip.io/phone-remote.apk`](https://65-1-96-152.sslip.io/phone-remote.apk), served from `~/phone-remote/downloads/` (mounted read-only; not in the image).
+* **Version**: 1.3.1 (versionCode 4). Default server `https://65-1-96-152.sslip.io` (`kDefaultServerUrl`).
+* **Permissions**: Accessibility service (touch, keys, UI tree), screen capture (MediaProjection, re-prompted per stream on Android 14+), All-files access, Location, Notification access.
+* **Streaming**: `ConnectionForegroundService` owns screen + camera capture; Flutter mirrors state. WebRTC-only (`JPEG_FALLBACK=false`), ICE restart on network switch. One virtual display per consent (Android 14 tokens are single-use).
+* **Socket**: OkHttp `pingInterval(10s)`; server heartbeat 15 s.
 
-1. **Stale `cursor-remote.lock` on Windows Host**:
-   - *Symptom*: Remote SSH into the local Windows machine fails with *"cursor-remote.lock is used by another process"*.
-   - *Fix*: Delete `C:\Users\hp\.cursor-server\bin\win32-x64\*\cursor-remote.lock`.
-2. **EC2 Disk Space Exhaustion**:
-   - *Symptom*: `apt install` or Docker build fails with *No space left on device*.
-   - *Root Cause*: Previous 8 GB `/swapfile` consumed 36% of disk.
-   - *Fix*: Kept at 2 GB (`sudo truncate -s 2G /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile`). Prune unused Docker images with `docker system prune -f`.
-3. **Screen Mirror Frame Lag / Catch-22**:
-   - *Rule*: Never block frame decoding on `if (!streaming) return` before setting `streaming: true`.
-   - *Architecture*: Frames decode off-thread via `createImageBitmap(blob)` directly to canvas. Stale frames are dropped via `latestBlobRef` to guarantee real-time latency.
-4. **PM2 Process Mapping on EC2**:
-   - `id 0`: `phone-remote` (Node.js server, port 3000)
-   - `id 1`: `phone-remote-fastmcp` (Python FastMCP server, port 8001)
-5. **Phone dropping offline every few minutes**:
-   - *Root Cause*: OkHttp `pingInterval(3s)` killed the socket whenever one pong was late on mobile data. Now 10s; the server's 15s heartbeat still reaps dead sockets.
-6. **Known open issues (deferred — fine for the demo / MCP demonstration)**:
-   - *Device takeover (low risk)*: `db.upsertDevice` moves a device row to whichever account registers its `deviceId`, without checking the current owner. Another account that knows a phone's random ID can make it vanish from the owner's list (until the phone re-registers) or rename it. It CANNOT see or control the phone — live routing uses the phone's own token. Not fixed because the same path legitimately moves a phone when a different account logs in on it (`AuthService.deviceId` survives logout). Planned fix (~30 min incl. APK build): app generates a new deviceId when a different account logs in, and the server refuses to reassign a device owned by another account.
-   - *Default JWT secret*: the server falls back to a built-in secret if `JWT_SECRET` is unset. Set a strong `JWT_SECRET` in the EC2 env before any non-demo use.
-   - *Stale screen size in reports*: `get_device_status` / `list_devices` report the screen size from connect time, so width/height can appear swapped after rotation. Taps and UI-tree coordinates are unaffected (they use the live size). One-line Kotlin fix (`refreshScreenSize()` in `handleDeviceStatus`), ship with the next APK.
-   - *Shared password = full access*: anyone with the account's email+password can watch and control the phone, with no alert. Possible additions: session list with "sign out everywhere", on-phone notification when a viewer starts the mirror.
-7. **Killing processes on EC2 over SSH**:
-   - `pkill -f <name>` / `pgrep -f <name>` match the SSH command line itself. Use the bracket trick (`grep '[G]radleDaemon'`) or `./gradlew --stop`.
+### Build & publish the APK (on EC2, never on the PC)
+```bash
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote/flutter_app && ANDROID_HOME=~/android-sdk ~/flutter/bin/flutter build apk --release && bash tool/verify_release_apk.sh && cp build/app/outputs/flutter-apk/app-release.apk ../downloads/phone-remote.apk"
+```
+`verify_release_apk.sh` must print **PASS** (catches R8 stripping libwebrtc / jni_zero classes). One build at a time; ~10 min cold.
+
+---
+
+## 🛠️ 8. Operations Runbook
+
+```bash
+# Status
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && docker compose ps"
+# Logs
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && docker compose logs --tail 100 app"
+# Health
+curl https://65-1-96-152.sslip.io/health        # {"ok":true}
+# Rebuild everything
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "FORCE=1 ~/phone-remote/deploy/deploy.sh"
+```
+Code changes: commit + push to `main`; CI/CD does the rest (section 5). Watch it in GitHub Actions.
+
+---
+
+## 🚨 9. Known Quirks & Open Issues
+
+1. **Restarting `app` drops open WebSockets for a few seconds** — phones/browsers reconnect; WebRTC recovers via ICE restart.
+2. **Disk space** — `docker image prune -f` runs after each deploy; keep swap at 2 GB.
+3. **Killing processes over SSH** — `pkill -f <name>` matches the SSH command itself; use `grep '[G]radleDaemon'` or `./gradlew --stop`.
+4. **Open issues (deferred)**:
+   - *Device takeover (low risk)*: `db.upsertDevice` reassigns a device row to whichever account registers its `deviceId`. It cannot see or control the phone, but can hide/rename it. Fix: new deviceId on account switch + server refuses cross-account reassignment.
+   - *JWT secret*: the server falls back to a dev default if `JWT_SECRET` is unset (logs a warning). Production `.env` must set it.
+   - *Stale screen size after rotation* in `get_device_status` / `list_devices` (taps unaffected). One-line Kotlin fix (`refreshScreenSize()` in `handleDeviceStatus`).
+   - *Shared password = full access*: no "sign out everywhere" or on-phone viewer alert yet.
+   - *Phone file upload >64 KB* over the WS chunked path has a known bug.
 
 ---
 
@@ -461,4 +381,4 @@ When the user gives a local PC file (e.g. `C:\Users\hp\Desktop\...\image.png` or
 All phone interactions MUST strictly use the 26 standard `phone-remote` MCP tools documented in Section 6 and `MCP_PHONE_NAVIGATION.md`.
 
 ---
-*Created & Maintained by Google Antigravity & User Team. Last Updated: October 30, 2026.*
+*Last updated: 2026-11-18 (EC2 65.1.96.152, Docker Compose, CI/CD, MCP Streamable HTTP + OAuth).*
