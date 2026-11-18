@@ -9,9 +9,13 @@
 # the script always deploys itself, even on the first run.
 #
 #   1. git fast-forward to origin/main
-#   2. build new images WHILE the old containers keep serving traffic
-#   3. recreate only the containers whose image/config changed
-#      (coturn, the database and unchanged services are never touched)
+#   2. work out which services the changed files belong to (git diff):
+#        client/ server/ Dockerfile → app      nginx/ → nginx
+#        docker-compose.yml → everything       anything else → nothing
+#      (Image IDs can't decide this: every build gets a new ID even with no
+#      code change, which used to restart app + nginx on every deploy.)
+#   3. build those images WHILE the old containers keep serving, then
+#      recreate only those containers (coturn and the database are untouched)
 #   4. health-check app + nginx; on failure roll back to the previous commit
 #   5. push the new images to Docker Hub
 set -euo pipefail
@@ -43,9 +47,24 @@ healthy() {
   return 1
 }
 
+# Services whose inputs changed between two commits ("ALL" = let compose decide)
+changed_services() {
+  local files s=""
+  files=$(git diff --name-only "$1" "$2")
+  if grep -qx 'docker-compose.yml' <<<"$files"; then echo ALL; return; fi
+  grep -qE '^(Dockerfile|\.dockerignore|client/|server/)' <<<"$files" && s="$s app"
+  grep -qE '^nginx/' <<<"$files" && s="$s nginx"
+  echo $s
+}
+
 swap() {
-  docker compose build -q
-  docker compose up -d --remove-orphans
+  if [ "$1" = ALL ]; then
+    docker compose build -q
+    docker compose up -d --remove-orphans
+  else
+    docker compose build -q "$@"
+    docker compose up -d --no-deps "$@"
+  fi
   # nginx caches the app container's IP; a graceful reload re-resolves it
   # without dropping open connections.
   docker exec phone-remote-nginx nginx -s reload >/dev/null 2>&1 || true
@@ -60,21 +79,30 @@ if [ "$PREV" = "$NEW" ] && [ "${FORCE:-0}" != 1 ]; then
   exit 0
 fi
 
-log "deploying $(git log --oneline -1 "$NEW")  (was ${PREV:0:7})"
+if [ "${FORCE:-0}" = 1 ]; then SERVICES=ALL; else SERVICES=$(changed_services "$PREV" "$NEW"); fi
+log "deploying $(git log --oneline -1 "$NEW")  (was ${PREV:0:7}) → services: ${SERVICES:-none}"
 git merge -q --ff-only "$NEW"
 
-if swap && healthy; then
+if [ -z "$SERVICES" ]; then
+  log "✅ no server changes (docs / CI / Android only) — nothing restarted"
+  exit 0
+fi
+
+# shellcheck disable=SC2086  # word-splitting the service list is intended
+if swap $SERVICES && healthy; then
   log "✅ healthy — $(docker ps --format '{{.Names}}: {{.Status}}' | tr '\n' ';')"
 else
   log "❌ deploy failed — rolling back to ${PREV:0:7}"
   git reset -q --hard "$PREV"
-  swap || true
+  swap $SERVICES || true
   if healthy; then log "↩️  rolled back, site is up on ${PREV:0:7}"; else log "🔥 rollback also unhealthy — check: docker compose logs app"; fi
   exit 1
 fi
 
 log "pushing images to Docker Hub"
-docker push -q oumgupta/phone-remote-app:latest   || log "⚠️  push app failed (deploy is still live)"
-docker push -q oumgupta/phone-remote-nginx:latest || log "⚠️  push nginx failed (deploy is still live)"
+[ "$SERVICES" = ALL ] && SERVICES="app nginx"
+for svc in $SERVICES; do
+  docker push -q "oumgupta/phone-remote-$svc:latest" || log "⚠️  push $svc failed (deploy is still live)"
+done
 docker image prune -f >/dev/null 2>&1 || true
 log "done"
