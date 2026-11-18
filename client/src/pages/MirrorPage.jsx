@@ -180,6 +180,7 @@ export default function MirrorPage() {
     startingRef.current = true;
     setStreamStarting(true);
     sendRaw({ type: 'stream_start' });
+    sendRaw({ type: 'rtc_trace', kind: 'screen', event: 'page-stream-start' });
     rtc.start(); // WebRTC first; JPEG only if this fails
 
     if (startingTimeoutRef.current) clearTimeout(startingTimeoutRef.current);
@@ -193,6 +194,11 @@ export default function MirrorPage() {
       setStreamError('The phone did not start sharing. Check the phone for a screen-recording permission prompt, then try again.');
     }, START_TIMEOUT_MS);
   };
+
+  const startStreamRef = useRef(null);
+  startStreamRef.current = startStream;
+  const rtcRef = useRef(rtc);
+  rtcRef.current = rtc;
 
   // User pressed Stop (or Cancel while starting)
   const stopStream = () => {
@@ -223,10 +229,18 @@ export default function MirrorPage() {
       const mine = () => streamingRef.current || startingRef.current || hasIntent();
       switch (msg.type) {
         case 'phone_connected':
+          sendRaw({ type: 'rtc_trace', kind: 'screen', event: 'page-phone-connected',
+            detail: `intent=${hasIntent()} streaming=${streamingRef.current} starting=${startingRef.current}` });
           if (hasIntent()) startStream();
           break;
         case 'stream_started':
-          if (mine()) markStreaming();
+          if (mine()) {
+            markStreaming();
+            // The phone's capture is (back) up — make sure a call exists. It can
+            // arrive before phone_connected after a reconnect, which would
+            // otherwise leave us "streaming" with no WebRTC call at all.
+            rtc.ensure();
+          }
           break;
         case 'stream_stopped':
           if (!mine()) break;
@@ -242,6 +256,7 @@ export default function MirrorPage() {
           break;
         case 'phone_disconnected':
         case '_ws_closed':
+          sendRaw({ type: 'rtc_trace', kind: 'screen', event: 'page-link-lost', detail: msg.type });
           handleLinkLost();
           break;
         case 'device_offline':
@@ -293,6 +308,29 @@ export default function MirrorPage() {
   useEffect(() => {
     if (phoneOnline && hasIntent()) startStream();
   }, [phoneOnline]);
+
+  // Watchdog: the tab wants the stream, the phone is online, yet nothing is
+  // streaming or starting (a reconnect event was missed or arrived in an
+  // order we didn't expect) → start it again. Never stalls silently.
+  const phoneOnlineRef = useRef(phoneOnline);
+  phoneOnlineRef.current = phoneOnline;
+  useEffect(() => {
+    let idleSince = 0;
+    const t = setInterval(() => {
+      const notStarted = !streamingRef.current && !startingRef.current;
+      const noCall = streamingRef.current && !rtcRef.current.hasPeer();
+      const idle = phoneOnlineRef.current && hasIntent() && (notStarted || noCall);
+      if (!idle) { idleSince = 0; return; }
+      if (!idleSince) { idleSince = Date.now(); return; }
+      if (Date.now() - idleSince >= 4000) {
+        idleSince = 0;
+        sendRaw({ type: 'rtc_trace', kind: 'screen', event: 'page-watchdog-restart', detail: notStarted ? 'not-started' : 'no-call' });
+        if (notStarted) startStreamRef.current?.();
+        else rtcRef.current.ensure();
+      }
+    }, 1000);
+    return () => clearInterval(t);
+  }, [selectedDeviceId]);
 
   // Leaving the page (route change or device switch) releases the stream.
   // A refresh never runs this, so the intent survives it.

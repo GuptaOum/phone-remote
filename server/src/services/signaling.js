@@ -262,10 +262,15 @@ function getPhoneSocket(userId, deviceId, cap = null) {
   const a = accounts.get(userId);
   if (!a) return null;
   if (cap) {
-    for (const s of (a.phonePool.get(deviceId) || [])) {
-      if (s.readyState === 1 && Array.isArray(s.caps) && s.caps.includes(cap)) return s;
-    }
-    return null;
+    const has = (s) => s && s.readyState === 1 && Array.isArray(s.caps) && s.caps.includes(cap);
+    // The primary first: after a network switch the pool still holds the
+    // phone's OLD socket (dead, but open until the heartbeat reaps it ~30s
+    // later). Iterating in insertion order picked it, so every WebRTC
+    // message went nowhere for half a minute.
+    const primary = a.phones.get(deviceId);
+    if (has(primary)) return primary;
+    const pool = [...(a.phonePool.get(deviceId) || [])].reverse(); // newest first
+    return pool.find(has) || null;
   }
   return livePhone(a, deviceId);
 }
@@ -711,6 +716,18 @@ function setupSignaling(wss, app) {
               const cur = acc.phones.get(ws.deviceId);
               const curAlive = cur && cur.readyState === 1;
               if (ws.agent === 'service' || !curAlive) acc.phones.set(ws.deviceId, ws);
+              // The background service keeps ONE socket; a new one means it
+              // reconnected (usually a network switch) and has abandoned the
+              // old one. Drop those now instead of waiting ~30s for the
+              // heartbeat — messages must not keep landing on a dead socket.
+              if (ws.agent === 'service') {
+                for (const old of pool) {
+                  if (old !== ws && old.agent === 'service') {
+                    pool.delete(old);
+                    try { old.terminate(); } catch (_) {}
+                  }
+                }
+              }
 
               // The Flutter UI re-registers over the same socket. Announcing
               // again would make every watching tab treat it as a reconnect
@@ -816,6 +833,14 @@ function setupSignaling(wss, app) {
         case 'rtc_error':
           if (ws.role === 'phone') sendToTab(msg.to, { type: msg.type, kind: rtcKind(msg.kind), sdp: msg.sdp, reason: msg.reason });
           break;
+        // Diagnostics from the browser's WebRTC client (useRtcStream.js).
+        case 'rtc_trace': {
+          if (ws.role !== 'browser') return;
+          const ev = String(msg.event || '').slice(0, 40);
+          const detail = msg.detail ? ` ${String(msg.detail).slice(0, 200)}` : '';
+          console.log(`🧭 rtc ${rtcKind(msg.kind)} ${ev}${detail} tab=${String(ws.id).slice(0, 6)} device=${(ws.watchId || '').slice(0, 8)}`);
+          break;
+        }
         // The tab's peer lost its network path and is ICE-restarting: treat it
         // like a probe (phone shows JPEG meanwhile) until rtc_ready.
         case 'rtc_recovering': {

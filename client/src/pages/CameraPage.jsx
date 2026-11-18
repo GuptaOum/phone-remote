@@ -132,6 +132,7 @@ export default function CameraPage() {
     startingRef.current = true;
     setStarting(true);
     sendRaw({ type: 'camera_start', front });
+    sendRaw({ type: 'rtc_trace', kind: 'camera', event: 'page-camera-start' });
     rtc.start(); // WebRTC first; JPEG only if this fails
     clearTimeout(startTimeoutRef.current);
     startTimeoutRef.current = setTimeout(() => {
@@ -159,6 +160,7 @@ export default function CameraPage() {
             setIntent(msg.front);
           }
           markLive();
+          rtc.ensure(); // camera (back) up — make sure a WebRTC call exists
           break;
         case 'camera_stopped':
           if (!mine()) break;
@@ -212,6 +214,25 @@ export default function CameraPage() {
     const intent = readIntent(selectedDeviceId);
     if (intent && !liveRef.current) startCamera(intent.front);
   }, [phoneOnline]);
+
+  // Watchdog: the camera is live (or should be) but no WebRTC call exists for
+  // 4s → start one. Covers reconnect events arriving in an unexpected order.
+  const rtcRef = useRef(rtc);
+  rtcRef.current = rtc;
+  useEffect(() => {
+    let idleSince = 0;
+    const t = setInterval(() => {
+      const idle = liveRef.current && !rtcRef.current.hasPeer();
+      if (!idle) { idleSince = 0; return; }
+      if (!idleSince) { idleSince = Date.now(); return; }
+      if (Date.now() - idleSince >= 4000) {
+        idleSince = 0;
+        sendRaw({ type: 'rtc_trace', kind: 'camera', event: 'page-watchdog-restart', detail: 'no-call' });
+        rtcRef.current.ensure();
+      }
+    }, 1000);
+    return () => clearInterval(t);
+  }, [selectedDeviceId]);
 
   // Leaving the page releases the camera (a refresh doesn't run this).
   useEffect(() => {

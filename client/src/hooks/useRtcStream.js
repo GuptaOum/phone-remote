@@ -19,6 +19,9 @@ const DISCONNECT_GRACE_MS = 5000;
 // giving up on it (→ JPEG + auto-retry). JPEG covers the gap meanwhile.
 const RESTART_TIMEOUT_MS = 6000;
 const RESTART_MAX_ATTEMPTS = 3;
+// Safety net: a repair that hasn't brought video back within this long is
+// abandoned for a fresh call, whatever state it got stuck in.
+const RECOVERY_DEADLINE_MS = 20000;
 // Recovered onto the TURN relay? Right after a network switch the direct path
 // (e.g. Jio IPv6) often isn't up yet, and WebRTC keeps the first path that
 // worked — so try to move to a direct path once the network has settled.
@@ -84,6 +87,7 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
   const restartAttemptsRef = useRef(0);
   const restartTimerRef = useRef(null);
   const upgradeTimerRef = useRef(null);
+  const deadlineTimerRef = useRef(null);
   const retryTimerRef = useRef(null);
   const retryDelayRef = useRef(RETRY_FIRST_MS);
   const startRef = useRef(null);
@@ -91,6 +95,11 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
   onFrameRef.current = onVideoFrame;
   const shouldRetryRef = useRef(shouldRetry);
   shouldRetryRef.current = shouldRetry;
+
+  // Diagnostics: report each WebRTC step to the server log ("🧭 rtc …").
+  const trace = useCallback((event, detail) => {
+    sendRaw({ type: 'rtc_trace', kind, event, detail: detail === undefined ? undefined : String(detail).slice(0, 200) });
+  }, [sendRaw, kind]);
 
   const setActive = useCallback((on) => {
     if (activeRef.current === on) return;
@@ -103,6 +112,7 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
     clearTimeout(retryTimerRef.current);
     clearTimeout(restartTimerRef.current);
     clearTimeout(upgradeTimerRef.current);
+    clearTimeout(deadlineTimerRef.current);
     recoveringRef.current = false;
     restartAttemptsRef.current = 0;
     probeRef.current = false;
@@ -119,18 +129,23 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
   // `retry: false` when retrying is pointless (phone can't do WebRTC at all).
   const fail = useCallback((retry = true) => {
     const had = !!pcRef.current;
+    trace('fail', `had=${had} retry=${retry}`);
     stop();
     gaveUpRef.current = true;
     if (had) sendRaw({ type: 'rtc_failed', kind });
     if (!retry || !shouldRetryRef.current) return;
     const delay = retryDelayRef.current;
     retryDelayRef.current = Math.min(delay * 2, RETRY_MAX_MS);
+    trace('retry-scheduled', `${delay}ms`);
     retryTimerRef.current = setTimeout(() => {
-      if (pcRef.current || !shouldRetryRef.current?.()) return;
+      if (pcRef.current || !shouldRetryRef.current?.()) { trace('retry-skipped', pcRef.current ? 'has-pc' : 'page-not-streaming'); return; }
       gaveUpRef.current = false;
       startRef.current?.({ probe: JPEG_FALLBACK });
     }, delay);
-  }, [stop, sendRaw, kind]);
+  }, [stop, sendRaw, kind, trace]);
+
+  const failRef = useRef(null);
+  failRef.current = fail;
 
   // Detect arriving video from the decoder's frame counter rather than from the
   // <video> element: a hidden element may never report frames, and the page
@@ -175,6 +190,7 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
     recoveringRef.current = false;
     restartAttemptsRef.current = 0;
     clearTimeout(restartTimerRef.current);
+    clearTimeout(deadlineTimerRef.current);
     sendRaw({ type: 'rtc_ready', kind }); // phone switches back to WebRTC
     // On the relay → one more restart later, once a direct path may exist.
     const delay = UPGRADE_DELAYS_MS[upgradeStep];
@@ -223,14 +239,22 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
   const restartIce = useCallback(async () => {
     const pc = pcRef.current;
     if (!pc || !pc.remoteDescription) return;
+    // Enter recovery and arm the deadline once per outage, before anything
+    // below can return early. The deadline only asks "is video back?".
+    if (!recoveringRef.current) {
+      recoveringRef.current = true;
+      if (!STAY_ON_WEBRTC_WHILE_RECOVERING) sendRaw({ type: 'rtc_recovering', kind }); // phone shows JPEG meanwhile
+      clearTimeout(deadlineTimerRef.current);
+      deadlineTimerRef.current = setTimeout(() => {
+        const videoBack = Date.now() - lastFrameAtRef.current < 2000;
+        if (pc === pcRef.current && !videoBack) { trace('deadline', 'no video 20s'); failRef.current?.(); } // → fresh call
+      }, RECOVERY_DEADLINE_MS);
+    }
     if (!(await rollbackOffer(pc)) || pc !== pcRef.current) return;
     if (pc.signalingState !== 'stable') return;
     if (restartAttemptsRef.current >= RESTART_MAX_ATTEMPTS) { fail(); return; }
     restartAttemptsRef.current += 1;
-    if (!recoveringRef.current) {
-      recoveringRef.current = true;
-      if (!STAY_ON_WEBRTC_WHILE_RECOVERING) sendRaw({ type: 'rtc_recovering', kind }); // phone shows JPEG meanwhile
-    }
+    trace('ice-restart', `attempt ${restartAttemptsRef.current}`);
     clearTimeout(timerRef.current);
     clearTimeout(restartTimerRef.current);
     const baseline = new Map();
@@ -257,7 +281,11 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
   restartIceRef.current = restartIce;
 
   const start = useCallback(({ probe = false } = {}) => {
-    if (pcRef.current || gaveUpRef.current || !window.RTCPeerConnection) return;
+    if (pcRef.current || gaveUpRef.current || !window.RTCPeerConnection) {
+      trace('start-skipped', pcRef.current ? 'has-pc' : gaveUpRef.current ? 'gave-up' : 'no-webrtc');
+      return;
+    }
+    trace('start', probe ? 'probe' : 'first');
     const pc = new RTCPeerConnection(getRtcConfig());
     pcRef.current = pc;
     probeRef.current = probe;
@@ -277,6 +305,7 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
     pc.onconnectionstatechange = () => {
       if (pc !== pcRef.current) return;
       const s = pc.connectionState;
+      trace('state', s);
       if (s === 'connected') {
         // Keep the CONNECT_TIMEOUT running until the first video frame.
         if (hadVideoRef.current) clearTimeout(timerRef.current);
@@ -333,7 +362,8 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
         case 'rtc_answer':
           if (!pc || !mine) break;
           // A late answer to an offer we already withdrew (rollback): ignore.
-          if (pc.signalingState !== 'have-local-offer') break;
+          if (pc.signalingState !== 'have-local-offer') { trace('answer-ignored', pc.signalingState); break; }
+          trace('answer');
           pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
             .then(() => {
               pendingIceRef.current.splice(0).forEach((c) => pc.addIceCandidate(c).catch(() => {}));
@@ -354,6 +384,7 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
           if (mine) fail(false);
           break;
         case 'rtc_restart':
+          if (mine) trace('restart-hint', pc ? `pc=${pc.connectionState} video=${hadVideoRef.current}` : 'no-pc');
           // Server: the phone just re-registered (network switch) — the old
           // path is dead even if the browser hasn't noticed yet.
           // Also while already recovering: our offer may have gone to the
@@ -367,6 +398,7 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
           break;
         case 'phone_disconnected':
         case '_ws_closed':
+          trace('link-lost', msg.type);
           // The server already dropped our peer; a reconnect starts fresh.
           stop();
           gaveUpRef.current = false;
@@ -380,5 +412,17 @@ export function useRtcStream(kind, videoRef, { onVideoFrame, shouldRetry } = {})
   // Leaving the page.
   useEffect(() => () => stop(), [stop]);
 
-  return { videoActive, start, stop, reset, acceptJpeg, showJpeg };
+  // Is a WebRTC call in progress (or a retry of one scheduled)?
+  const hasPeer = useCallback(() => !!pcRef.current, []);
+  // Start a call now if none is running (e.g. the phone's capture came back
+  // before we noticed it had been away). No-op while one exists.
+  const ensure = useCallback(() => {
+    if (pcRef.current) return;
+    clearTimeout(retryTimerRef.current);
+    gaveUpRef.current = false;
+    retryDelayRef.current = RETRY_FIRST_MS;
+    startRef.current?.();
+  }, []);
+
+  return { videoActive, start, stop, reset, acceptJpeg, showJpeg, hasPeer, ensure };
 }
