@@ -22,13 +22,16 @@
 
 **Bring everything up (server, MCP, nginx, TURN):** `cd ~/phone-remote && sudo docker compose up -d --build`
 
-**Redeploy after code changes** (from repo root on Windows):
+**Redeploy after code changes.** `~/phone-remote` on the EC2 is a git checkout
+of `main` (public repo, no credentials needed). Push to `main`, then:
 
 ```bash
-tar czf /tmp/pr-src.tgz --exclude=./.git --exclude='*/node_modules' --exclude=./client/dist     --exclude=./flutter_app/build --exclude=./flutter_app/.dart_tool --exclude=./server/data     --exclude=./server/logs --exclude=./server/.env --exclude='*.pem' .
-scp -i ~/.ssh/face-attendance.pem /tmp/pr-src.tgz ubuntu@65.1.96.152:
-ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152     "tar xzf pr-src.tgz -C ~/phone-remote && cd ~/phone-remote && sudo docker compose up -d --build"
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && git pull --ff-only && sudo docker compose up -d --build --remove-orphans && docker push -q oumgupta/phone-remote-app:latest && docker push -q oumgupta/phone-remote-nginx:latest"
 ```
+
+`server/.env`, `server/data/`, `downloads/` and build output are gitignored, so
+`git pull` never touches them. Only containers whose image or config changed
+are restarted; coturn and the database are left alone.
 
 **Build, check and publish the APK on EC2:**
 
@@ -47,7 +50,7 @@ the `cp` into `downloads/` — no image rebuild needed.
 (`host`/`srflx`/`prflx` = direct, `relay` = through coturn). The server logs
 `🔗 WebRTC <kind> connected|failed → JPEG` and `🔁 … recovering`.
 
-**Push images:** `docker push oumgupta/phone-remote-app:latest` (same for `-nginx`; the ubuntu user is logged in to Docker Hub).
+**Push images:** included in the redeploy command above (the ubuntu user is logged in to Docker Hub).
 
 If you later buy a real domain: Route 53 A-records for **both** `yourdomain.com`
 and `turn.yourdomain.com` → 65.1.96.152, then
