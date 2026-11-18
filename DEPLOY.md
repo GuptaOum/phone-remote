@@ -8,12 +8,15 @@
 | EC2 instance | `i-0a24a69528842b8ca` (t3.medium, Ubuntu 24.04, 40 GB disk, 2 GB swap) from AMI `phone-remote-ami-native` |
 | Elastic IP | 65.1.96.152 (`eipalloc-036395a673be2841e`) |
 | Public URL | **https://65-1-96-152.sslip.io** |
-| TLS | Let's Encrypt, host certbot in **webroot** mode (`/var/www/certbot`, mounted into the nginx container); deploy hook reloads `phone-remote-nginx` |
-| Security group | `sg-072b858b2f5b6e632` — 22/80/443 tcp, 3478 tcp+udp and 49160-49200 udp (reserved for TURN) |
+| TLS | Let's Encrypt, host certbot in **webroot** mode (`/var/www/certbot`, mounted into the nginx container); deploy hook reloads `phone-remote-nginx`. One cert covers **both** `65-1-96-152.sslip.io` and `turn.65-1-96-152.sslip.io` |
+| Port 443 | nginx **SNI router** (`nginx/stream.conf`): `turn.<domain>` → TURN over TLS → coturn; everything else → website (internal `127.0.0.1:8443`, real client IP via PROXY protocol) |
+| Security group | `sg-072b858b2f5b6e632` — 22/80/443 tcp, 3478 tcp+udp, 49160-49200 udp (TURN relay). 22 is open to all on purpose (key-only SSH) |
 | SSH key | `ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152` |
 | Database | SQLite, bind-mounted `~/phone-remote/server/data` → container |
 | Process | **Docker Compose** — `phone-remote-nginx`, `phone-remote-app`, `phone-remote-mcp`, `phone-remote-turn` (coturn, host network) + one-shot `phone-remote-turn-init` (creates the TURN secret in volume `turn-secret` on first run). `restart: unless-stopped`. PM2 and host nginx are disabled. |
-| TURN | coturn 4.7.0 on 3478 udp/tcp, relay ports 49160-49200 udp, public IP auto-detected (override `TURN_EXTERNAL_IP`). App signs 24 h credentials (`server/src/services/turn.js`); private/loopback peers denied. |
+| TURN | coturn 4.7.0 on 3478 udp/tcp **and TLS on 443** (`turns:turn.<domain>:443`, via nginx). Relay ports 49160-49200 udp, relays only on the instance's private IP (`relay-ip`, `external-ip=public/private`, own IP allowed as peer so relay↔relay works). Public/private IP auto-detected (override `TURN_EXTERNAL_IP` / `TURN_PRIVATE_IP`). App signs 24 h credentials (`server/src/services/turn.js`, `TURN_TLS_HOST`); private/loopback peers denied. |
+| WebRTC | Screen + camera stream WebRTC-first (direct → relay UDP/TCP → relay TLS 443), JPEG over WebSocket only as last resort. ICE restart on network switch (flags: `ICE_RESTART` in `client/src/hooks/useRtcStream.js`, `ICE_RESTART_HINT` in `server/src/services/signaling.js`) |
+| APK download | `https://65-1-96-152.sslip.io/phone-remote.apk` served from **`~/phone-remote/downloads/`** (mounted read-only, not in the image) |
 | Images | Docker Hub `oumgupta/phone-remote-{app,mcp,nginx}:latest` |
 | Build toolchain | Flutter 3.44.6 + Android SDK 36 + NDK 28.2 on-instance (`~/flutter`, `~/android-sdk`) |
 
@@ -27,19 +30,32 @@ scp -i ~/.ssh/face-attendance.pem /tmp/pr-src.tgz ubuntu@65.1.96.152:
 ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152     "tar xzf pr-src.tgz -C ~/phone-remote && cd ~/phone-remote && sudo docker compose up -d --build"
 ```
 
-**Build the APK on EC2:**
+**Build, check and publish the APK on EC2:**
 
 ```bash
-ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152     "cd ~/phone-remote/flutter_app && ANDROID_HOME=~/android-sdk ~/flutter/bin/flutter build apk --release"
-scp -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152:~/phone-remote/flutter_app/build/app/outputs/flutter-apk/app-release.apk .
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote/flutter_app && ANDROID_HOME=~/android-sdk ~/flutter/bin/flutter build apk --release && bash tool/verify_release_apk.sh && cp build/app/outputs/flutter-apk/app-release.apk ../downloads/phone-remote.apk"
+scp -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152:~/phone-remote/downloads/phone-remote.apk .
 ```
+
+`tool/verify_release_apk.sh` must print **PASS** — it fails if R8 stripped the
+libwebrtc / jni_zero classes (that crashes the app the moment WebRTC starts;
+keep rules in `flutter_app/android/app/proguard-rules.pro`). Publishing is just
+the `cp` into `downloads/` — no image rebuild needed.
+
+**Debug WebRTC on a USB-connected phone:** `adb logcat -s PhoneRemote` prints
+`rtc screen: <fps> <size> <kbps> limit=… path=<local>→<remote> rtt=…` every 5 s
+(`host`/`srflx`/`prflx` = direct, `relay` = through coturn). The server logs
+`🔗 WebRTC <kind> connected|failed → JPEG` and `🔁 … recovering`.
 
 **Push images:** `docker push oumgupta/phone-remote-app:latest` (same for `-mcp`, `-nginx`; the ubuntu user is logged in to Docker Hub).
 
-If you later buy a real domain: Route 53 A-record → 65.1.96.152, then
-`sudo certbot certonly --webroot -w /var/www/certbot -d yourdomain.com`, set `DOMAIN=yourdomain.com` for docker compose,
-and change `kDefaultServerUrl` to `https://yourdomain.com`. The sslip.io
-setup can be dropped once a real domain is live.
+If you later buy a real domain: Route 53 A-records for **both** `yourdomain.com`
+and `turn.yourdomain.com` → 65.1.96.152, then
+`sudo certbot certonly --webroot -w /var/www/certbot --cert-name yourdomain.com -d yourdomain.com -d turn.yourdomain.com`,
+set `DOMAIN=yourdomain.com` for docker compose (nginx + `TURN_TLS_HOST` follow it),
+change `PUBLIC_URL` in `server/.env`, and change `kDefaultServerUrl` to
+`https://yourdomain.com` (rebuild the APK). The sslip.io setup can be dropped
+once a real domain is live.
 
 ---
 
