@@ -8,6 +8,7 @@ const DeviceContext = createContext(null);
 const PING_INTERVAL_MS = 15000;
 const SILENT_SOCKET_MS = 40000;
 const RECONNECT_DELAY_MS = 2500;
+const DEFAULT_ICE = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 export function DeviceProvider({ children }) {
   const { token, api, logout } = useAuth();
@@ -24,6 +25,9 @@ export function DeviceProvider({ children }) {
 
   const socketRef = useRef(null);
   const listenersRef = useRef(new Set());
+  // ICE servers for WebRTC (STUN + our TURN relay with short-lived
+  // credentials), sent by the server on every (re)registration.
+  const iceServersRef = useRef(DEFAULT_ICE);
   const logoutRef = useRef(logout);
   logoutRef.current = logout;
 
@@ -163,6 +167,9 @@ export function DeviceProvider({ children }) {
           if (msg.deviceId === selectedDeviceId) {
             setPhoneOnline(true);
           }
+        } else if (msg.type === 'rtc_config') {
+          if (Array.isArray(msg.iceServers) && msg.iceServers.length) iceServersRef.current = msg.iceServers;
+          return;
         } else if (msg.type === 'location') {
           setLastLocation(msg);
         } else if (msg.type === 'pong') {
@@ -246,6 +253,8 @@ export function DeviceProvider({ children }) {
     return false;
   }, []);
 
+  const getRtcConfig = useCallback(() => ({ iceServers: iceServersRef.current }), []);
+
   // Add message listener for specific pages
   const addListener = useCallback((callback) => {
     listenersRef.current.add(callback);
@@ -266,6 +275,7 @@ export function DeviceProvider({ children }) {
         sendControl,
         sendRaw,
         addListener,
+        getRtcConfig,
       }}
     >
       {children}

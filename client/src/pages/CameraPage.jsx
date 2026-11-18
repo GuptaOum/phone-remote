@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useDevice } from '../context/DeviceContext';
+import { useRtcStream } from '../hooks/useRtcStream';
 import { Camera, SwitchCamera, Play, Square, AlertCircle } from 'lucide-react';
 
 // sessionStorage: { deviceId, front } of the camera this tab has open, so a
@@ -24,6 +25,7 @@ export default function CameraPage() {
   const [errorMessage, setErrorMessage] = useState('');
 
   const canvasRef = useRef(null);
+  const videoRef = useRef(null);
   const isFrontRef = useRef(isFront);
   const suppressFramesUntilRef = useRef(0);
   const liveRef = useRef(false);
@@ -31,6 +33,14 @@ export default function CameraPage() {
   const startTimeoutRef = useRef(null);
   const renderingRef = useRef(false);
   const latestBlobRef = useRef(null);
+
+  // WebRTC video (direct or via our TURN relay — smooth on cellular); JPEG on
+  // the canvas is the instant start and the fallback.
+  const rtc = useRtcStream('camera', videoRef, {
+    onVideoFrame: () => {
+      if (!liveRef.current && startingRef.current) markLive();
+    },
+  });
 
   const setIntent = (front) =>
     sessionStorage.setItem(INTENT_KEY, JSON.stringify({ deviceId: selectedDeviceId, front }));
@@ -44,6 +54,7 @@ export default function CameraPage() {
   };
 
   const setOff = () => {
+    rtc.stop();
     liveRef.current = false;
     startingRef.current = false;
     setLive(false);
@@ -97,6 +108,7 @@ export default function CameraPage() {
 
   const startCamera = (front) => {
     if (startingRef.current) return;
+    rtc.reset(); // fresh WebRTC attempt per start; the server restarts us on JPEG
     suppressFramesUntilRef.current = 0;
     applyFront(front);
     setIntent(front);
@@ -158,7 +170,11 @@ export default function CameraPage() {
           if (msg.typeByte !== 0x02) return; // Only process camera frames
           if (!liveRef.current && !startingRef.current) return;
           if (Date.now() < suppressFramesUntilRef.current) return;
+          // Just switched to WebRTC: a JPEG still in flight must not cover the video.
+          if (rtc.isVideoFresh()) return;
           if (!liveRef.current) markLive();
+          rtc.showJpeg();
+          rtc.start();
           latestBlobRef.current = msg.blob;
           drawLatestFrame();
           break;
@@ -246,7 +262,15 @@ export default function CameraPage() {
       <canvas
         ref={canvasRef}
         className="cam-canvas"
-        style={{ display: live ? 'block' : 'none' }}
+        style={{ display: live && !rtc.videoActive ? 'block' : 'none' }}
+      />
+      <video
+        ref={videoRef}
+        className="cam-canvas cam-video"
+        autoPlay
+        playsInline
+        muted
+        style={{ display: live && rtc.videoActive ? 'block' : 'none' }}
       />
 
       {!live && (
@@ -360,6 +384,10 @@ export default function CameraPage() {
           max-width: 90vw;
           max-height: calc(95vh - 120px);
           box-shadow: 0 8px 48px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.05);
+        }
+
+        .cam-video {
+          background: #000;
         }
 
         .cam-placeholder {

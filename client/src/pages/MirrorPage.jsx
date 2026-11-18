@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useDevice } from '../context/DeviceContext';
+import { useRtcStream } from '../hooks/useRtcStream';
 import {
   Play,
   Square,
@@ -56,6 +57,7 @@ export default function MirrorPage() {
   const [showFlashMenu, setShowFlashMenu] = useState(false);
 
   const canvasRef = useRef(null);
+  const videoRef = useRef(null);
   const pointerStartRef = useRef(null);
   const suppressFramesUntilRef = useRef(0);
   const renderingRef = useRef(false);
@@ -77,6 +79,20 @@ export default function MirrorPage() {
     clearTimeout(noticeTimeoutRef.current);
     noticeTimeoutRef.current = setTimeout(() => setNotice(''), 5000);
   };
+
+  // WebRTC video (direct or via our TURN relay); JPEG on the canvas is the
+  // instant start and the fallback. Touch input always goes to the canvas, so
+  // keep its pixel size in step with the video (rotation while on WebRTC).
+  const rtc = useRtcStream('screen', videoRef, {
+    onVideoFrame: (video) => {
+      if (!streamingRef.current && startingRef.current) markStreaming();
+      const canvas = canvasRef.current;
+      if (canvas && video.videoWidth && (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight)) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+      }
+    },
+  });
 
   // High-performance direct canvas frame renderer
   // Discards intermediate frames while rendering to guarantee absolute latest frame with zero queue delay
@@ -122,6 +138,7 @@ export default function MirrorPage() {
   };
 
   const setOff = () => {
+    rtc.stop();
     streamingRef.current = false;
     startingRef.current = false;
     setStreaming(false);
@@ -141,6 +158,7 @@ export default function MirrorPage() {
 
   const startStream = () => {
     if (startingRef.current || streamingRef.current) return;
+    rtc.reset(); // fresh WebRTC attempt per start; the server restarts us on JPEG
     setIntent();
     setStreamError('');
     suppressFramesUntilRef.current = 0;
@@ -234,7 +252,11 @@ export default function MirrorPage() {
           if (msg.typeByte !== 0x01) return; // Only process screen frames
           if (!streamingRef.current && !startingRef.current) return;
           if (Date.now() < suppressFramesUntilRef.current) return;
+          // Just switched to WebRTC: a JPEG still in flight must not cover the video.
+          if (rtc.isVideoFresh()) return;
           if (!streamingRef.current) markStreaming();
+          rtc.showJpeg();
+          rtc.start();
 
           latestBlobRef.current = msg.blob;
           drawLatestFrame();
@@ -538,6 +560,14 @@ export default function MirrorPage() {
             onPointerCancel={handlePointerCancel}
             onWheel={handleWheel}
           />
+          <video
+            ref={videoRef}
+            className="phone-video"
+            autoPlay
+            playsInline
+            muted
+            style={{ opacity: streaming && rtc.videoActive ? 1 : 0 }}
+          />
 
           {!streaming && (
             <div className="stream-overlay">
@@ -798,6 +828,15 @@ export default function MirrorPage() {
           width: 100%;
           height: 100%;
           object-fit: contain;
+        }
+        .phone-video {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
+          pointer-events: none; /* taps go through to the canvas */
+          background: transparent;
         }
         .phone-canvas.active-stream {
           cursor: crosshair;
