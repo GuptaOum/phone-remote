@@ -141,6 +141,9 @@ const RTC_KINDS = {
   camera: { ready: 'camRtcReady', offered: 'camRtcOffered', probing: 'camRtcProbing', wants: 'wantsCamera', mode: 'camRtcMode', cap: 'webrtc_camera', msg: 'camera_mode' },
 };
 const rtcKind = (k) => (k === 'camera' ? 'camera' : 'screen');
+// On phone re-register (= network switch), tell watching tabs to ICE-restart
+// their peers right away (pairs with ICE_RESTART in useRtcStream.js).
+const ICE_RESTART_HINT = true;
 
 /**
  * Transport for one kind — WebRTC first: as soon as EVERY tab that wants it
@@ -729,6 +732,17 @@ function setupSignaling(wss, app) {
               });
               bcast([...acc.browsers], { type: 'device_online', deviceId: ws.deviceId, name: ws.deviceName, model: ws.model });
               console.log(`📱 Phone connected  user=${ws.userId.slice(0, 8)} device=${ws.deviceId.slice(0, 8)} agent=${ws.agent || 'app'} (${ws.model}, ${ws.screenW}×${ws.screenH}) caps=[${ws.caps.join(',') || 'none'}]`);
+              // A phone re-registering mid-stream almost always means its network
+              // changed (Wi-Fi ↔ cellular). Its WebRTC peers survive but their
+              // network path is dead: tell those tabs to ICE-restart right away
+              // instead of waiting for WebRTC's own timeouts.
+              for (const b of ICE_RESTART_HINT ? viewersOf(acc, ws.deviceId) : []) {
+                for (const [kind, k] of Object.entries(RTC_KINDS)) {
+                  if (ws.caps.includes(k.cap) && (b[k.ready] || b[k.offered] || b[k.probing])) {
+                    b.send(j({ type: 'rtc_restart', kind }));
+                  }
+                }
+              }
             }).catch((e) => console.error('register device check failed:', e.message));
           } else {
             const prevWatch = ws.watchId;
@@ -783,9 +797,12 @@ function setupSignaling(wss, app) {
             }
             phone.send(j({
               type: msg.type, kind, from: ws.id, sdp: msg.sdp, candidate: msg.candidate,
+              restart: msg.type === 'rtc_offer' && msg.restart ? true : undefined,
               iceServers: msg.type === 'rtc_offer' ? iceServers(ws.userId) : undefined,
             }));
-            if (msg.type === 'rtc_offer') {
+            // An ICE restart renegotiates an existing peer: its mode flags stay
+            // as set by rtc_recovering / rtc_ready.
+            if (msg.type === 'rtc_offer' && !msg.restart) {
               ws[RTC_KINDS[kind].offered] = !msg.probe;
               ws[RTC_KINDS[kind].probing] = !!msg.probe;
               updateRtcMode(kind, ws.userId, ws.watchId);
@@ -799,6 +816,19 @@ function setupSignaling(wss, app) {
         case 'rtc_error':
           if (ws.role === 'phone') sendToTab(msg.to, { type: msg.type, kind: rtcKind(msg.kind), sdp: msg.sdp, reason: msg.reason });
           break;
+        // The tab's peer lost its network path and is ICE-restarting: treat it
+        // like a probe (phone shows JPEG meanwhile) until rtc_ready.
+        case 'rtc_recovering': {
+          if (ws.role !== 'browser' || !ws.watchId) return;
+          const kind = rtcKind(msg.kind);
+          const k = RTC_KINDS[kind];
+          ws[k.ready] = false;
+          ws[k.offered] = false;
+          ws[k.probing] = true;
+          updateRtcMode(kind, ws.userId, ws.watchId);
+          console.log(`🔁 WebRTC ${kind} recovering (ICE restart) user=${ws.userId.slice(0, 8)} device=${ws.watchId.slice(0, 8)}`);
+          break;
+        }
         case 'rtc_ready':
         case 'rtc_failed': {
           if (ws.role !== 'browser' || !ws.watchId) return;

@@ -112,6 +112,39 @@ class ConnectionForegroundService : Service() {
             // segment is acked — up to a full round-trip of added latency.
             .socketFactory(NoDelaySocketFactory())
             .build()
+        watchNetworkChanges()
+    }
+
+    // ── Network switch (Wi-Fi ↔ cellular) ────────────────────────────────────
+    // The old socket is dead the moment the default network changes, but OkHttp
+    // only notices at the next missed ping (10-20s). Reconnect right away: the
+    // server sees the phone re-register and tells watching browsers to ICE-
+    // restart their WebRTC peers, so video recovers in seconds.
+    private var netCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    private var currentNetwork: android.net.Network? = null
+
+    private fun watchNetworkChanges() {
+        val cm = getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val cb = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                handler.post {
+                    val previous = currentNetwork
+                    currentNetwork = network
+                    // First callback is just the current network; only a change counts.
+                    if (previous == null || previous == network) return@post
+                    if (authFailed || serverUrl.isEmpty()) return@post
+                    android.util.Log.i("PhoneRemote", "network changed → reconnecting now")
+                    reconnectDelay = 1
+                    doConnect()
+                }
+            }
+        }
+        try {
+            cm.registerDefaultNetworkCallback(cb)
+            netCallback = cb
+        } catch (e: Exception) {
+            android.util.Log.e("PhoneRemote", "network callback unavailable: $e")
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -1458,6 +1491,10 @@ class ConnectionForegroundService : Service() {
     override fun onDestroy() {
         instance = null
         cancelReconnect()
+        netCallback?.let {
+            try { (getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager).unregisterNetworkCallback(it) } catch (_: Exception) {}
+        }
+        netCallback = null
         stopLocationUpdates()
         // Logout, the notification's Stop, or a removed device: nobody can
         // watch anymore, so don't leave the screen or camera being captured.

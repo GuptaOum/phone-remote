@@ -107,7 +107,15 @@ class WebRtcStreamer(
             val from = json.optString("from")
             if (from.isEmpty()) return@post
             when (json.optString("type")) {
-                "rtc_offer" -> handleOffer(from, json.optString("sdp"), json.optJSONArray("iceServers"))
+                "rtc_offer" -> {
+                    val sdp = json.optString("sdp")
+                    val ice = json.optJSONArray("iceServers")
+                    // ICE restart (network changed): renegotiate the SAME peer — a
+                    // new one would bring a new DTLS identity the browser rejects.
+                    val peer = peers[from]
+                    if (json.optBoolean("restart") && peer != null && peer.remoteSet) restartIce(from, peer, sdp, ice)
+                    else handleOffer(from, sdp, ice)
+                }
                 "rtc_ice" -> handleIce(from, json.optJSONObject("candidate"))
                 "rtc_close" -> closePeer(from)
             }
@@ -218,8 +226,7 @@ class WebRtcStreamer(
     private fun handleOffer(from: String, sdp: String, iceServers: JSONArray?) {
         closePeer(from)
         if (!ensureInit()) return sendError(from, "unsupported")
-        val config = PeerConnection.RTCConfiguration(parseIceServers(iceServers))
-            .apply { sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN }
+        val config = rtcConfig(iceServers)
 
         val peer = Peer()
         val pc = factory!!.createPeerConnection(config, observer(from, peer))
@@ -231,6 +238,42 @@ class WebRtcStreamer(
         pc.setRemoteDescription(object : SdpCallback() {
             override fun onSetSuccess() { h.post { onRemoteSet(from, peer) } }
             override fun onSetFailure(e: String?) { h.post { fail(from, peer, "bad_offer") } }
+        }, SessionDescription(SessionDescription.Type.OFFER, sdp))
+    }
+
+    private fun rtcConfig(iceServers: JSONArray?) =
+        PeerConnection.RTCConfiguration(parseIceServers(iceServers)).apply {
+            sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+            // Keep gathering after connecting: when the phone changes network
+            // (Wi-Fi ↔ cellular) new candidates are found and sent right away.
+            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+        }
+
+    /** Answer an ICE-restart offer on the existing connection: new network path, same media. */
+    private fun restartIce(from: String, peer: Peer, sdp: String, iceServers: JSONArray?) {
+        try { peer.pc.setConfiguration(rtcConfig(iceServers)) } catch (_: Exception) {} // fresh TURN credentials
+        Log.i(TAG, "rtc ${kind.label}: ICE restart from browser")
+        peer.pc.setRemoteDescription(object : SdpCallback() {
+            override fun onSetSuccess() {
+                h.post {
+                    if (peers[from] !== peer) return@post
+                    peer.pc.createAnswer(object : SdpCallback() {
+                        override fun onCreateSuccess(answer: SessionDescription) {
+                            h.post {
+                                if (peers[from] !== peer) return@post
+                                peer.pc.setLocalDescription(object : SdpCallback() {
+                                    override fun onSetSuccess() {
+                                        send(msg("rtc_answer", from).put("sdp", answer.description).toString())
+                                    }
+                                    override fun onSetFailure(e: String?) { h.post { fail(from, peer, "restart_failed") } }
+                                }, answer)
+                            }
+                        }
+                        override fun onCreateFailure(e: String?) { h.post { fail(from, peer, "restart_failed") } }
+                    }, MediaConstraints())
+                }
+            }
+            override fun onSetFailure(e: String?) { h.post { fail(from, peer, "restart_failed") } }
         }, SessionDescription(SessionDescription.Type.OFFER, sdp))
     }
 
