@@ -38,8 +38,11 @@ services:
       - PORT=3000
       - FILE_DIR=/app/filestore
       - TURN_SECRET_FILE=/run/turn/secret
+      - DOWNLOADS_DIR=/app/downloads
     volumes:
       - ./server/data:/app/server/data
+      # APK etc., served at the site root (e.g. /phone-remote.apk)
+      - ./downloads:/app/downloads:ro
       - /home/ubuntu/PhoneRemote:/app/filestore
       - turn-secret:/run/turn:ro
     depends_on:

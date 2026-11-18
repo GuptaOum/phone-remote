@@ -46,6 +46,10 @@ async function main() {
     app.use(express.static(CLIENT_DIST));
   }
   app.use(express.static(PUBLIC));
+  // Large downloads (the Android APK) live in a mounted folder, not the image:
+  // replacing the APK is a file copy, no rebuild. Served at the site root.
+  const DOWNLOADS = process.env.DOWNLOADS_DIR;
+  if (DOWNLOADS && fs.existsSync(DOWNLOADS)) app.use(express.static(DOWNLOADS));
 
   // Page routes
   if (CLIENT_DIST) {

@@ -9,3 +9,5 @@ server/__pycache__
 **/.env
 *.pem
 flutter_app
+*.apk
+downloads
