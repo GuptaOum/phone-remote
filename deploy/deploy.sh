@@ -64,7 +64,10 @@ public_ok() {
   return 1
 }
 
-live_color() { sed -n 's/.*app-\(blue\|green\):3000.*/\1/p' "$UPSTREAM" 2>/dev/null | head -1; }
+live_color() {
+  [ -f "$UPSTREAM" ] || return 0
+  sed -n 's/.*app-\(blue\|green\):3000.*/\1/p' "$UPSTREAM" | head -1
+}
 
 point_nginx() {
   printf 'set $app_upstream http://app-%s:3000;\n' "$1" > "$UPSTREAM.tmp"
@@ -75,7 +78,11 @@ reload_nginx() {
   docker exec phone-remote-nginx nginx -t -q && docker exec phone-remote-nginx nginx -s reload
 }
 
-PREV=$(git rev-parse HEAD)
+# Compare against the last commit that deployed successfully, not HEAD, so a
+# run that dies half-way can't hide its changes from the next one.
+DEPLOYED_FILE="$STATE_DIR/deployed"
+PREV=$(cat "$DEPLOYED_FILE" 2>/dev/null || true)
+git cat-file -e "${PREV:-none}^{commit}" 2>/dev/null || PREV=$(git rev-parse HEAD)
 git fetch -q origin main
 NEW=$(git rev-parse origin/main)
 
@@ -93,11 +100,16 @@ else
   if grep -qE '^(Dockerfile|\.dockerignore|client/|server/)' <<<"$FILES"; then APP=1; fi
   if grep -qE '^nginx/' <<<"$FILES"; then NGINX=1; fi
 fi
-WHAT="$([ $APP = 1 ] && echo -n 'app ')$([ $NGINX = 1 ] && echo -n 'nginx ')$([ $INFRA = 1 ] && echo -n 'turn')"
+WHAT=""
+[ $APP = 1 ] && WHAT="$WHAT app"
+[ $NGINX = 1 ] && WHAT="$WHAT nginx"
+[ $INFRA = 1 ] && WHAT="$WHAT turn"
+WHAT="${WHAT# }"
 log "deploying $(git log --oneline -1 "$NEW")  (was ${PREV:0:7}) → ${WHAT:-nothing}"
 git merge -q --ff-only "$NEW"
 
 if [ -z "$WHAT" ]; then
+  echo "$NEW" > "$DEPLOYED_FILE"
   log "✅ no server changes (docs / CI / Android only) — nothing restarted"
   exit 0
 fi
@@ -117,6 +129,7 @@ log "live: $LIVE"
 rollback() {
   log "❌ $1 — rolling back to ${PREV:0:7}"
   git reset -q --hard "$PREV"
+  echo "$PREV" > "$DEPLOYED_FILE"
   if [ $APP = 1 ] && [ -n "$OLD_IMG" ]; then docker tag "$OLD_IMG" "$APP_IMAGE" || true; fi
   if [ $NGINX = 1 ]; then
     [ "$LIVE" != legacy ] && point_nginx "$LIVE"
@@ -164,10 +177,13 @@ if [ $APP = 1 ]; then
   fi
 fi
 [ $INFRA = 1 ] && docker compose up -d --no-deps --no-build --remove-orphans nginx >/dev/null 2>&1 || true
-log "✅ healthy — $(docker ps --format '{{.Names}}: {{.Status}}' | tr '\n' ';')"
+echo "$NEW" > "$DEPLOYED_FILE"
+log "✅ healthy —$(docker ps --format '{{.Names}}: {{.Status}}' | tr '\n' ';')"
 
 log "pushing images to Docker Hub"
-PUSH="$([ $APP = 1 ] && echo app) $([ $NGINX = 1 ] && echo nginx)"
+PUSH=""
+[ $APP = 1 ] && PUSH="$PUSH app"
+[ $NGINX = 1 ] && PUSH="$PUSH nginx"
 for svc in $PUSH; do
   docker push -q "oumgupta/phone-remote-$svc:latest" >/dev/null || log "⚠️  push $svc failed (deploy is still live)"
 done
