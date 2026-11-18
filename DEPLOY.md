@@ -41,8 +41,8 @@
 
 Docs-only (`*.md`) and Android-only (`flutter_app/**`) pushes skip the deploy.
 Re-run by hand: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on the
-server `~/phone-remote/deploy/deploy.sh` (`FORCE=1` to rebuild an unchanged
-commit). Secrets: `EC2_HOST`, `EC2_SSH_KEY`, `EC2_KNOWN_HOSTS`.
+server `~/phone-remote/deploy/deploy.sh` (`FORCE=1` redeploys everything,
+`FORCE=app` / `FORCE=nginx` just that part, even with no new commit). Secrets: `EC2_HOST`, `EC2_SSH_KEY`, `EC2_KNOWN_HOSTS`.
 
 **Downtime:** none for page loads, REST and MCP calls. When the old app stops
 it closes its WebSockets (code 1012); phones and browsers reconnect to the new

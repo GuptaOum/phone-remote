@@ -2,7 +2,9 @@
 # Phone Remote — zero-downtime (blue-green) deploy on the EC2 host.
 #
 # Run by GitHub Actions on every push to main (see .github/workflows/deploy.yml),
-# or by hand:  ~/phone-remote/deploy/deploy.sh      (FORCE=1 to rebuild everything)
+# or by hand:  ~/phone-remote/deploy/deploy.sh
+#   FORCE=1      redeploy everything even if nothing changed
+#   FORCE=app    blue-green the app only      FORCE=nginx   recreate nginx only
 #
 # The CI SSH key is locked (authorized_keys forced command) to ~/bin/phone-remote-deploy,
 # which fetches origin/main and runs THIS file from it — so the newest version of
@@ -26,7 +28,7 @@
 #   4. push the new images to Docker Hub
 #
 # nginx itself can't be blue-greened (it owns ports 80/443); an nginx/ change
-# recreates it, which takes about a second. Those changes are rare.
+# recreates it (fast stop + start, about a second). Those changes are rare.
 set -euo pipefail
 
 cd "${REPO_DIR:-$HOME/phone-remote}"
@@ -74,6 +76,14 @@ point_nginx() {
   mv "$UPSTREAM.tmp" "$UPSTREAM"
 }
 
+# nginx's default stop (SIGQUIT) is graceful: it waits for every open
+# WebSocket and always runs into Docker's 10 s timeout. A fast stop (SIGTERM)
+# right before recreating it keeps the gap to about a second.
+recreate_nginx() {
+  docker stop -s TERM -t 3 phone-remote-nginx >/dev/null 2>&1 || true
+  docker compose up -d --no-deps --no-build nginx
+}
+
 reload_nginx() {
   docker exec phone-remote-nginx nginx -t -q && docker exec phone-remote-nginx nginx -s reload
 }
@@ -86,14 +96,19 @@ git cat-file -e "${PREV:-none}^{commit}" 2>/dev/null || PREV=$(git rev-parse HEA
 git fetch -q origin main
 NEW=$(git rev-parse origin/main)
 
-if [ "$PREV" = "$NEW" ] && [ "${FORCE:-0}" != 1 ]; then
+FORCE="${FORCE:-0}"
+if [ "$PREV" = "$NEW" ] && [ "$FORCE" = 0 ]; then
   log "already at $(git log --oneline -1)"
   exit 0
 fi
 
 APP=0 NGINX=0 INFRA=0
-if [ "${FORCE:-0}" = 1 ]; then
+if [ "$FORCE" = 1 ]; then
   APP=1 NGINX=1 INFRA=1
+elif [ "$FORCE" = app ]; then
+  APP=1
+elif [ "$FORCE" = nginx ]; then
+  NGINX=1
 else
   FILES=$(git diff --name-only "$PREV" "$NEW")
   if grep -qx 'docker-compose.yml' <<<"$FILES"; then APP=1 NGINX=1 INFRA=1; fi
@@ -133,7 +148,7 @@ rollback() {
   if [ $APP = 1 ] && [ -n "$OLD_IMG" ]; then docker tag "$OLD_IMG" "$APP_IMAGE" || true; fi
   if [ $NGINX = 1 ]; then
     [ "$LIVE" != legacy ] && point_nginx "$LIVE"
-    { docker compose build -q nginx && docker compose up -d --no-deps --no-build nginx; } || true
+    { docker compose build -q nginx && recreate_nginx; } || true
   elif [ "$LIVE" != legacy ]; then
     point_nginx "$LIVE"; reload_nginx || true
   fi
@@ -157,7 +172,7 @@ fi
 [ "$TARGET" != legacy ] && point_nginx "$TARGET"
 if [ $NGINX = 1 ]; then
   docker compose build -q nginx
-  docker compose up -d --no-deps --no-build nginx || rollback "nginx failed to start"
+  recreate_nginx || rollback "nginx failed to start"
 elif [ $APP = 1 ]; then
   reload_nginx || rollback "nginx rejected the switch"
 fi
