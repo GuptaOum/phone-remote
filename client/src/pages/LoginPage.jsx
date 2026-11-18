@@ -24,7 +24,14 @@ export function LoginPage() {
       } else {
         await login(email, password);
       }
-      navigate('/dashboard');
+      // Return to where the user was sent from (e.g. the OAuth approval page
+      // when connecting an AI client). Same-origin paths only — no open redirect.
+      const next = new URLSearchParams(window.location.search).get('next') || '';
+      if (next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\')) {
+        window.location.assign(next);
+      } else {
+        navigate('/dashboard');
+      }
     } catch (err) {
       setError(err.message || 'Authentication failed');
     } finally {

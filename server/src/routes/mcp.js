@@ -983,9 +983,6 @@ function createPhoneRemoteServer() {
   return server;
 }
 
-// Singleton server instance for internal tool dispatching and tool introspection
-const internalServerInstance = createPhoneRemoteServer();
-
 function setupMcpRoutes(app) {
   // One-time upload target for send_local_file
   app.post('/mcp/upload/:token', express.raw({ type: () => true, limit: '110mb' }), async (req, res) => {
@@ -1075,41 +1072,6 @@ document.getElementById('go').onclick = async () => {
     res.setHeader('Content-Type', mime.lookup(d.name) || 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${d.name.replace(/"/g, '')}"`);
     res.send(d.buffer);
-  });
-
-  // Internal endpoint for FastMCP Python companion service / scripts
-  app.post('/api/internal/call-tool', async (req, res) => {
-    try {
-      const clientIp = req.socket.remoteAddress;
-      const isLoopback = clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === '::ffff:127.0.0.1';
-      if (!isLoopback) return res.status(403).json({ error: 'Access denied: loopback only' });
-
-      const expectedSecret = process.env.INTERNAL_BRIDGE_SECRET || 'phone-remote-internal-bridge-secret-key-2026';
-      const providedSecret = req.headers['x-internal-secret'];
-      if (providedSecret !== expectedSecret) return res.status(401).json({ error: 'Unauthorized: invalid bridge secret' });
-
-      const authHeader = req.headers.authorization;
-      const token = authHeader?.replace(/^Bearer /, '') || req.body?.token;
-      let userId = null;
-      if (token) {
-        const payload = verifyToken(token);
-        if (payload) userId = payload.uid;
-      }
-      if (!userId) userId = process.env.DEFAULT_USER_ID || '34256f0e-a22f-42ea-9f26-344cf5c3354a';
-
-      const { name, args } = req.body || {};
-      const baseUrl = `${process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`}`.replace(/\/$/, '');
-      const tool = internalServerInstance._registeredTools[name];
-      if (!tool) {
-        return res.status(404).json({ content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true });
-      }
-
-      const result = await tool.handler(args || {}, { authInfo: { userId, baseUrl } });
-      res.json(result);
-    } catch (err) {
-      console.error('Internal call-tool error:', err);
-      res.status(500).json({ content: [{ type: 'text', text: `Internal error: ${err.message}` }], isError: true });
-    }
   });
 
   // Cursor/Claude compatibility probes

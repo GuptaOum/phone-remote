@@ -28,6 +28,19 @@
   h1 { font-size: 20px; letter-spacing: -.3px; margin-bottom: 8px; }
   .client-name { color: var(--accent2); font-weight: 600; }
   .sub { color: var(--muted); font-size: 13px; margin-bottom: 26px; line-height: 1.6; }
+  .account {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin: -10px 0 18px;
+    font-size: 12.5px;
+    line-height: 1.7;
+  }
+  .account-label { color: var(--muted); display: block; }
+  .account-email { color: var(--text); font-weight: 600; word-break: break-all; display: block; }
+  .account-switch { color: var(--accent2); font-size: 12px; text-decoration: none; }
+  .account-switch:hover { text-decoration: underline; }
   .perms {
     text-align: left;
     background: var(--bg3);
@@ -59,6 +72,11 @@
   <div class="logo"></div>
   <h1>Connecting <span class="client-name" id="client-name">an app</span></h1>
   <div class="sub">wants to access your Phone Remote account and control your linked phones.</div>
+  <div class="account" id="account">
+    <span class="account-label">Signed in as</span>
+    <span class="account-email" id="account-email">checking…</span>
+    <a href="#" class="account-switch" onclick="switchAccount(); return false;">Not you? Switch account</a>
+  </div>
   <ul class="perms">
     <li>View your connected devices</li>
     <li>Send touch, swipe, and text commands</li>
@@ -91,8 +109,41 @@
     const token = localStorage.getItem('pr_token');
     if (!token) {
       // Not logged in — send through the normal login page, then back here
-      location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+      goToLogin();
+    } else {
+      showAccount(token);
     }
+  }
+
+  function goToLogin() {
+    location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+  }
+
+  function clearSession() {
+    ['pr_token', 'pr_email', 'pr_device'].forEach((k) => localStorage.removeItem(k));
+  }
+
+  // Show which account will be linked, so a browser logged in to the wrong
+  // account can't silently connect it. An expired token goes back to login.
+  async function showAccount(token) {
+    const approveBtn = document.getElementById('approve-btn');
+    approveBtn.disabled = true;
+    try {
+      const res = await fetch('/api/me', { headers: { Authorization: 'Bearer ' + token } });
+      if (res.status === 401 || res.status === 404) { clearSession(); goToLogin(); return; }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const me = await res.json();
+      document.getElementById('account-email').textContent = me.email;
+      approveBtn.disabled = false;
+    } catch (e) {
+      document.getElementById('account-email').textContent = 'unknown';
+      showErr('Could not verify your account (' + e.message + '). Reload to try again.');
+    }
+  }
+
+  function switchAccount() {
+    clearSession();
+    goToLogin();
   }
 
   function deny() {

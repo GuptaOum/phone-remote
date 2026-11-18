@@ -13,11 +13,11 @@
 | Security group | `sg-072b858b2f5b6e632` — 22/80/443 tcp, 3478 tcp+udp, 49160-49200 udp (TURN relay). 22 is open to all on purpose (key-only SSH) |
 | SSH key | `ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152` |
 | Database | SQLite, bind-mounted `~/phone-remote/server/data` → container |
-| Process | **Docker Compose** — `phone-remote-nginx`, `phone-remote-app`, `phone-remote-mcp`, `phone-remote-turn` (coturn, host network) + one-shot `phone-remote-turn-init` (creates the TURN secret in volume `turn-secret` on first run). `restart: unless-stopped`. PM2 and host nginx are disabled. |
+| Process | **Docker Compose** — `phone-remote-nginx`, `phone-remote-app` (also serves MCP at `/mcp`), `phone-remote-turn` (coturn, host network) + one-shot `phone-remote-turn-init` (creates the TURN secret in volume `turn-secret` on first run). `restart: unless-stopped`. PM2 and host nginx are disabled. |
 | TURN | coturn 4.7.0 on 3478 udp/tcp **and TLS on 443** (`turns:turn.<domain>:443`, via nginx). Relay ports 49160-49200 udp, relays only on the instance's private IP (`relay-ip`, `external-ip=public/private`, own IP allowed as peer so relay↔relay works). Public/private IP auto-detected (override `TURN_EXTERNAL_IP` / `TURN_PRIVATE_IP`). App signs 24 h credentials (`server/src/services/turn.js`, `TURN_TLS_HOST`); private/loopback peers denied. |
-| WebRTC | Screen + camera stream WebRTC-first (direct → relay UDP/TCP → relay TLS 443), JPEG over WebSocket only as last resort. ICE restart on network switch (flags: `ICE_RESTART` in `client/src/hooks/useRtcStream.js`, `ICE_RESTART_HINT` in `server/src/services/signaling.js`) |
+| WebRTC | Screen + camera stream WebRTC-first (direct → relay UDP/TCP → relay TLS 443), WebRTC-only (`JPEG_FALLBACK=false`). ICE restart on network switch (flags: `ICE_RESTART` in `client/src/hooks/useRtcStream.js`, `ICE_RESTART_HINT` in `server/src/services/signaling.js`) |
 | APK download | `https://65-1-96-152.sslip.io/phone-remote.apk` served from **`~/phone-remote/downloads/`** (mounted read-only, not in the image) |
-| Images | Docker Hub `oumgupta/phone-remote-{app,mcp,nginx}:latest` |
+| Images | Docker Hub `oumgupta/phone-remote-{app,nginx}:latest` |
 | Build toolchain | Flutter 3.44.6 + Android SDK 36 + NDK 28.2 on-instance (`~/flutter`, `~/android-sdk`) |
 
 **Bring everything up (server, MCP, nginx, TURN):** `cd ~/phone-remote && sudo docker compose up -d --build`
@@ -47,7 +47,7 @@ the `cp` into `downloads/` — no image rebuild needed.
 (`host`/`srflx`/`prflx` = direct, `relay` = through coturn). The server logs
 `🔗 WebRTC <kind> connected|failed → JPEG` and `🔁 … recovering`.
 
-**Push images:** `docker push oumgupta/phone-remote-app:latest` (same for `-mcp`, `-nginx`; the ubuntu user is logged in to Docker Hub).
+**Push images:** `docker push oumgupta/phone-remote-app:latest` (same for `-nginx`; the ubuntu user is logged in to Docker Hub).
 
 If you later buy a real domain: Route 53 A-records for **both** `yourdomain.com`
 and `turn.yourdomain.com` → 65.1.96.152, then

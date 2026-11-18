@@ -21,7 +21,6 @@ services:
       - /var/www/certbot:/var/www/certbot:ro
     depends_on:
       - app
-      - mcp
 
   # 2. Web Frontend (React + Vite) & Express Node.js Backend
   app:
@@ -55,27 +54,7 @@ services:
       turn-init:
         condition: service_completed_successfully
 
-  # 3. FastMCP Python Server (AI Agent Tool Endpoint)
-  mcp:
-    build:
-      context: .
-      dockerfile: Dockerfile.mcp
-    image: oumgupta/phone-remote-mcp:latest
-    container_name: phone-remote-mcp
-    restart: unless-stopped
-    expose:
-      - "8001"
-    ports:
-      - "127.0.0.1:8001:8001"
-    env_file:
-      - ./server/.env
-    environment:
-      - MCP_PORT=8001
-      - BACKEND_URL=http://app:3000
-    depends_on:
-      - app
-
-  # 4. One-shot: creates the TURN shared secret on first run, keeps it after.
+  # 3. One-shot: creates the TURN shared secret on first run, keeps it after.
   #    The app signs short-lived TURN credentials with it; coturn verifies them.
   turn-init:
     image: coturn/coturn:4.7.0
@@ -93,7 +72,7 @@ services:
         fi
         chmod 444 /run/turn/secret
 
-  # 5. TURN/STUN relay for WebRTC when a direct phone↔browser path is blocked.
+  # 4. TURN/STUN relay for WebRTC when a direct phone↔browser path is blocked.
   #    Host networking: the relay needs the 49160-49200 UDP range and the real
   #    public address. EC2 security group must allow 3478 tcp/udp + that range.
   coturn:
