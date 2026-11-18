@@ -12,6 +12,9 @@ services:
       - "443:443"
     environment:
       - DOMAIN=${DOMAIN:-65-1-96-152.sslip.io}
+    # TURN-over-TLS is forwarded to coturn, which runs on the host network.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /etc/letsencrypt:/etc/letsencrypt:ro
       # certbot (on the host) writes HTTP-01 challenges here for renewals
@@ -38,6 +41,9 @@ services:
       - PORT=3000
       - FILE_DIR=/app/filestore
       - TURN_SECRET_FILE=/run/turn/secret
+      # TURN over TLS on 443 (nginx routes this hostname to coturn); the
+      # site's cert must also cover it.
+      - TURN_TLS_HOST=turn.${DOMAIN:-65-1-96-152.sslip.io}
       - DOWNLOADS_DIR=/app/downloads
     volumes:
       - ./server/data:/app/server/data

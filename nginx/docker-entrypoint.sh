@@ -6,7 +6,8 @@ set -e
 DOMAIN="${DOMAIN:-localhost}"
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 
-sed -i "s#__DOMAIN__#$DOMAIN#g" /etc/nginx/conf.d/default.conf
+CONFS="/etc/nginx/conf.d/default.conf /etc/nginx/stream.d/stream.conf"
+sed -i "s#__DOMAIN__#$DOMAIN#g" $CONFS
 
 if [ ! -f "$CERT_DIR/fullchain.pem" ] || [ ! -f "$CERT_DIR/privkey.pem" ]; then
     echo "⚠️  SSL certificates not found at $CERT_DIR. Creating fallback self-signed cert..."
@@ -16,7 +17,7 @@ if [ ! -f "$CERT_DIR/fullchain.pem" ] || [ ! -f "$CERT_DIR/privkey.pem" ]; then
         -keyout "$CERT_DIR/privkey.pem" \
         -out "$CERT_DIR/fullchain.pem" \
         -subj "/CN=$DOMAIN"
-    sed -i "s#/etc/letsencrypt/live/$DOMAIN/#$CERT_DIR/#g" /etc/nginx/conf.d/default.conf
+    sed -i "s#/etc/letsencrypt/live/$DOMAIN/#$CERT_DIR/#g" $CONFS
     echo "✅ Fallback self-signed certificate created."
 fi
 

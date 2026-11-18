@@ -44,7 +44,13 @@ function iceServers(userId) {
   return [
     STUN,
     {
-      urls: [`turn:${host}:${PORT}?transport=udp`, `turn:${host}:${PORT}?transport=tcp`],
+      urls: [
+        `turn:${host}:${PORT}?transport=udp`,
+        `turn:${host}:${PORT}?transport=tcp`,
+        // TURN over TLS on 443: looks like normal HTTPS, so it gets through
+        // firewalls that only allow web traffic (nginx routes it to coturn).
+        ...(process.env.TURN_TLS_HOST ? [`turns:${process.env.TURN_TLS_HOST}:443?transport=tcp`] : []),
+      ],
       username,
       credential,
     },
