@@ -52,9 +52,9 @@ function setupOAuthRoutes(app) {
   });
 
   // ── Dynamic client registration ─────────────────────────────────────────
-  r.post('/register', (req, res) => {
+  r.post('/register', async (req, res) => {
     try {
-      const client = oauthStore.registerClient(req.body || {});
+      const client = await oauthStore.registerClient(req.body || {});
       res.status(201).json({
         client_id: client.client_id,
         redirect_uris: client.redirect_uris,
@@ -74,13 +74,18 @@ function setupOAuthRoutes(app) {
   });
 
   // Called by the page's script once it has a Phone Remote login token
-  r.post('/authorize', (req, res) => {
+  r.post('/authorize', async (req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer /, '');
     const payload = token && verifyToken(token);
     if (!payload) return res.status(401).json({ error: 'invalid_token' });
 
     const { client_id, redirect_uri, code_challenge, code_challenge_method, state } = req.body || {};
-    const client = client_id && oauthStore.getClient(client_id);
+    let client = null;
+    try {
+      client = client_id && await oauthStore.getClient(client_id);
+    } catch (e) {
+      return res.status(500).json({ error: 'server_error', error_description: e.message });
+    }
     if (!client) return res.status(400).json({ error: 'invalid_client' });
     if (!redirect_uri || !oauthStore.isRedirectUriAllowed(client, redirect_uri)) {
       return res.status(400).json({ error: 'invalid_request', error_description: 'redirect_uri not registered for this client' });

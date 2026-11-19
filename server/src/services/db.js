@@ -7,6 +7,7 @@
  * Schema:
  *   users   → id (uuid), email, password_hash, created_at
  *   devices → id (uuid from phone), user_id, name, model, last_seen
+ *   oauth_clients → MCP clients from dynamic registration (RFC 7591)
  */
 const path = require('path');
 const fs = require('fs');
@@ -43,6 +44,13 @@ async function init() {
         last_seen BIGINT
       )`);
     await impl.query('ALTER TABLE devices ADD COLUMN IF NOT EXISTS revoked_at BIGINT');
+    await impl.query(`
+      CREATE TABLE IF NOT EXISTS oauth_clients (
+        client_id     TEXT PRIMARY KEY,
+        redirect_uris TEXT NOT NULL,
+        client_name   TEXT,
+        created_at    BIGINT NOT NULL
+      )`);
     console.log('🗄️  Database: PostgreSQL');
   } else {
     const Database = require('better-sqlite3');
@@ -63,6 +71,12 @@ async function init() {
         name      TEXT,
         model     TEXT,
         last_seen INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS oauth_clients (
+        client_id     TEXT PRIMARY KEY,
+        redirect_uris TEXT NOT NULL,
+        client_name   TEXT,
+        created_at    INTEGER NOT NULL
       );`);
     // Migration: revoked_at marks devices removed from the dashboard
     try { db.exec('ALTER TABLE devices ADD COLUMN revoked_at INTEGER'); } catch (_) { /* already exists */ }
@@ -144,4 +158,24 @@ async function deleteDevice(id, userId) {
   await impl.query('DELETE FROM devices WHERE id = $1 AND user_id = $2', [id, userId]);
 }
 
-module.exports = { init, createUser, getUserByEmail, getUserById, upsertDevice, getDevice, revokeDeviceRow, touchDevice, listDevices, deleteDevice };
+// ── OAuth clients (MCP dynamic registration) ────────────────────────────────
+// Persisted so an agent's client_id (Claude, Cursor, Antigravity, …) keeps
+// working across server restarts and deploys.
+
+async function saveOAuthClient({ client_id, redirect_uris, client_name }) {
+  await impl.query(
+    'INSERT INTO oauth_clients (client_id, redirect_uris, client_name, created_at) VALUES ($1, $2, $3, $4)',
+    [client_id, JSON.stringify(redirect_uris), client_name, Date.now()]
+  );
+}
+
+async function getOAuthClient(clientId) {
+  const rows = await impl.query('SELECT * FROM oauth_clients WHERE client_id = $1', [clientId]);
+  if (!rows[0]) return null;
+  return { client_id: rows[0].client_id, redirect_uris: JSON.parse(rows[0].redirect_uris), client_name: rows[0].client_name };
+}
+
+module.exports = {
+  init, createUser, getUserByEmail, getUserById, upsertDevice, getDevice, revokeDeviceRow, touchDevice, listDevices, deleteDevice,
+  saveOAuthClient, getOAuthClient,
+};

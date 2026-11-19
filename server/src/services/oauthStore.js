@@ -1,37 +1,49 @@
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 
+const db = require('./db');
+
 /**
- * In-memory OAuth 2.1 client/code store — enough for the MCP authorization
- * flow (RFC 7591 dynamic client registration + RFC 7636 PKCE).
+ * OAuth 2.1 client/code store for the MCP authorization flow (RFC 7591
+ * dynamic client registration + RFC 7636 PKCE).
  *
- * Deliberately not persisted: clients are cheap to re-register (a connector
- * that finds its client_id gone just registers again transparently), and
- * codes live for ~60 seconds anyway. A server restart just means any
- * in-flight "Connect" click needs to be retried — acceptable for v1.
+ * Clients are persisted in the database: not every MCP client re-registers
+ * when its client_id is rejected, so losing them on each deploy (blue-green
+ * restarts the app) broke re-authentication for some agents. The Map is a
+ * cache. Codes live ~60 s and stay in memory.
  */
 
-const clients = new Map();        // client_id → { client_id, redirect_uris, client_name }
+const clients = new Map();        // cache: client_id → { client_id, redirect_uris, client_name }
 const codes = new Map();          // code → { clientId, userId, redirectUri, codeChallenge, expiresAt }
 
 const CODE_TTL_MS = 60_000;
 
-function registerClient({ redirect_uris, client_name }) {
+async function registerClient({ redirect_uris, client_name }) {
   if (!Array.isArray(redirect_uris) || !redirect_uris.length) {
     throw new Error('redirect_uris is required');
   }
-  const client_id = uuidv4();
+  // Rows are kept forever, so bound what one unauthenticated call can store.
+  if (redirect_uris.length > 10) throw new Error('too many redirect_uris (max 10)');
+  for (const u of redirect_uris) {
+    if (typeof u !== 'string' || u.length > 2000) throw new Error('each redirect_uri must be a string of at most 2000 characters');
+    try { new URL(u); } catch { throw new Error(`invalid redirect_uri: ${u}`); }
+  }
   const client = {
-    client_id,
+    client_id: uuidv4(),
     redirect_uris,
-    client_name: client_name || 'MCP Client',
+    client_name: String(client_name || 'MCP Client').slice(0, 200),
   };
-  clients.set(client_id, client);
+  await db.saveOAuthClient(client);
+  clients.set(client.client_id, client);
   return client;
 }
 
-function getClient(clientId) {
-  return clients.get(clientId) || null;
+async function getClient(clientId) {
+  if (typeof clientId !== 'string' || clientId.length > 100) return null;
+  if (clients.has(clientId)) return clients.get(clientId);
+  const client = await db.getOAuthClient(clientId);
+  if (client) clients.set(clientId, client);
+  return client;
 }
 
 function isRedirectUriAllowed(client, redirectUri) {
