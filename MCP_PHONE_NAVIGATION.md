@@ -3,7 +3,7 @@
 
 ---
 
-## ⚡ 1. The Phone Remote MCP Toolset (26 Standard Tools)
+## ⚡ 1. The Phone Remote MCP Toolset (31 Standard Tools)
 
 Every action performed on the phone MUST use one of these standard MCP tools. Never resort to non-MCP workarounds or ad-hoc scripts.
 
@@ -23,6 +23,11 @@ Every action performed on the phone MUST use one of these standard MCP tools. Ne
 | **`type_text`** | `deviceId`, `text`, `method` (`"set"` or `"paste"`), `submit` (bool) | Text injection status | Use `method="paste"` for WhatsApp and fields with existing hints. Use `submit=true` for search execution. |
 | **`press_key`** | `deviceId`, `key` (`"back"`, `"home"`, `"recents"`, `"lock"`) | Key event status | Dismiss keyboard/modals (`"back"`), return to launcher (`"home"`). |
 | **`open_app`** | `deviceId`, `package`, `name` | Launch status | Instant direct launch by package name in 1 single tool call. |
+| **`open_settings`** | `deviceId`, `page`, `package` (for app pages) | Open status | Jump straight to a Settings page (wifi, bluetooth, app_info, storage, accessibility...). Prefer over `android.settings.*` URLs. |
+| **`open_file`** | `deviceId`, `path`, `package` (optional) | Open status | Open a file in its default app, or a folder in the system Files app. |
+| **`find_unused_apps`** | `deviceId`, `days=30`, `minSizeMB` | Unused apps, biggest first | Best candidates for freeing storage. Read-only. |
+| **`clear_app_storage`** | `deviceId`, `package`, `what` (`cache`/`data`/`both`) | Size before/after | Cache is harmless; data wipes the app. Only for the app the user named. |
+| **`uninstall_app`** | `deviceId`, `package`, `confirm=true` | Uninstall status | PERMANENT. Only when the user explicitly asked for that app. |
 | **`open_app_drawer`**| `deviceId` | Drawer status | Opens launcher app drawer (fallback only). |
 | **`open_url`** | `deviceId`, `url` | Intent dispatch status | **Fastest Navigation Method**. Bypasses multiple UI steps via Android Deep Links. |
 | **`wait`** | `deviceId`, `seconds=1.5` | Sleep status | Use sparingly for animations where `wait_for` cannot match a specific node. |

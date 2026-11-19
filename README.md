@@ -307,29 +307,62 @@ Three steps, free:
    your agent things like *"take a screenshot of my phone"* or *"find apps I
    haven't used in a month"*.
 
-**Claude Code plugin (MCP + skill).** The plugin in [`plugin/`](plugin) adds the
-MCP server and a `phone-remote` skill that teaches the agent how to use it well
-(jump with deep links and `open_settings`/`open_file`, read the screen with
-`get_ui_tree`, safety rules, step-by-step recipes, troubleshooting):
-
-```
-/plugin install phone-remote --marketplace GuptaOum/phone-remote
-```
-
 No API key to copy: the server supports OAuth 2.1 discovery
 (`/.well-known/oauth-protected-resource`) with dynamic client registration and
 PKCE, so agents only need the URL.
 
-**Claude Code**
+#### The skill (recommended for every agent)
+
+The MCP server gives an agent the tools. The **`phone-remote` skill** in
+[`plugin/skills/phone-remote`](plugin/skills/phone-remote) teaches it to use
+them well: jump with deep links, `open_settings` and `open_file` instead of
+tapping through menus, read the screen with `get_ui_tree`, wait with
+`wait_for`, follow the safety rules (ask before sending, never type PINs), plus
+step-by-step recipes and a troubleshooting table. It uses the open Agent
+Skills `SKILL.md` format, so the same folder works in Claude Code, Codex,
+Cursor, Antigravity and other agents. One command installs it into whichever
+agents you have:
 
 ```bash
-claude mcp add --transport http phone-remote https://65-1-96-152.sslip.io/mcp
+npx skills add GuptaOum/phone-remote
 ```
 
-Then run `/mcp` in Claude Code and choose *Authenticate*.
+(Add `-g` to install it for your user instead of the current project, or
+`-a codex` / `-a cursor` / `-a antigravity` / `-a claude-code` to pick agents.)
+To install by hand, copy the `plugin/skills/phone-remote` folder into the
+agent's skills folder: `.claude/skills/`, `.codex/skills/`, `.cursor/skills/`
+or `.agents/skills/` (Antigravity) in a project.
+
+#### Connect the MCP server
+
+**Claude Code:** one command adds both the MCP server and the skill:
+
+```
+/plugin marketplace add GuptaOum/phone-remote
+/plugin install phone-remote@phone-remote
+```
+
+Then run `/mcp`, pick `plugin:phone-remote:phone-remote` and choose
+*Authenticate*. (MCP only, without the skill:
+`claude mcp add --transport http phone-remote https://65-1-96-152.sslip.io/mcp`.)
 
 **claude.ai, Claude Desktop, Claude mobile:** *Settings → Connectors → Add
-custom connector*, URL `https://65-1-96-152.sslip.io/mcp`.
+custom connector*, URL `https://65-1-96-152.sslip.io/mcp`. Connectors can't
+carry skills; the server's built-in instructions cover the basics.
+
+**OpenAI Codex (CLI and IDE extension):**
+
+```bash
+codex mcp add phone-remote --url https://65-1-96-152.sslip.io/mcp
+codex mcp login phone-remote
+```
+
+Or by hand in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.phone-remote]
+url = "https://65-1-96-152.sslip.io/mcp"
+```
 
 **Google Antigravity:** add to `mcp_config.json` (*Agent panel → … → MCP
 Servers → Manage MCP Servers → View raw config*):
@@ -342,7 +375,9 @@ Servers → Manage MCP Servers → View raw config*):
 }
 ```
 
-**Cursor:** `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project):
+**Cursor:** one click:
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=phone-remote&config=eyJ1cmwiOiJodHRwczovLzY1LTEtOTYtMTUyLnNzbGlwLmlvL21jcCJ9),
+or add to `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project):
 
 ```json
 {
@@ -389,15 +424,17 @@ returns one, valid for 30 days):
 |---|---|
 | Device and perception | `list_devices`, `get_device_status`, `get_location`, `get_foreground_app`, `get_ui_tree`, `wait_for`, `take_screenshot` |
 | Interaction | `tap`, `long_press`, `swipe`, `scroll`, `type_text`, `press_key`, `wait` |
-| Apps and navigation | `open_app`, `open_app_drawer`, `open_url` |
+| Apps and navigation | `open_app`, `open_app_drawer`, `open_url`, `open_settings`, `open_file` |
 | App storage | `list_apps` (with sizes), `find_unused_apps`, `clear_app_storage`, `uninstall_app` |
 | Hardware and notifications | `ring`, `flash_light`, `read_notifications` |
 | Files | `list_files`, `get_file`, `send_local_file`, `send_file`, `send_url` |
 
 `get_ui_tree` returns every visible text, button and input with ready-to-tap
 coordinates. Agents should prefer it over screenshots: it's faster, cheaper, and
-leaves no room for guessing pixels. For app-specific deep links and navigation
-recipes, see [MCP_PHONE_NAVIGATION.md](MCP_PHONE_NAVIGATION.md).
+leaves no room for guessing pixels. For how agents should combine the tools,
+see the [phone-remote skill](plugin/skills/phone-remote/SKILL.md); for a longer
+catalogue of deep links and packages, see
+[MCP_PHONE_NAVIGATION.md](MCP_PHONE_NAVIGATION.md).
 
 ---
 
