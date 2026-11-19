@@ -734,14 +734,55 @@ function createPhoneRemoteServer() {
     'com.android.vending', 'com.android.systemui', 'com.android.settings', 'com.android.phone',
   ]);
 
+  const nodeLabel = (x) => String(x.text || x.desc || '').trim();
+
   // Poll the UI tree until a node's text/label fully matches re. Returns the node or null.
-  async function findOnScreen(userId, deviceId, re, timeoutMs = 6000) {
-    const end = Date.now() + timeoutMs;
+  //
+  // Some phones pop up their own windows at random over Settings (ColorOS
+  // "clean up" suggestions, vendor phone-manager offers…), and not every phone
+  // has them. So while waiting:
+  //  - if `home` (the Settings package) is known and another app is in front,
+  //    press back once to close that popup;
+  //  - if `retap` (the row tapped to get here) is still on screen after a
+  //    moment, the tap was swallowed by a popup: tap it again;
+  //  - `alsoOk` ends the wait early: return { other: node } when it shows,
+  //    e.g. "Clear data" visible but no "Clear cache" (cache already empty).
+  async function findOnScreen(userId, deviceId, re, timeoutMs = 6000, opts = {}) {
+    const { home, retap, alsoOk } = opts;
+    const start = Date.now();
+    const end = start + timeoutMs;
+    let backs = 0;
+    let retaps = 0;
+    let otherSeenAt = 0;
     while (Date.now() < end) {
       try {
         const t = await fetchUiTree(userId, deviceId, false, 5000);
-        const n = (t.nodes || []).find((x) => re.test(String(x.text || x.desc || '').trim()));
+        const nodes = t.nodes || [];
+        const fg = t.package || t.app || '';
+        if (home && fg && fg !== home && backs < 2) {
+          backs++;
+          await runControl(userId, deviceId, { type: 'control', action: 'keyevent', keycode: KEY_MAP.back });
+          await sleep(700);
+          continue;
+        }
+        const n = nodes.find((x) => re.test(nodeLabel(x)));
         if (n) return n;
+        if (alsoOk) {
+          const o = nodes.find((x) => alsoOk.test(nodeLabel(x)));
+          // Give the target a moment to render before settling for the other one.
+          if (o && !otherSeenAt) otherSeenAt = Date.now();
+          if (o && Date.now() - otherSeenAt > 1500) return { other: o };
+        }
+        if (retap && retaps < 2 && Date.now() - start > 2000) {
+          // y > 0.15 skips the next page's title bar, which can carry the same words ("Storage usage").
+          const again = nodes.find((x) => x.y > 0.15 && retap.test(nodeLabel(x)));
+          if (again) {
+            retaps++;
+            await runControl(userId, deviceId, { type: 'control', action: 'tap', x: again.x, y: again.y });
+            await sleep(800);
+            continue;
+          }
+        }
       } catch { /* keep polling */ }
       await sleep(WAIT_POLL_MS);
     }
@@ -802,14 +843,22 @@ function createPhoneRemoteServer() {
 
       const storage = await findOnScreen(userId, deviceId, SETTINGS_STORAGE, 8000);
       if (!storage) return stuck('Storage');
+      // Remember which package Settings is, so a popup from any other app
+      // can be recognised and closed on the next steps.
+      let home = null;
+      try { home = (await fetchUiTree(userId, deviceId, false, 5000)).package || null; } catch { /* no popup handling */ }
       let err = await tapNode(storage);
       if (err) return err;
+      const step = { home, retap: SETTINGS_STORAGE };
 
       const done = [];
       if (mode === 'cache' || mode === 'both') {
-        const btn = await findOnScreen(userId, deviceId, SETTINGS_CLEAR_CACHE);
+        const btn = await findOnScreen(userId, deviceId, SETTINGS_CLEAR_CACHE, 8000, { ...step, alsoOk: SETTINGS_CLEAR_DATA });
         if (!btn) return stuck('Clear cache');
-        if (btn.f && btn.f.includes('d')) {
+        if (btn.other) {
+          // On the Storage page but no "Clear cache" button: some phones hide it when the cache is empty.
+          done.push('cache was already empty');
+        } else if (btn.f && btn.f.includes('d')) {
           done.push('cache was already empty');
         } else {
           err = await tapNode(btn);
@@ -819,8 +868,13 @@ function createPhoneRemoteServer() {
         }
       }
       if (mode === 'data' || mode === 'both') {
-        const btn = await findOnScreen(userId, deviceId, SETTINGS_CLEAR_DATA);
+        const btn = await findOnScreen(userId, deviceId, SETTINGS_CLEAR_DATA, 8000, step);
         if (!btn) return stuck('Clear data');
+        if (btn.f && btn.f.includes('d')) {
+          done.push('data was already empty');
+          const after = await appSizeMB(userId, deviceId, pkg);
+          return textResult(`${label}: ${done.join(', ')}.${after ? ` Size now ${after.totalMB} MB.` : ''}`);
+        }
         err = await tapNode(btn);
         if (err) return err;
         // Confirmation dialog: look for its button, but not the "Clear data"
