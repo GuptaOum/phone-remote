@@ -1,0 +1,12 @@
+{
+  "name": "phone-remote",
+  "owner": { "name": "GuptaOum" },
+  "metadata": { "description": "Control an Android phone from Claude: Phone Remote MCP plus usage skill." },
+  "plugins": [
+    {
+      "name": "phone-remote",
+      "source": "./plugin",
+      "description": "Phone Remote MCP connection plus a skill that teaches agents how to drive an Android phone well."
+    }
+  ]
+}

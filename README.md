@@ -307,6 +307,15 @@ Three steps, free:
    your agent things like *"take a screenshot of my phone"* or *"find apps I
    haven't used in a month"*.
 
+**Claude Code plugin (MCP + skill).** The plugin in [`plugin/`](plugin) adds the
+MCP server and a `phone-remote` skill that teaches the agent how to use it well
+(jump with deep links and `open_settings`/`open_file`, read the screen with
+`get_ui_tree`, safety rules, step-by-step recipes, troubleshooting):
+
+```
+/plugin install phone-remote --marketplace GuptaOum/phone-remote
+```
+
 No API key to copy: the server supports OAuth 2.1 discovery
 (`/.well-known/oauth-protected-resource`) with dynamic client registration and
 PKCE, so agents only need the URL.

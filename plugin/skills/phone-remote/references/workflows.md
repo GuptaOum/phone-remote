@@ -1,0 +1,110 @@
+# Recipes
+
+Each recipe assumes you already have `deviceId` from `list_devices`.
+Coordinates shown are typical for a 1080x2412 phone; always prefer the x/y that
+`get_ui_tree` returns over the numbers here.
+
+## Open a folder or file
+
+```
+open_file(path="Download")                 # folder → system Files app
+open_file(path="DCIM/Camera/IMG_1.jpg")    # file → its default viewer
+open_file(path="...jpg", package="com.coloros.gallery3d")   # force an app
+```
+Use `list_files(path=...)` first if you don't know the exact name. To just
+tell the user what's in a folder, `list_files` alone is enough; no need to open
+anything on screen.
+
+## Send a WhatsApp message
+
+1. `open_url("https://wa.me/<countrycode><number>?text=<url-encoded text>")`
+   (no `+`, no spaces). For a saved contact with no number: `open_app("WhatsApp")`,
+   tap the search icon, `type_text(name, method:"paste")`, `wait_for(text=name)`,
+   tap the row.
+2. `wait_for(app="com.whatsapp")`, then `get_ui_tree(filter:"send")`.
+3. If you didn't pre-fill text: tap the message box (`filter:"message"`),
+   `type_text(text, method:"paste")`.
+4. Confirm with the user if the wording or recipient came from you, then tap
+   Send (`desc:"Send"`).
+5. `get_ui_tree(filter:"<first words of message>")` to confirm it's in the chat.
+
+Same pattern for WhatsApp Business (`com.whatsapp.w4b`), SMS (`sms:` link) and
+email (`mailto:` link). Never send without the user's go-ahead.
+
+## Send a file from the PC to someone on WhatsApp
+
+1. Put the file on the phone: `send_local_file(name, folder:"Download")` →
+   POST the bytes to the returned `upload_url` (with a shell:
+   `curl -sS -X POST --data-binary @"<local path>" "<upload_url>"`).
+   Small files can go inline with `send_file(data_base64=...)` (≤ 18 MB).
+2. Open the chat (recipe above).
+3. Tap Attach (`desc:"Attach"`) → Document.
+4. Stay inside WhatsApp's own file list. Tap its Search icon,
+   `type_text(<part of file name>, method:"paste")`, tap the matching row.
+   **Do not tap "Browse other docs"**: that opens the system picker
+   (`com.google.android.documentsui`), which ignores automated taps.
+5. Tap Send on the preview, then confirm the file name appears in the chat.
+
+For photos use Attach → Gallery instead of Document.
+
+## Get a file from the phone to the PC
+
+1. `list_files(path="Download")` (or `DCIM/Camera`, `Pictures/Screenshots`,
+   `Documents`, `WhatsApp/Media/...` under `Android/media/com.whatsapp/`).
+2. `get_file(path="/storage/emulated/0/...")` → one-time `download_url`.
+3. With a shell: `curl -sS -o "<local path>" "<download_url>"`. Without one,
+   give the user the link. Max 100 MB.
+
+## Download something from the web onto the phone
+
+`send_url(url, name?, folder?)`. The server fetches it, so it works even if the
+phone has no browser session. Then `open_file` if the user wants to see it.
+
+## Read an OTP / 2FA code
+
+1. `read_notifications(filter:"code")` or filter by app name / sender.
+2. If nothing yet, `wait(seconds:5)` and retry a couple of times.
+3. If it errors about permission, the user must grant Notification access once:
+   `open_settings(page:"notifications")` and tell them which toggle.
+Report the code only to the user, or type it only where the user asked.
+
+## Change a setting
+
+`open_settings(page=...)` with one of: settings, apps, all_apps,
+installed_apps, app_info*, app_notifications*, overlay*, notifications,
+usage_access, battery_optimization, accessibility, wifi, bluetooth,
+mobile_data, location, display, sound, storage, date_time, language,
+developer, about_phone. (*needs `package`.)
+Then `get_ui_tree(filter:"<toggle label>")`, tap the switch, and re-read the
+tree to confirm the `K` (checked) flag flipped.
+
+## Free up storage
+
+1. `find_unused_apps(days:30, minSizeMB:100)`: biggest unused apps first.
+   Or `list_apps(sizes:true, minSizeMB:200, system:false)` for the biggest
+   user-installed apps.
+2. Show the user the list with sizes and last-used dates. Let them choose.
+3. For chosen apps:
+   - `clear_app_storage(package, what:"cache")`: safe, no confirmation needed
+     beyond the user's request.
+   - `clear_app_storage(package, what:"data")`: logs them out and wipes the
+     app's data. Confirm per app.
+   - `uninstall_app(package)`: permanent. Confirm per app.
+4. Report before/after sizes from the tool results.
+
+## Find a lost phone
+
+`ring` (full volume, works in silent mode), `flash_light(count:10)`,
+`get_location` (last cached fix, may be minutes old; give the user a
+`https://maps.google.com/?q=<lat>,<lng>` link).
+
+## Search inside any app
+
+Tap the search icon (`get_ui_tree(filter:"search")`), `type_text(query,
+submit:true)`, `wait_for(text=<expected result>)`. Many apps also accept a
+search deep link (YouTube, Play Store, Maps); see deep-links.md.
+
+## Scroll to find something
+
+`get_ui_tree(filter=X)`; if empty, `scroll(direction:"down")` and repeat.
+Stop after ~8 scrolls or when two consecutive trees are identical (end of list).
