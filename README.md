@@ -11,6 +11,9 @@ streams the screen and camera over WebRTC and accepts touch input back.
 It runs without root: a native Android companion app does the capture and input
 work, and everything keeps running in the background after the app is closed.
 
+**Free and open source (MIT).** Use the hosted server, or run your own from this
+repository. See [Use it with your AI agent](#use-it-with-your-ai-agent).
+
 ---
 
 ## Contents
@@ -25,6 +28,7 @@ work, and everything keeps running in the background after the app is closed.
 - [Configuration](#configuration)
 - [The Android app](#the-android-app)
 - [AI agents (MCP)](#ai-agents-mcp)
+  - [Use it with your AI agent](#use-it-with-your-ai-agent)
 - [Security](#security)
 - [Diagnostics and troubleshooting](#diagnostics-and-troubleshooting)
 - [Further documentation](#further-documentation)
@@ -35,7 +39,7 @@ work, and everything keeps running in the background after the app is closed.
 
 **AI agent control (MCP)**
 
-- **28 tools.** Gestures, a structured UI tree with normalized coordinates, waiting for screen states, apps (open, list with sizes, uninstall, clear cache/data), deep links, notifications/OTPs, hardware, and file transfer.
+- **29 tools.** Gestures, a structured UI tree with normalized coordinates, waiting for screen states, apps (open, list with sizes, find unused, uninstall, clear cache/data), deep links, notifications/OTPs, hardware, and file transfer.
 - **One modern endpoint.** Streamable HTTP at `/mcp` with OAuth 2.1 + PKCE and dynamic client registration: paste the URL, sign in, approve. A plain `Authorization: Bearer` token works too.
 - **Per-account isolation.** An agent only ever sees the phones of the account that approved it, and the approval page shows which account that is.
 
@@ -286,20 +290,74 @@ One endpoint, `https://<domain>/mcp`, using the current MCP transport
 (Streamable HTTP). All coordinates are normalized from `0.0` to `1.0` (a
 fraction of the screen width and height), not pixels.
 
-**Connecting.** The server advertises OAuth 2.1 discovery
-(`/.well-known/oauth-protected-resource`) and dynamic client registration, so
-most clients only need the URL. On first use a browser window opens: sign in
-to Phone Remote (if you aren't already), check the **Signed in as** account,
-and click **Approve**.
+### Use it with your AI agent
 
-| Client | How to add it |
-|---|---|
-| claude.ai, Claude Desktop, Claude mobile | *Settings → Connectors → Add custom connector* → `https://<domain>/mcp` |
-| Claude Code | `claude mcp add --transport http phone-remote https://<domain>/mcp`, then `/mcp` → *Authenticate* |
-| Cursor, Antigravity and other HTTP clients | Add a remote server with URL `https://<domain>/mcp` |
+Three steps, free:
 
-Clients that can't run the OAuth flow can send a login token instead
-(`POST /api/login` returns one):
+1. **Get the app.** Install the Android app on your phone:
+   `https://65-1-96-152.sslip.io/phone-remote.apk` (hosted server), or the
+   `/phone-remote.apk` of your own server. Create an account in the app and grant
+   the permissions it lists.
+2. **Add the MCP server to your agent** with the snippet for your tool below.
+   Use `https://65-1-96-152.sslip.io/mcp`, or `https://<your-domain>/mcp` if you
+   self-host.
+3. **Sign in once.** On first use a browser window opens: sign in with the same
+   account, check the **Signed in as** line, and click **Approve**. Then ask
+   your agent things like *"take a screenshot of my phone"* or *"find apps I
+   haven't used in a month"*.
+
+No API key to copy: the server supports OAuth 2.1 discovery
+(`/.well-known/oauth-protected-resource`) with dynamic client registration and
+PKCE, so agents only need the URL.
+
+**Claude Code**
+
+```bash
+claude mcp add --transport http phone-remote https://65-1-96-152.sslip.io/mcp
+```
+
+Then run `/mcp` in Claude Code and choose *Authenticate*.
+
+**claude.ai, Claude Desktop, Claude mobile:** *Settings → Connectors → Add
+custom connector*, URL `https://65-1-96-152.sslip.io/mcp`.
+
+**Google Antigravity:** add to `mcp_config.json` (*Agent panel → … → MCP
+Servers → Manage MCP Servers → View raw config*):
+
+```json
+{
+  "mcpServers": {
+    "phone-remote": { "serverUrl": "https://65-1-96-152.sslip.io/mcp" }
+  }
+}
+```
+
+**Cursor:** `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project):
+
+```json
+{
+  "mcpServers": {
+    "phone-remote": { "url": "https://65-1-96-152.sslip.io/mcp" }
+  }
+}
+```
+
+**VS Code (Copilot agent mode):** `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "phone-remote": { "type": "http", "url": "https://65-1-96-152.sslip.io/mcp" }
+  }
+}
+```
+
+**Any other MCP client** that speaks Streamable HTTP: point it at the `/mcp`
+URL. New tools appear after the client reconnects (for example a new chat, or
+reconnecting the connector).
+
+**Clients without OAuth** can send a login token instead (`POST /api/login`
+returns one, valid for 30 days):
 
 ```json
 {
@@ -319,9 +377,10 @@ Clients that can't run the OAuth flow can send a login token instead
 
 | Group | Tools |
 |---|---|
-| Device and perception | `list_devices`, `get_device_status`, `get_location`, `get_foreground_app`, `get_ui_tree`, `wait_for`, `list_apps`, `take_screenshot` |
+| Device and perception | `list_devices`, `get_device_status`, `get_location`, `get_foreground_app`, `get_ui_tree`, `wait_for`, `take_screenshot` |
 | Interaction | `tap`, `long_press`, `swipe`, `scroll`, `type_text`, `press_key`, `wait` |
 | Apps and navigation | `open_app`, `open_app_drawer`, `open_url` |
+| App storage | `list_apps` (with sizes), `find_unused_apps`, `clear_app_storage`, `uninstall_app` |
 | Hardware and notifications | `ring`, `flash_light`, `read_notifications` |
 | Files | `list_files`, `get_file`, `send_local_file`, `send_file`, `send_url` |
 
@@ -377,3 +436,9 @@ cd ~/phone-remote && docker compose logs app-blue app-green | grep -E "🔗|🧭
 - **[DEPLOY.md](DEPLOY.md):** production runbook (EC2, Docker Compose, TLS, TURN, APK publishing).
 - **[MCP_PHONE_NAVIGATION.md](MCP_PHONE_NAVIGATION.md):** playbook for AI agents operating the phone.
 - **[PROJECT_MEMORY.md](PROJECT_MEMORY.md):** design history and project notes.
+
+---
+
+## License
+
+[MIT](LICENSE): free to use, modify and self-host.
