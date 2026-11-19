@@ -25,6 +25,9 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+    <!-- uninstall_app: lets us open the system "uninstall this app?" prompt
+         (Android 9+). The user / agent still confirms in that prompt. -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES"/>
 
     <!-- See other apps' launcher activities so open_app can resolve a name → package (Android 11+) -->
     <queries>

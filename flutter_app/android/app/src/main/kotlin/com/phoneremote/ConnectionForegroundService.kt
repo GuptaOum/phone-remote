@@ -277,7 +277,7 @@ class ConnectionForegroundService : Service() {
                                     // builds omit it and keep the fire-and-forget path.
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
-                                        "list_apps", "open_url", "notifications", "paste",
+                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app",
                                         "frame_ack", "webrtc_screen", "webrtc_camera",
                                     )))
                                 }
@@ -386,6 +386,10 @@ class ConnectionForegroundService : Service() {
                             }
                             "notifications" -> {
                                 handleNotifications(json)
+                                return@post
+                            }
+                            "uninstall_app" -> {
+                                handleUninstallApp(json)
                                 return@post
                             }
                         }
@@ -1111,6 +1115,47 @@ class ConnectionForegroundService : Service() {
             }
             send(out.toString())
         }.start()
+    }
+
+    /**
+     * Opens Android's own "Do you want to uninstall this app?" prompt for an
+     * exact package. Android never lets a normal app uninstall silently: the
+     * system prompt is the confirmation step (the server's MCP tool may tap
+     * its OK button through the accessibility service when asked to).
+     * Refuses this app itself and system apps, which can't be uninstalled.
+     */
+    private fun handleUninstallApp(json: JSONObject) {
+        val id = json.optString("id")
+        if (id.isEmpty()) return
+        val pkg = json.optString("package").trim()
+        val reply = { ok: Boolean, extra: JSONObject.() -> Unit ->
+            send(JSONObject().apply {
+                put("type", "uninstall_app_result"); put("id", id); put("ok", ok); put("package", pkg); extra()
+            }.toString())
+        }
+        if (pkg.isEmpty()) { reply(false) { put("error", "A package name is required") }; return }
+        if (pkg == packageName) { reply(false) { put("error", "Refusing to uninstall Phone Remote itself") }; return }
+        val info = try {
+            packageManager.getApplicationInfo(pkg, 0)
+        } catch (_: Exception) {
+            reply(false) { put("error", "No installed app has package \"$pkg\"") }; return
+        }
+        if (info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0) {
+            reply(false) { put("error", "$pkg is a system app and can't be uninstalled") }; return
+        }
+        val name = try { packageManager.getApplicationLabel(info).toString() } catch (_: Exception) { pkg }
+        @Suppress("DEPRECATION")
+        val intent = Intent(Intent.ACTION_DELETE, android.net.Uri.parse("package:$pkg"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        // Same as open_app: the accessibility context is exempt from the
+        // Android 10+ background activity-start limits.
+        val ctx: Context = RemoteAccessibilityService.instance ?: this
+        handler.post {
+            try { ctx.startActivity(intent) } catch (_: Exception) {
+                try { startActivity(intent) } catch (_: Exception) {}
+            }
+        }
+        reply(true) { put("name", name) }
     }
 
     // Schemes that would let a caller reach into this app's own files or

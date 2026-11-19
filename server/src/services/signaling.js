@@ -1096,6 +1096,7 @@ function setupSignaling(wss, app) {
         case 'ui_tree_result':
         case 'list_apps_result':
         case 'open_url_result':
+        case 'uninstall_app_result':
         case 'notifications_result': {
           if (ws.role !== 'phone') return;
           const waiting = pendingHttpRequests.get(msg.id);

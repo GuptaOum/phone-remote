@@ -530,6 +530,67 @@ function createPhoneRemoteServer() {
     }
   );
 
+  // 8b. uninstall_app
+  server.tool(
+    'uninstall_app',
+    'Uninstall an app from the phone by exact package name (get it from list_apps). PERMANENT: removes the app and all its data, and cannot be undone. Only use it when the user explicitly asked to remove that specific app; if there is any doubt which app is meant, ask first. Opens Android\'s own "uninstall this app?" prompt; with confirm (default true) the tool taps OK in that prompt and checks the app is gone. With confirm:false the prompt is left open for the person holding the phone. The phone must be unlocked. System apps and Phone Remote itself are refused.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      package: z.string().describe('Exact package name, e.g. com.example.app (from list_apps)'),
+      confirm: z.boolean().optional().describe('Tap OK in Android\'s uninstall prompt (default true). false = only open the prompt.'),
+    },
+    async ({ deviceId, package: pkg, confirm }, { authInfo }) => {
+      const userId = authInfo.userId;
+      if (!pkg) return textResult('A package name is required (see list_apps).', true);
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'uninstall_app')) {
+        return textResult('This phone build cannot uninstall apps — update the app.', true);
+      }
+      let r;
+      try {
+        r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'uninstall_app', id, package: pkg }), 12000, 'uninstall_app');
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+      if (!r.ok) return textResult(r.error || 'Could not start the uninstall.', true);
+      const label = `${r.name || pkg} (${pkg})`;
+      if (confirm === false) {
+        return textResult(`Android's uninstall prompt for ${label} is open on the phone. Tap OK there to remove it.`);
+      }
+
+      // Find the OK / Uninstall button in the system package installer's prompt.
+      const deadline = Date.now() + 8000;
+      let button = null;
+      let lastPkg = '';
+      while (Date.now() < deadline && !button) {
+        await sleep(WAIT_POLL_MS);
+        try {
+          const t = await fetchUiTree(userId, deviceId, false, 5000);
+          lastPkg = t.package || '';
+          if (!/packageinstaller|permissioncontroller/i.test(lastPkg)) continue;
+          button = (t.nodes || []).find((n) =>
+            /c/.test(n.f || '') && /^(ok|uninstall)$/i.test(String(n.text || n.desc || '').trim()));
+        } catch { /* keep polling */ }
+      }
+      if (!button) {
+        return textResult(`Opened the uninstall prompt for ${label}, but could not find its OK button${lastPkg ? ` (foreground: ${lastPkg})` : ''}. The phone may be locked. Take a screenshot to check.`, true);
+      }
+      const tap = await runControl(userId, deviceId, { type: 'control', action: 'tap', x: button.x, y: button.y });
+      if (tap.err) return tap.err;
+
+      // Confirm it is really gone.
+      const goneBy = Date.now() + 15000;
+      while (Date.now() < goneBy) {
+        await sleep(1000);
+        try {
+          const l = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'list_apps', id }), 10000, 'list_apps');
+          if (!(l.apps || []).some((a) => a.package === pkg)) return textResult(`Uninstalled ${label}.`);
+        } catch { /* keep checking */ }
+      }
+      return textResult(`Tapped OK to uninstall ${label}, but it still shows as installed after 15s. Take a screenshot to check.`, true);
+    }
+  );
+
   // 9. read_notifications
   server.tool(
     'read_notifications',
