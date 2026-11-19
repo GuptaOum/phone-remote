@@ -20,7 +20,7 @@ const signaling = require('../services/signaling');
  * Auth: Multi-tenant JWT scoping passed via req.auth -> extra.authInfo.
  */
 
-const SERVER_VERSION = '2.0.0';
+const SERVER_VERSION = '2.1.0';
 
 // send_file caps
 const MAX_SEND_FILE_BYTES = 18 * 1024 * 1024;
@@ -297,15 +297,63 @@ function scrollGesture(direction, amount) {
   }
 }
 
+// Guidance every MCP client receives on connect (the `instructions` field).
+const SERVER_INSTRUCTIONS = [
+  'Phone Remote operates real Android phones linked to the signed-in account.',
+  'Start with list_devices to get a deviceId; most tools need it and the phone must be online.',
+  'Coordinates are normalized 0.0-1.0 fractions of the screen, never pixels.',
+  'Prefer get_ui_tree (exact tappable coordinates, cheap) over take_screenshot; use wait_for instead of fixed waits.',
+  'If taps do nothing, call get_device_status: the phone may be locked or Accessibility may be off.',
+  'uninstall_app and clear_app_storage (data) permanently delete user data: only use them when the user explicitly asked for that specific app.',
+].join(' ');
+
+// Tool annotations (MCP spec): let clients auto-approve read-only tools and
+// ask before destructive ones. Unlisted tools act on the phone (not read-only)
+// but are not destructive.
+const READ_ONLY_TOOLS = new Set([
+  'list_devices', 'get_location', 'get_device_status', 'get_foreground_app', 'get_ui_tree', 'wait_for',
+  'list_apps', 'find_unused_apps', 'read_notifications', 'take_screenshot', 'wait', 'list_files', 'get_file',
+]);
+const DESTRUCTIVE_TOOLS = new Set(['uninstall_app', 'clear_app_storage']);
+// Reach outside this server and the phone (arbitrary URLs).
+const OPEN_WORLD_TOOLS = new Set(['open_url', 'send_url']);
+const TOOL_TITLES = {
+  list_devices: 'List devices', get_location: 'Get location', get_device_status: 'Get device status',
+  get_foreground_app: 'Get foreground app', get_ui_tree: 'Read screen (UI tree)', wait_for: 'Wait for screen element',
+  list_apps: 'List installed apps', find_unused_apps: 'Find unused apps', open_url: 'Open URL or deep link',
+  uninstall_app: 'Uninstall app', clear_app_storage: 'Clear app cache / data', read_notifications: 'Read notifications',
+  take_screenshot: 'Take screenshot', tap: 'Tap', long_press: 'Long press', swipe: 'Swipe', scroll: 'Scroll',
+  type_text: 'Type text', press_key: 'Press key', open_app: 'Open app', open_app_drawer: 'Open app drawer',
+  wait: 'Wait', ring: 'Ring phone', flash_light: 'Flash light', list_files: 'List phone files',
+  get_file: 'Download file from phone', send_local_file: 'Send local file to phone', send_file: 'Send file to phone',
+  send_url: 'Send URL download to phone',
+};
+
 /**
- * Creates an McpServer instance with all 26 phone-remote tools registered using Zod.
+ * Creates an McpServer instance with all phone-remote tools registered
+ * (registerTool with titles and annotations; input schemas in Zod).
  */
 function createPhoneRemoteServer() {
-  const server = new McpServer({ name: 'phone-remote', version: SERVER_VERSION });
+  const server = new McpServer(
+    { name: 'phone-remote', title: 'Phone Remote', version: SERVER_VERSION },
+    { instructions: SERVER_INSTRUCTIONS }
+  );
   const offline = () => textResult('Device is offline.', true);
+  const tool = (name, description, inputSchema, handler) => server.registerTool(name, {
+    title: TOOL_TITLES[name] || name,
+    description,
+    inputSchema,
+    annotations: {
+      title: TOOL_TITLES[name] || name,
+      readOnlyHint: READ_ONLY_TOOLS.has(name),
+      destructiveHint: DESTRUCTIVE_TOOLS.has(name),
+      idempotentHint: READ_ONLY_TOOLS.has(name),
+      openWorldHint: OPEN_WORLD_TOOLS.has(name),
+    },
+  }, handler);
 
   // 1. list_devices
-  server.tool(
+  tool(
     'list_devices',
     'List the Android phones linked to this account, with online/offline status and (when online) live screen resolution.',
     {},
@@ -324,7 +372,7 @@ function createPhoneRemoteServer() {
   );
 
   // 2. get_location
-  server.tool(
+  tool(
     'get_location',
     'Get the most recent known GPS location of a device. Returns the cached last fix — may be a few minutes old.',
     { deviceId: z.string().describe('Device id from list_devices') },
@@ -336,7 +384,7 @@ function createPhoneRemoteServer() {
   );
 
   // 3. get_device_status
-  server.tool(
+  tool(
     'get_device_status',
     'Check a device\'s health before acting on it: battery level, whether the screen is on, whether the Accessibility Service (which performs all taps and typing) is enabled, the current foreground app, and network type. Call this first when a tap or type seems to do nothing, or at the start of a session — it catches "accessibility is off" up front instead of after several silent no-ops.',
     { deviceId: z.string().describe('Device id from list_devices') },
@@ -376,7 +424,7 @@ function createPhoneRemoteServer() {
   );
 
   // 4. get_foreground_app
-  server.tool(
+  tool(
     'get_foreground_app',
     'Get the package name of the app currently on screen (e.g. com.whatsapp). A cheap way to confirm you are still in the right app after an action, without the cost of a full screenshot.',
     { deviceId: z.string().describe('Device id from list_devices') },
@@ -397,7 +445,7 @@ function createPhoneRemoteServer() {
   );
 
   // 5. get_ui_tree
-  server.tool(
+  tool(
     'get_ui_tree',
     'Read the screen as structured data instead of an image: every visible text, button and input field, with the normalized x/y you can pass straight to tap. PREFER THIS OVER take_screenshot for finding and acting on things — it is far cheaper, has no capture throttle, and gives exact coordinates instead of estimates from pixels. Use take_screenshot only when you need to see something genuinely visual (an image, a layout problem, a CAPTCHA). Each node has: i (index), text, desc (accessibility label), id (resource id), cls (widget class), x/y (normalized centre — pass to tap), f (flags: c=clickable, e=editable/text field, s=scrollable, k=checkable, K=checked, f=focused, d=disabled).',
     {
@@ -429,7 +477,7 @@ function createPhoneRemoteServer() {
   );
 
   // 6. wait_for
-  server.tool(
+  tool(
     'wait_for',
     'Wait until something appears on screen, then return. Polls the UI tree, so it returns the moment the condition is met instead of guessing a sleep duration like wait does. Use after any action that triggers loading, navigation or an animation. Give exactly one of text, id, or app.',
     {
@@ -479,7 +527,7 @@ function createPhoneRemoteServer() {
   );
 
   // 7. list_apps
-  server.tool(
+  tool(
     'list_apps',
     'List every app installed on the phone, with display name and package name. Use this when you are unsure what an app is called or whether it is installed, rather than guessing a package name at open_app. With sizes:true each app also gets its storage use (app, data, cache and total, in MB), sorted largest first; minSizeMB keeps only apps at least that big (e.g. 2048 for "over 2 GB"). Sizes need the one-time "Usage access" grant on the phone.',
     {
@@ -535,7 +583,7 @@ function createPhoneRemoteServer() {
   );
 
   // 8. open_url
-  server.tool(
+  tool(
     'open_url',
     'Open a URL or app deep link on the phone (https://…, tel:, mailto:, geo:, or an app scheme like whatsapp://). Often the most reliable way to get somewhere: a deep link jumps straight to the target screen instead of tapping through several, so it cannot mis-tap. Prefer it over open_app + navigation when a link for the destination exists.',
     {
@@ -560,7 +608,7 @@ function createPhoneRemoteServer() {
   );
 
   // 7b. find_unused_apps
-  server.tool(
+  tool(
     'find_unused_apps',
     'Find apps the user has not opened for a while, biggest first: the best candidates for freeing storage. Each result has its size (MB), the date it was last used (or "not in the last year"), and how many days ago that was. Apps installed more recently than `days` are skipped (they have not had the chance to be used). Read-only: follow up with uninstall_app or clear_app_storage only for apps the user picks. Needs the one-time "Usage access" grant on the phone.',
     {
@@ -611,7 +659,7 @@ function createPhoneRemoteServer() {
   );
 
   // 8b. uninstall_app
-  server.tool(
+  tool(
     'uninstall_app',
     'Uninstall an app from the phone by exact package name (get it from list_apps). PERMANENT: removes the app and all its data, and cannot be undone. Only use it when the user explicitly asked to remove that specific app; if there is any doubt which app is meant, ask first. Opens Android\'s own "uninstall this app?" prompt; with confirm (default true) the tool taps OK in that prompt and checks the app is gone. With confirm:false the prompt is left open for the person holding the phone. The phone must be unlocked. System apps and Phone Remote itself are refused.',
     {
@@ -713,7 +761,7 @@ function createPhoneRemoteServer() {
     }
   }
 
-  server.tool(
+  tool(
     'clear_app_storage',
     'Clear an app\'s cache and/or data on the phone by exact package name (get it from list_apps). Android does not let apps do this directly, so the tool runs the minimal Settings path itself: App info → Storage → Clear cache / Clear data → confirm, then reports the size before and after. Clearing CACHE is harmless (temporary files). Clearing DATA is PERMANENT: it deletes the app\'s downloads, settings and login (the user must sign in again); only do it when the user explicitly asked for that app\'s data to be cleared. The phone must be unlocked. Refuses Phone Remote itself and core system packages.',
     {
@@ -806,7 +854,7 @@ function createPhoneRemoteServer() {
   );
 
   // 9. read_notifications
-  server.tool(
+  tool(
     'read_notifications',
     'Read the phone\'s notifications — currently showing ones plus a short history of recent ones. This is how you get an OTP / 2FA code, a delivery confirmation, or an incoming message. Requires a separate one-time user grant on the phone (Settings → Notifications → Device & app notifications → Phone Remote), which is NOT the same as the Accessibility grant.',
     {
@@ -859,7 +907,7 @@ function createPhoneRemoteServer() {
   );
 
   // 10. take_screenshot
-  server.tool(
+  tool(
     'take_screenshot',
     'Capture and return the current screen of a device as a JPEG image. Requires the phone\'s Accessibility Service to be enabled. Call this first to see the screen before tapping. In long multi-step sessions, don\'t screenshot after every action — act with screenshot:false on intermediate steps and take one screenshot when you need to check state.',
     { deviceId: z.string().describe('Device id from list_devices') },
@@ -876,7 +924,7 @@ function createPhoneRemoteServer() {
   );
 
   // 11. tap
-  server.tool(
+  tool(
     'tap',
     'Tap the screen at a point. Coordinates are normalized 0.0-1.0 (fraction of screen width/height), not pixels — e.g. x=0.5, y=0.5 is the center. Set screenshot:true to get a fresh screenshot back after the tap so you can see the result in one call.',
     {
@@ -893,7 +941,7 @@ function createPhoneRemoteServer() {
   );
 
   // 12. long_press
-  server.tool(
+  tool(
     'long_press',
     'Press and hold at a point — opens context menus, enters selection/edit mode, moves icons. Coordinates are normalized 0.0-1.0.',
     {
@@ -915,7 +963,7 @@ function createPhoneRemoteServer() {
   );
 
   // 13. swipe
-  server.tool(
+  tool(
     'swipe',
     'Swipe from one point to another with precise coordinates (normalized 0.0-1.0). For simple list/page navigation prefer the `scroll` tool instead.',
     {
@@ -938,7 +986,7 @@ function createPhoneRemoteServer() {
   );
 
   // 14. scroll
-  server.tool(
+  tool(
     'scroll',
     'Scroll the screen in a direction — the easy way to move through lists, feeds, and home-screen pages. direction is where the CONTENT moves: "down" reveals content further down the page, "up" goes back up, "left"/"right" flip pages.',
     {
@@ -957,7 +1005,7 @@ function createPhoneRemoteServer() {
   );
 
   // 15. type_text
-  server.tool(
+  tool(
     'type_text',
     'Type text into the currently focused input field (tap the field first). Set submit:true to press Enter after typing — use this to run a search once the query is typed. IF TYPING REPORTS SUCCESS BUT THE TEXT DOES NOT APPEAR (WhatsApp and some other apps ignore the standard method), retry with method:"paste".',
     {
@@ -987,7 +1035,7 @@ function createPhoneRemoteServer() {
   );
 
   // 16. press_key
-  server.tool(
+  tool(
     'press_key',
     'Press a system key or button. back/home/recents navigate; enter submits and delete backspaces in a focused text field; notifications/quick_settings open those shades; lock locks the screen; volume_up/volume_down change media volume.',
     {
@@ -1005,7 +1053,7 @@ function createPhoneRemoteServer() {
   );
 
   // 17. open_app
-  server.tool(
+  tool(
     'open_app',
     'Open an app on the device by name (e.g. "YouTube", "Settings", "WhatsApp") — matched against installed apps by label — or by exact package name. This is the fastest way to launch an app; prefer it over hunting through the app drawer.',
     {
@@ -1031,7 +1079,7 @@ function createPhoneRemoteServer() {
   );
 
   // 18. open_app_drawer
-  server.tool(
+  tool(
     'open_app_drawer',
     'Go to the home screen and open the app drawer (swipe up from the bottom), where the app search bar lives. Follow with take_screenshot, then tap the search bar and type an app name to find and open any app.',
     {
@@ -1049,7 +1097,7 @@ function createPhoneRemoteServer() {
   );
 
   // 19. wait
-  server.tool(
+  tool(
     'wait',
     'Pause for a few seconds to let the screen finish loading or animating before the next action.',
     {
@@ -1066,7 +1114,7 @@ function createPhoneRemoteServer() {
   );
 
   // 20. ring
-  server.tool(
+  tool(
     'ring',
     'Play a ringtone on the device at full volume, even in silent mode — useful for locating a lost phone.',
     { deviceId: z.string() },
@@ -1077,7 +1125,7 @@ function createPhoneRemoteServer() {
   );
 
   // 21. flash_light
-  server.tool(
+  tool(
     'flash_light',
     'Blink the device\'s camera flash a few times.',
     {
@@ -1091,7 +1139,7 @@ function createPhoneRemoteServer() {
   );
 
   // 22. list_files
-  server.tool(
+  tool(
     'list_files',
     'List files and folders in a directory of the device\'s shared storage. Browsing is confined to /storage/emulated/0 (the Android storage root) and its subfolders; paths outside it are clamped to the root.',
     {
@@ -1112,7 +1160,7 @@ function createPhoneRemoteServer() {
   );
 
   // 23. get_file
-  server.tool(
+  tool(
     'get_file',
     'Fetch a file FROM the phone. Step 1: call this tool with the file\'s absolute path (find it with list_files); the server pulls the file off the phone and returns a one-time download_url. Step 2: with a shell, curl -sS -o "<local-path>" "<download_url>"; without a shell, give the user the download_url to click. Max 100 MB.',
     {
@@ -1152,7 +1200,7 @@ function createPhoneRemoteServer() {
   );
 
   // 24. send_local_file
-  server.tool(
+  tool(
     'send_local_file',
     'Send a file from the user\'s computer to the phone — the right tool for files on disk, no base64 needed. Step 1: call this tool with the destination file name (and optional folder); it returns a one-time upload_url. Step 2: POST the raw bytes to the upload_url. Saves to /storage/emulated/0/<folder>/<name>. Max 100 MB.',
     {
@@ -1184,7 +1232,7 @@ function createPhoneRemoteServer() {
   );
 
   // 25. send_file
-  server.tool(
+  tool(
     'send_file',
     'Send a small file to the device\'s shared storage with the content passed inline as base64. Saves to /storage/emulated/0/<folder>/<name> (folder defaults to Download). Max 18 MB.',
     {
@@ -1221,7 +1269,7 @@ function createPhoneRemoteServer() {
   );
 
   // 26. send_url
-  server.tool(
+  tool(
     'send_url',
     'Download a file from a public http(s) URL and save it to the phone. The server fetches the bytes itself — saves to /storage/emulated/0/<folder>/<name>. Max 100 MB.',
     {

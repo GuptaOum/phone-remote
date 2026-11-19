@@ -129,6 +129,8 @@ Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/ph
 
 ## ⚡ 6. MCP Tool Catalog (29 tools, `server/src/routes/mcp.js`)
 
+Registered with `registerTool` (MCP SDK 1.32): each tool has a title and annotations from `READ_ONLY_TOOLS` / `DESTRUCTIVE_TOOLS` / `OPEN_WORLD_TOOLS` near the top of `mcp.js`; **add a new tool's name to the right set and to `TOOL_TITLES`**. The server also sends `SERVER_INSTRUCTIONS` to every client on connect.
+
 ### Perception
 1. **`list_devices()`** — linked phones, online status, model, screen size.
 2. **`get_location(deviceId)`** — last GPS fix.
