@@ -483,8 +483,10 @@ function createPhoneRemoteServer() {
     {
       deviceId: z.string().describe('Device id from list_devices'),
       filter: z.string().optional().describe('Optional case-insensitive substring to match against the name or package'),
-      sizes: z.boolean().optional().describe('Include storage used per app, sorted largest first (default false)'),
-      minSizeMB: z.number().optional().describe('With sizes: only apps using at least this many MB in total (1 GB = 1024 MB)'),
+      // preprocess: clients with a cached older tool list send these as strings.
+      sizes: z.preprocess((v) => (v === 'true' ? true : v === 'false' ? false : v), z.boolean().optional())
+        .describe('Include storage used per app, sorted largest first (default false)'),
+      minSizeMB: z.coerce.number().optional().describe('With sizes: only apps using at least this many MB in total (1 GB = 1024 MB)'),
     },
     async ({ deviceId, filter, sizes, minSizeMB }, { authInfo }) => {
       if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
