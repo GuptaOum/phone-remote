@@ -209,6 +209,22 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                     return@setMethodCallHandler
                 }
+                // Usage access: needed for list_apps to report app sizes.
+                "isUsageAccessGranted" -> {
+                    result.success(UsageAccess.granted(this))
+                    return@setMethodCallHandler
+                }
+                "openUsageAccessSettings" -> {
+                    val tried = listOf(
+                        Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, Uri.parse("package:$packageName")),
+                        Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS),
+                    )
+                    for (i in tried) {
+                        try { startActivity(i); break } catch (_: Exception) {}
+                    }
+                    result.success(null)
+                    return@setMethodCallHandler
+                }
                 "openAutoLaunchSettings" -> {
                     // Try Realme/OPPO/ColorOS auto-launch settings, fall back to app info
                     val tried = listOf(

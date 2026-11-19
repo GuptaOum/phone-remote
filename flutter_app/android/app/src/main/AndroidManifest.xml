@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- get_device_status reports wifi/cellular so an agent can tell a dead
@@ -28,6 +29,10 @@
     <!-- uninstall_app: lets us open the system "uninstall this app?" prompt
          (Android 9+). The user / agent still confirms in that prompt. -->
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES"/>
+    <!-- list_apps sizes: "Usage access" special permission, granted by the
+         user in Settings (StorageStatsManager for other apps). -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions"/>
 
     <!-- See other apps' launcher activities so open_app can resolve a name → package (Android 11+) -->
     <queries>

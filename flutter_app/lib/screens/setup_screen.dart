@@ -20,6 +20,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
   bool _locationGranted = false;
   bool _notifGranted = false;
   bool _batteryGranted = false;
+  bool _usageGranted = false;
 
   @override
   void initState() {
@@ -43,7 +44,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
     final camera   = await Permission.camera.isGranted;
     final storage  = await Permission.manageExternalStorage.isGranted;
     final location = await Permission.locationWhenInUse.isGranted;
-    bool a11y = false, notif = false, battery = false;
+    bool a11y = false, notif = false, battery = false, usage = false;
     try {
       a11y = await _ch.invokeMethod('isAccessibilityEnabled') ?? false;
     } catch (_) {}
@@ -53,6 +54,9 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
     try {
       battery = await _ch.invokeMethod('isIgnoringBatteryOptimizations') ?? false;
     } catch (_) {}
+    try {
+      usage = await _ch.invokeMethod('isUsageAccessGranted') ?? false;
+    } catch (_) {}
     if (mounted) {
       setState(() {
         _cameraGranted   = camera;
@@ -61,6 +65,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
         _a11yGranted     = a11y;
         _notifGranted    = notif;
         _batteryGranted  = battery;
+        _usageGranted    = usage;
       });
     }
   }
@@ -100,6 +105,13 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
+  // Special permission: lets the app read other apps' storage sizes.
+  Future<void> _openUsageAccess() async {
+    try {
+      await _ch.invokeMethod('openUsageAccessSettings');
+    } catch (_) {}
+  }
+
   Future<void> _finish() async {
     if (widget.isReview) {
       if (mounted) Navigator.pop(context);
@@ -117,7 +129,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
 
   bool get _allGranted =>
       _cameraGranted && _storageGranted && _locationGranted && _a11yGranted &&
-      _notifGranted && _batteryGranted;
+      _notifGranted && _batteryGranted && _usageGranted;
 
   @override
   Widget build(BuildContext context) {
@@ -193,6 +205,15 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
                       description: 'Battery: allow in background',
                       granted: _batteryGranted,
                       onTap: _requestBattery,
+                    ),
+                    const SizedBox(height: 12),
+                    _PermissionTile(
+                      icon: Icons.storage_outlined,
+                      title: 'Safety 7',
+                      description: 'Usage access (app sizes)',
+                      granted: _usageGranted,
+                      onTap: _openUsageAccess,
+                      opensSettings: true,
                     ),
                   ],
                 ),

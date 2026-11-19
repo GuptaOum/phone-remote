@@ -136,7 +136,7 @@ Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/ph
 4. **`get_foreground_app(deviceId)`** — active package.
 5. **`get_ui_tree(deviceId, all, filter)`** — structured tree with normalized `(x, y)` centers.
 6. **`wait_for(deviceId, text, id, app, gone, timeout)`** — polls the tree until the condition holds.
-7. **`list_apps(deviceId, filter)`** — installed apps with packages.
+7. **`list_apps(deviceId, filter, sizes, minSizeMB)`** — installed apps with packages; `sizes` adds storage per app (needs the Usage access grant, Safety 7).
 
 ### Touch & keys
 8. **`take_screenshot`** · 9. **`tap`** · 10. **`long_press`** · 11. **`swipe`** · 12. **`scroll`** · 13. **`type_text`** (`method: set|paste`, `submit`) · 14. **`press_key`** (back, home, recents, lock, volume)

@@ -277,7 +277,7 @@ class ConnectionForegroundService : Service() {
                                     // builds omit it and keep the fire-and-forget path.
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
-                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app",
+                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes",
                                         "frame_ack", "webrtc_screen", "webrtc_camera",
                                     )))
                                 }
@@ -1105,9 +1105,35 @@ class ConnectionForegroundService : Service() {
                     }
                     .distinctBy { it.second }
                     .sortedBy { it.first.lowercase() }
+                // sizes:true → also report storage per app (app + data + cache).
+                // Needs the "Usage access" special permission (Android 8+).
+                val wantSizes = json.optBoolean("sizes", false)
+                var stats: android.app.usage.StorageStatsManager? = null
+                if (wantSizes) {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                        out.put("sizes_error", "requires_android_8")
+                    } else if (!UsageAccess.granted(this)) {
+                        out.put("sizes_error", "usage_access_not_granted")
+                    } else {
+                        stats = getSystemService(Context.STORAGE_STATS_SERVICE) as android.app.usage.StorageStatsManager
+                    }
+                }
+                val statsMgr = stats
                 val arr = org.json.JSONArray()
                 apps.forEach { (lbl, pkg) ->
-                    arr.put(JSONObject().apply { put("name", lbl); put("package", pkg) })
+                    arr.put(JSONObject().apply {
+                        put("name", lbl); put("package", pkg)
+                        if (statsMgr != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            try {
+                                val st = statsMgr.queryStatsForPackage(
+                                    android.os.storage.StorageManager.UUID_DEFAULT, pkg,
+                                    android.os.Process.myUserHandle())
+                                put("appBytes", st.appBytes)
+                                put("dataBytes", st.dataBytes)
+                                put("cacheBytes", st.cacheBytes)
+                            } catch (_: Exception) { /* app vanished or unreadable */ }
+                        }
+                    })
                 }
                 out.put("apps", arr)
             } catch (e: Exception) {

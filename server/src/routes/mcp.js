@@ -479,24 +479,49 @@ function createPhoneRemoteServer() {
   // 7. list_apps
   server.tool(
     'list_apps',
-    'List every app installed on the phone, with display name and package name. Use this when you are unsure what an app is called or whether it is installed, rather than guessing a package name at open_app.',
+    'List every app installed on the phone, with display name and package name. Use this when you are unsure what an app is called or whether it is installed, rather than guessing a package name at open_app. With sizes:true each app also gets its storage use (app, data, cache and total, in MB), sorted largest first; minSizeMB keeps only apps at least that big (e.g. 2048 for "over 2 GB"). Sizes need the one-time "Usage access" grant on the phone.',
     {
       deviceId: z.string().describe('Device id from list_devices'),
       filter: z.string().optional().describe('Optional case-insensitive substring to match against the name or package'),
+      sizes: z.boolean().optional().describe('Include storage used per app, sorted largest first (default false)'),
+      minSizeMB: z.number().optional().describe('With sizes: only apps using at least this many MB in total (1 GB = 1024 MB)'),
     },
-    async ({ deviceId, filter }, { authInfo }) => {
+    async ({ deviceId, filter, sizes, minSizeMB }, { authInfo }) => {
       if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
       if (!signaling.deviceSupports(authInfo.userId, deviceId, 'list_apps')) {
         return textResult('This phone build cannot list apps — update the app.', true);
       }
+      const wantSizes = !!sizes || minSizeMB != null;
+      if (wantSizes && !signaling.deviceSupports(authInfo.userId, deviceId, 'app_sizes')) {
+        return textResult('This phone build cannot report app sizes — update the app.', true);
+      }
       try {
-        const r = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({ type: 'list_apps', id }), 15000, 'list_apps');
+        const r = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({ type: 'list_apps', id, sizes: wantSizes }), 30000, 'list_apps');
         if (r.error) return textResult(`The phone could not list apps: ${r.error}`, true);
+        if (wantSizes && r.sizes_error) {
+          return textResult(r.sizes_error === 'usage_access_not_granted'
+            ? 'App sizes need "Usage access": on the phone open Phone Remote → Permissions → Safety 7 (or Settings → Usage access → plusU) and turn it on.'
+            : `The phone cannot report app sizes (${r.sizes_error}).`, true);
+        }
         let apps = r.apps || [];
         if (filter) {
           const f = String(filter).toLowerCase();
           apps = apps.filter((a) => `${a.name} ${a.package}`.toLowerCase().includes(f));
           if (!apps.length) return textResult(`No installed app matches "${filter}".`, true);
+        }
+        if (wantSizes) {
+          const MB = 1024 * 1024;
+          const mb = (b) => Math.round(((b || 0) / MB) * 10) / 10;
+          apps = apps
+            .map((a) => {
+              const total = (a.appBytes || 0) + (a.dataBytes || 0);
+              return { name: a.name, package: a.package, totalMB: mb(total), appMB: mb(a.appBytes), dataMB: mb(a.dataBytes), cacheMB: mb(a.cacheBytes) };
+            })
+            .sort((x, y) => y.totalMB - x.totalMB);
+          if (minSizeMB != null) {
+            apps = apps.filter((a) => a.totalMB >= minSizeMB);
+            if (!apps.length) return textResult(`No app uses ${minSizeMB} MB or more.`);
+          }
         }
         return textResult(apps);
       } catch (e) {
