@@ -351,6 +351,7 @@ function createPhoneRemoteServer() {
         const status = {
           battery: `${s.battery}%${s.charging ? ' (charging)' : ''}`,
           screenOn: s.screenOn,
+          ...(s.locked != null ? { locked: s.locked } : {}),
           accessibilityEnabled: s.accessibilityEnabled,
           notificationAccess: s.notificationAccess,
           foregroundApp: s.foregroundApp ?? 'unknown',
@@ -362,6 +363,7 @@ function createPhoneRemoteServer() {
         };
         const warnings = [];
         if (!s.accessibilityEnabled) warnings.push('Accessibility Service is OFF — taps, swipes and typing will silently do nothing until it is enabled at Settings → Accessibility → Phone Remote.');
+        if (s.locked) warnings.push('The phone is locked: taps cannot reach apps until the user unlocks it.');
         if (!s.screenOn) warnings.push('The screen is off — screenshots will look blank. press_key "home" wakes it.');
         if (s.batteryOptimized) warnings.push('Battery optimization is ON for this app — Android may throttle or kill the connection in the background. Exempt it in the app for a stable link.');
         const result = textResult(status);

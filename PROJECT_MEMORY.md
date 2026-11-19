@@ -46,7 +46,7 @@ phone-remote/
 │   ├── src/routes/
 │   │   ├── auth.js            # register / login / JWT, /api/me
 │   │   ├── files.js           # PC-side file upload/download
-│   │   ├── mcp.js             # MCP Streamable HTTP at /mcp (@modelcontextprotocol/sdk, 27 tools)
+│   │   ├── mcp.js             # MCP Streamable HTTP at /mcp (@modelcontextprotocol/sdk, 28 tools)
 │   │   └── oauth.js           # OAuth 2.1 + PKCE, dynamic client registration, discovery
 │   ├── src/services/
 │   │   ├── signaling.js       # multi-tenant WebSocket relay + WebRTC signaling
@@ -127,7 +127,7 @@ Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/ph
 
 ---
 
-## ⚡ 6. MCP Tool Catalog (27 tools, `server/src/routes/mcp.js`)
+## ⚡ 6. MCP Tool Catalog (28 tools, `server/src/routes/mcp.js`)
 
 ### Perception
 1. **`list_devices()`** — linked phones, online status, model, screen size.
@@ -142,7 +142,7 @@ Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/ph
 8. **`take_screenshot`** · 9. **`tap`** · 10. **`long_press`** · 11. **`swipe`** · 12. **`scroll`** · 13. **`type_text`** (`method: set|paste`, `submit`) · 14. **`press_key`** (back, home, recents, lock, volume)
 
 ### Apps & OS
-15. **`open_app`** · 16. **`open_app_drawer`** · 17. **`open_url`** · 18. **`wait`** · **`uninstall_app`** (exact package; opens Android's uninstall prompt, taps OK unless `confirm:false`, verifies it's gone; refuses system apps and itself)
+15. **`open_app`** · 16. **`open_app_drawer`** · 17. **`open_url`** · 18. **`wait`** · **`uninstall_app`** (exact package; opens Android's uninstall prompt, taps OK unless `confirm:false`, verifies it's gone; refuses system apps and itself) · **`clear_app_storage`** (exact package; `what: cache|data|both`; phone opens App info directly, tool taps Storage → Clear cache / Clear data → confirm, reports size before/after; stops if locked; refuses core system packages)
 
 ### Alerts
 19. **`ring`** · 20. **`flash_light`** · 21. **`read_notifications`**

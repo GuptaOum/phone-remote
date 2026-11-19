@@ -35,7 +35,7 @@ work, and everything keeps running in the background after the app is closed.
 
 **AI agent control (MCP)**
 
-- **27 tools.** Gestures, a structured UI tree with normalized coordinates, waiting for screen states, apps (open, list, uninstall), deep links, notifications/OTPs, hardware, and file transfer.
+- **28 tools.** Gestures, a structured UI tree with normalized coordinates, waiting for screen states, apps (open, list with sizes, uninstall, clear cache/data), deep links, notifications/OTPs, hardware, and file transfer.
 - **One modern endpoint.** Streamable HTTP at `/mcp` with OAuth 2.1 + PKCE and dynamic client registration: paste the URL, sign in, approve. A plain `Authorization: Bearer` token works too.
 - **Per-account isolation.** An agent only ever sees the phones of the account that approved it, and the approval page shows which account that is.
 
@@ -144,7 +144,7 @@ flowchart LR
 │       └── pages/          Dashboard, Mirror, Camera, Files, Location, MCP test
 ├── server/                 Node.js backend
 │   ├── src/
-│   │   ├── routes/         mcp (27 tools, Streamable HTTP), oauth, auth, files
+│   │   ├── routes/         mcp (28 tools, Streamable HTTP), oauth, auth, files
 │   │   └── services/       signaling (WebSocket hub), turn, db, oauthStore
 │   └── public/             OAuth consent page
 ├── flutter_app/            Android companion app
