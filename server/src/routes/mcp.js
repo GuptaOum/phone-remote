@@ -436,7 +436,7 @@ function createPhoneRemoteServer() {
         if (!s.accessibilityEnabled) warnings.push('Accessibility Service is OFF — taps, swipes and typing will silently do nothing until it is enabled at Settings → Accessibility → Phone Remote.');
         if (s.locked) warnings.push('The phone is locked: taps cannot reach apps until the user unlocks it.');
         if (!s.screenOn) warnings.push('The screen is off — screenshots will look blank. press_key "home" wakes it.');
-        if (s.language && !/^en\b/i.test(s.language)) warnings.push(`The phone's language is ${s.language}, not English. Button and menu labels are in that language, so filters like "send" or "wallpaper" in get_ui_tree / wait_for will miss. Tell the user once that switching the phone to English makes automation much more reliable (open_settings page "language" opens the page), and that they can switch back afterwards. Do not change the language yourself. If they keep it, match labels in their language.`);
+        if (s.language && !/^en\b/i.test(s.language)) warnings.push(`The phone's language is ${s.language}, not English. Button and menu labels are in that language, so filters like "send" or "wallpaper" in get_ui_tree / wait_for will miss. Ask the user to switch the phone to English (open_settings page "language" opens the page; they can switch back afterwards), then stop and wait until they have. Do not change the language yourself.`);
         if (s.batteryOptimized) warnings.push('Battery optimization is ON for this app — Android may throttle or kill the connection in the background. Exempt it in the app for a stable link.');
         const result = textResult(status);
         if (warnings.length) result.content.push({ type: 'text', text: warnings.join('\n') });
