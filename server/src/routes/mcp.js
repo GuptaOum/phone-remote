@@ -795,8 +795,10 @@ function createPhoneRemoteServer() {
           const t = await fetchUiTree(userId, deviceId, false, 5000);
           lastPkg = t.package || '';
           if (!/packageinstaller|permissioncontroller/i.test(lastPkg)) continue;
+          // android:id/button1 is the dialog's confirm button in every
+          // language; the English labels cover installers that lack the id.
           button = (t.nodes || []).find((n) =>
-            /c/.test(n.f || '') && /^(ok|uninstall)$/i.test(String(n.text || n.desc || '').trim()));
+            /c/.test(n.f || '') && (n.id === 'button1' || /^(ok|uninstall)$/i.test(String(n.text || n.desc || '').trim())));
         } catch { /* keep polling */ }
       }
       if (!button) {
@@ -823,11 +825,23 @@ function createPhoneRemoteServer() {
   // Android has no way for a normal app to clear another app's cache or data
   // (CLEAR_APP_USER_DATA is system-only), so this runs the fixed, minimal UI
   // path: App info (opened directly by the phone) → Storage → Clear cache /
-  // Clear data → confirm. Button names vary by vendor, hence the lists below.
-  const SETTINGS_STORAGE = /^(storage|storage usage|storage & cache|storage and cache|storage & memory)$/i;
-  const SETTINGS_CLEAR_CACHE = /^(clear cache|delete cache|clear cache data)$/i;
-  const SETTINGS_CLEAR_DATA = /^(clear data|clear storage|clear all data|delete data|clear user data)$/i;
+  // Clear data → confirm. Button names vary by vendor and language: the
+  // English lists below are the fallback, and newer phone builds also send
+  // the Settings app's own labels in the phone's language (r.labels), which
+  // withLabels() adds. Dialog confirm buttons are also found by their
+  // language-free id, android:id/button1.
+  const SETTINGS_STORAGE = /^(storage|storage usage|storage & cache|storage and cache|storage & memory|storage & data|app storage|storage used)$/i;
+  const SETTINGS_CLEAR_CACHE = /^(clear cache|delete cache|clear cache data|clear caches)$/i;
+  const SETTINGS_CLEAR_DATA = /^(clear data|clear storage|clear all data|delete data|clear user data|delete all data|clear app data)$/i;
   const SETTINGS_CONFIRM = /^(ok|delete|clear|confirm|delete data|clear data|yes)$/i;
+  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // English regex + exact labels from the phone, as one case-insensitive full match.
+  function withLabels(re, labels) {
+    const extra = (Array.isArray(labels) ? labels : [])
+      .map((l) => String(l || '').trim()).filter(Boolean).map(escapeRe);
+    if (!extra.length) return re;
+    return new RegExp(`^(?:${re.source.slice(1, -1)}|${extra.join('|')})$`, 'i');
+  }
   const PROTECTED_PACKAGES = new Set([
     'com.phoneremote', 'com.google.android.gms', 'com.google.android.gsf',
     'com.android.vending', 'com.android.systemui', 'com.android.settings', 'com.android.phone',
@@ -938,9 +952,14 @@ function createPhoneRemoteServer() {
         const t = await runControl(userId, deviceId, { type: 'control', action: 'tap', x: n.x, y: n.y });
         return t.err;
       };
+      const L = r.labels || {};
+      const reStorage = withLabels(SETTINGS_STORAGE, L.storage);
+      const reCache = withLabels(SETTINGS_CLEAR_CACHE, L.clearCache);
+      const reData = withLabels(SETTINGS_CLEAR_DATA, L.clearData);
+      const reConfirm = withLabels(SETTINGS_CONFIRM, L.ok);
       const stuck = (step) => textResult(`Opened App info for ${label} but could not find "${step}". Take a screenshot to see the screen and finish by hand (tap, get_ui_tree).`, true);
 
-      const storage = await findOnScreen(userId, deviceId, SETTINGS_STORAGE, 8000);
+      const storage = await findOnScreen(userId, deviceId, reStorage, 8000);
       if (!storage) return stuck('Storage');
       // Remember which package Settings is, so a popup from any other app
       // can be recognised and closed on the next steps.
@@ -948,11 +967,11 @@ function createPhoneRemoteServer() {
       try { home = (await fetchUiTree(userId, deviceId, false, 5000)).package || null; } catch { /* no popup handling */ }
       let err = await tapNode(storage);
       if (err) return err;
-      const step = { home, retap: SETTINGS_STORAGE };
+      const step = { home, retap: reStorage };
 
       const done = [];
       if (mode === 'cache' || mode === 'both') {
-        const btn = await findOnScreen(userId, deviceId, SETTINGS_CLEAR_CACHE, 8000, { ...step, alsoOk: SETTINGS_CLEAR_DATA });
+        const btn = await findOnScreen(userId, deviceId, reCache, 8000, { ...step, alsoOk: reData });
         if (!btn) return stuck('Clear cache');
         if (btn.other) {
           // On the Storage page but no "Clear cache" button: some phones hide it when the cache is empty.
@@ -967,7 +986,7 @@ function createPhoneRemoteServer() {
         }
       }
       if (mode === 'data' || mode === 'both') {
-        const btn = await findOnScreen(userId, deviceId, SETTINGS_CLEAR_DATA, 8000, step);
+        const btn = await findOnScreen(userId, deviceId, reData, 8000, step);
         if (!btn) return stuck('Clear data');
         if (btn.f && btn.f.includes('d')) {
           done.push('data was already empty');
@@ -986,7 +1005,8 @@ function createPhoneRemoteServer() {
             const t = await fetchUiTree(userId, deviceId, false, 5000);
             confirm = (t.nodes || []).find((x) => {
               const s = String(x.text || x.desc || '').trim();
-              return SETTINGS_CONFIRM.test(s) && !(x.x === btn.x && x.y === btn.y);
+              if (x.x === btn.x && x.y === btn.y) return false;
+              return x.id === 'button1' || reConfirm.test(s);
             });
           } catch { /* keep polling */ }
           if (!confirm) await sleep(WAIT_POLL_MS);

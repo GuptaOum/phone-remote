@@ -36,6 +36,8 @@
 
     <!-- See other apps' launcher activities so open_app can resolve a name → package (Android 11+) -->
     <queries>
+        <!-- clear_app_storage: read Settings' own translated button labels -->
+        <package android:name="com.android.settings" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />

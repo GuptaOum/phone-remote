@@ -1266,7 +1266,43 @@ class ConnectionForegroundService : Service() {
         reply(true) {
             put("name", name)
             put("system", info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0)
+            put("labels", settingsLabels())
         }
+    }
+
+    /**
+     * The Settings app's own button labels in the phone's current language
+     * ("Storage", "Clear cache", "Clear data", "OK" — or "स्टोरेज", "कैश साफ़
+     * करें"… on a Hindi phone), read from Settings' string resources. The
+     * server matches these so clear_app_storage works in any language.
+     * Vendors keep most AOSP string names; any name a phone lacks is skipped.
+     */
+    private fun settingsLabels(): JSONObject {
+        val out = JSONObject()
+        val res = try {
+            packageManager.getResourcesForApplication("com.android.settings")
+        } catch (_: Exception) { null }
+        fun collect(key: String, names: List<String>) {
+            val arr = org.json.JSONArray()
+            for (n in names) {
+                try {
+                    val rid = res?.getIdentifier(n, "string", "com.android.settings") ?: 0
+                    if (rid != 0) res?.getString(rid)?.trim()?.takeIf { it.isNotEmpty() }?.let { arr.put(it) }
+                } catch (_: Exception) {}
+            }
+            out.put(key, arr)
+        }
+        collect("storage", listOf("storage_settings_for_app", "storage_settings", "storage_label", "storage_usage_summary_title"))
+        collect("clearCache", listOf("clear_cache_btn_text"))
+        collect("clearData", listOf("clear_user_data_text", "clear_storage_btn_text", "clear_data_btn_text"))
+        val ok = org.json.JSONArray()
+        try { ok.put(android.content.res.Resources.getSystem().getString(android.R.string.ok)) } catch (_: Exception) {}
+        try {
+            val rid = res?.getIdentifier("dlg_ok", "string", "com.android.settings") ?: 0
+            if (rid != 0) res?.getString(rid)?.let { ok.put(it) }
+        } catch (_: Exception) {}
+        out.put("ok", ok)
+        return out
     }
 
     /**
