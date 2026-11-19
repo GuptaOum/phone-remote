@@ -28,10 +28,12 @@ servers; it only points Claude at the remote MCP server and adds the skill.
    (`https://65-1-96-152.sslip.io/phone-remote.apk`), create an account, and
    grant the permissions the app lists (Accessibility for taps and typing;
    optional Notification access and Usage access).
-2. Add this plugin from the Claude directory, or in Claude Code run
-   `/plugin install phone-remote --marketplace GuptaOum/phone-remote`. The first time Claude uses the phone, a browser window
-   opens: sign in with the same account and approve access (OAuth 2.1).
-3. Ask things like "what's on my phone screen", "open my Download folder" or
+2. Download the plugin zip
+   (`https://github.com/GuptaOum/phone-remote/releases/latest/download/phone-remote-plugin.zip`)
+   and add it as a plugin in Claude. No commands needed.
+3. The first time Claude uses the phone, a browser window opens: sign in with
+   the same account as the app and approve access.
+4. Ask things like "what's on my phone screen", "open my Download folder" or
    "find apps I haven't used in a month".
 
 ## Make it yours

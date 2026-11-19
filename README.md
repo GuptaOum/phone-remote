@@ -293,6 +293,12 @@ fraction of the screen width and height), not pixels.
 
 ### Use it with your AI agent
 
+**Using Claude? The easy way:** install the app (step 1 below), download
+[`phone-remote-plugin.zip`](https://github.com/GuptaOum/phone-remote/releases/latest/download/phone-remote-plugin.zip),
+add it as a plugin in Claude, and sign in when the browser opens. That's it:
+the plugin brings the MCP server and the skill together. For any other agent,
+follow the steps below.
+
 Three steps, free:
 
 1. **Get the app.** Install the Android app on your phone:
