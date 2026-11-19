@@ -327,6 +327,7 @@ const TOOL_TITLES = {
   wait: 'Wait', ring: 'Ring phone', flash_light: 'Flash light', list_files: 'List phone files',
   get_file: 'Download file from phone', send_local_file: 'Send local file to phone', send_file: 'Send file to phone',
   send_url: 'Send URL download to phone', open_settings: 'Open a Settings page',
+  open_file: 'Open a file or folder',
 };
 
 // Pages open_settings can reach; mirrors the phone's fixed list
@@ -641,6 +642,39 @@ function createPhoneRemoteServer() {
       return textResult(r.fallback
         ? `This phone has no direct "${page}" page, so the main Settings screen opened instead. Navigate from there (get_ui_tree).`
         : `Opened ${what}.`);
+    }
+  );
+
+  // 7c. open_file
+  tool(
+    'open_file',
+    'Open a file or folder on the phone directly, the file-system twin of open_settings. A file (image, video, PDF, document, APK…) opens in the app that normally handles its type, or in `package` when given (e.g. com.coloros.gallery3d to get the phone gallery\'s own menu with "Set as wallpaper"). A folder opens in the system Files app at that folder. Paths are under /storage/emulated/0; a relative path like "DCIM/photo.png" is resolved from there. Find paths with list_files. It only opens the file; read the screen with get_ui_tree and act from there.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      path: z.string().describe('File or folder path, e.g. "DCIM/photo.png" or "/storage/emulated/0/Download"'),
+      package: z.string().optional().describe('Optional: exact package name of the app to open a file with (from list_apps)'),
+    },
+    async ({ deviceId, path, package: pkg }, { authInfo }) => {
+      const userId = authInfo.userId;
+      if (!path || !String(path).trim()) return textResult('A path is required (see list_files).', true);
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'open_file')) {
+        return textResult('This phone build cannot open files directly — update the app.', true);
+      }
+      const target = confineToBase(String(path).trim());
+      let r;
+      try {
+        r = await signaling.requestFromPhone(userId, deviceId,
+          (id) => ({ type: 'open_file', id, path: target, ...(pkg ? { package: String(pkg).trim() } : {}) }),
+          15000, 'open_file');
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+      if (!r.ok) return textResult(r.error || 'Could not open that path.', true);
+      await sleep(800);
+      return textResult(r.kind === 'folder'
+        ? `Opened folder ${r.path} in ${r.app || 'the Files app'}.`
+        : `Opened ${r.path} (${r.mime}) in ${r.app || 'its default app'}.`);
     }
   );
 

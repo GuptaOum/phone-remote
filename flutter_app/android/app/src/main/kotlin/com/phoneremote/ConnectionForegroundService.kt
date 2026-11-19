@@ -277,7 +277,7 @@ class ConnectionForegroundService : Service() {
                                     // builds omit it and keep the fire-and-forget path.
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
-                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings",
+                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings", "open_file",
                                         "frame_ack", "webrtc_screen", "webrtc_camera",
                                     )))
                                 }
@@ -394,6 +394,10 @@ class ConnectionForegroundService : Service() {
                             }
                             "open_settings" -> {
                                 handleOpenSettings(json)
+                                return@post
+                            }
+                            "open_file" -> {
+                                handleOpenFile(json)
                                 return@post
                             }
                             "open_app_settings" -> {
@@ -1076,6 +1080,10 @@ class ConnectionForegroundService : Service() {
                                 sess.tmp.copyTo(final, overwrite = true)
                                 sess.tmp.delete()
                             }
+                            // Tell MediaStore about the new file so Photos/Gallery and
+                            // pickers see it right away instead of whenever the system
+                            // next rescans.
+                            scanIntoMediaStore(final.path)
                             send(JSONObject().apply { put("type", "pf_upload_ok"); put("id", id); put("path", sess.finalPath) }.toString())
                         }
                     }
@@ -1333,6 +1341,83 @@ class ConnectionForegroundService : Service() {
         reply(true) {
             if (appName != null) { put("name", appName); put("package", pkg) }
             if (fellBack) put("fallback", true)
+        }
+    }
+
+    /** Registers a file with MediaStore (fire and forget). */
+    private fun scanIntoMediaStore(path: String) {
+        try {
+            android.media.MediaScannerConnection.scanFile(applicationContext, arrayOf(path), null, null)
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * Opens a file or folder from shared storage, the file-system twin of
+     * open_settings. A file is scanned into MediaStore (so it gets a content://
+     * URI other apps may read) and handed to its default viewer, or to `package`
+     * when given. A folder opens in the system Files app at that folder.
+     */
+    private fun handleOpenFile(json: JSONObject) {
+        val id = json.optString("id")
+        if (id.isEmpty()) return
+        val pkg = json.optString("package").trim()
+        val reply = { ok: Boolean, extra: JSONObject.() -> Unit ->
+            send(JSONObject().apply {
+                put("type", "open_file_result"); put("id", id); put("ok", ok); extra()
+            }.toString())
+        }
+        val f = confinedFile(json.optString("path").trim())
+            ?: run { reply(false) { put("error", "Path is outside shared storage ($phoneBase)") }; return }
+        if (!f.exists()) { reply(false) { put("error", "Nothing exists at ${f.path}") }; return }
+        val ctx: Context = RemoteAccessibilityService.instance ?: this
+        val launch = { intent: Intent, extra: JSONObject.() -> Unit ->
+            if (pkg.isNotEmpty()) intent.setPackage(pkg)
+            val ri = packageManager.resolveActivity(intent, 0)
+            if (ri == null) {
+                reply(false) {
+                    put("error", if (pkg.isNotEmpty()) "$pkg cannot open this" else "No installed app can open this")
+                }
+            } else {
+                handler.post {
+                    try { ctx.startActivity(intent) } catch (_: Exception) {
+                        try { startActivity(intent) } catch (_: Exception) {}
+                    }
+                }
+                reply(true) {
+                    put("path", f.path)
+                    put("app", ri.activityInfo?.packageName ?: "")
+                    extra()
+                }
+            }
+        }
+
+        if (f.isDirectory) {
+            // DocumentsUI understands a document id of "primary:<relative path>".
+            val rel = f.path.removePrefix(java.io.File(phoneBase).canonicalPath).trimStart('/')
+            val uri = android.provider.DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents", "primary:$rel")
+            val intent = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "vnd.android.document/directory")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            launch(intent) { put("kind", "folder") }
+            return
+        }
+
+        val ext = f.extension.lowercase()
+        val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+        try {
+            android.media.MediaScannerConnection.scanFile(applicationContext, arrayOf(f.path), arrayOf(mime)) { _, uri ->
+                if (uri == null) {
+                    reply(false) { put("error", "Android could not index ${f.name}, so no app can be given access to it") }
+                    return@scanFile
+                }
+                val intent = Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, mime)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                launch(intent) { put("kind", "file"); put("mime", mime) }
+            }
+        } catch (e: Exception) {
+            reply(false) { put("error", e.message ?: "scan failed") }
         }
     }
 
