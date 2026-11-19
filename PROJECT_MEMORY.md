@@ -48,7 +48,7 @@ phone-remote/
 │   ├── src/routes/
 │   │   ├── auth.js            # register / login / JWT, /api/me
 │   │   ├── files.js           # PC-side file upload/download
-│   │   ├── mcp.js             # MCP Streamable HTTP at /mcp (@modelcontextprotocol/sdk, 30 tools)
+│   │   ├── mcp.js             # MCP Streamable HTTP at /mcp (@modelcontextprotocol/sdk, 31 tools)
 │   │   └── oauth.js           # OAuth 2.1 + PKCE, dynamic client registration, discovery
 │   ├── src/services/
 │   │   ├── signaling.js       # multi-tenant WebSocket relay + WebRTC signaling
@@ -131,7 +131,7 @@ Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/ph
 
 ---
 
-## ⚡ 6. MCP Tool Catalog (30 tools, `server/src/routes/mcp.js`)
+## ⚡ 6. MCP Tool Catalog (31 tools, `server/src/routes/mcp.js`)
 
 **SDK** `@modelcontextprotocol/sdk` 1.32.2 (latest as of 2026-11-19), server `phone-remote` v2.1.0. Tools use `registerTool` with a **title** and **annotations** taken from `READ_ONLY_TOOLS`, `DESTRUCTIVE_TOOLS`, `OPEN_WORLD_TOOLS` and `TOOL_TITLES` at the top of `mcp.js`. **When adding a tool, add its name to the right set and to `TOOL_TITLES`.** The server also sends `SERVER_INSTRUCTIONS` (usage guidance) to every client on connect.
 
@@ -141,7 +141,7 @@ Annotations: 13 read-only (marked 🔎), 2 destructive (marked ⚠️, clients s
 | :--- | :--- |
 | Perception | 🔎 `list_devices` · 🔎 `get_device_status` (battery, screen on, **locked**, accessibility, network) · 🔎 `get_location` · 🔎 `get_foreground_app` · 🔎 `get_ui_tree(all, filter)` · 🔎 `wait_for(text/id/app, gone, timeout)` · 🔎 `take_screenshot` |
 | Touch & keys | `tap` · `long_press` · `swipe` · `scroll` · `type_text(method: set or paste, submit)` · `press_key` · 🔎 `wait` |
-| Apps & navigation | `open_app` · `open_app_drawer` · `open_url` · `open_settings(page, package)` |
+| Apps & navigation | `open_app` · `open_app_drawer` · `open_url` · `open_settings(page, package)` · `open_file(path, package)` |
 | App storage | 🔎 `list_apps(filter, sizes, minSizeMB, system)` · 🔎 `find_unused_apps(days=30, minSizeMB)` · ⚠️ `clear_app_storage(package, what: cache, data or both)` · ⚠️ `uninstall_app(package, confirm)` |
 | Alerts | `ring` · `flash_light` · 🔎 `read_notifications` |
 | Files | 🔎 `list_files` · 🔎 `get_file` · `send_local_file` · `send_file` (base64) · `send_url` |
@@ -394,4 +394,4 @@ When the user gives a local PC file (e.g. `C:\Users\hp\Desktop\...\image.png` or
 All phone interactions MUST strictly use the 29 standard `phone-remote` MCP tools documented in Section 6 and `MCP_PHONE_NAVIGATION.md`.
 
 ---
-*Last updated: 2026-11-19 (30 tools, open_settings, system-app flag, with annotations, app-storage tools, persisted OAuth clients, arm64 APK, MIT license).*
+*Last updated: 2026-11-20 (31 tools incl. open_file, Claude plugin + skill in plugin/, directory submissions, PRIVACY.md, new icon/favicon).*
