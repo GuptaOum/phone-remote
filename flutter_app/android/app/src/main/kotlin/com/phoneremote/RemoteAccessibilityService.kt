@@ -46,7 +46,28 @@ class RemoteAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {}
 
     /** Package name of whatever is on screen right now, or null if unknown. */
-    fun foregroundPackage(): String? = rootInActiveWindow?.packageName?.toString()
+    fun foregroundPackage(): String? = screenRoot()?.packageName?.toString()
+
+    /**
+     * Root of the window the user is looking at.
+     *
+     * rootInActiveWindow alone is not enough: on realme/ColorOS, when focus
+     * briefly passes through the NotificationShade while a new activity
+     * starts (e.g. the uninstall prompt), the framework's "active window"
+     * can stay unset and rootInActiveWindow keeps returning null until the
+     * next touch. The window list (flagRetrieveInteractiveWindows) still
+     * knows which window has input focus, so fall back to that, then to the
+     * topmost application window.
+     */
+    fun screenRoot(): android.view.accessibility.AccessibilityNodeInfo? {
+        rootInActiveWindow?.let { return it }
+        val list = try { windows } catch (_: Exception) { return null }
+        list.firstOrNull { it.isFocused }?.root?.let { return it }
+        return list
+            .filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
+            .maxByOrNull { it.layer }
+            ?.root
+    }
 
     // ── UI tree ───────────────────────────────────────────────────────────
     // Android already describes the screen as a structured tree; reading it
@@ -71,7 +92,7 @@ class RemoteAccessibilityService : AccessibilityService() {
      */
     fun uiTree(includeAll: Boolean, filter: String?, sw: Float, sh: Float): Pair<JSONArray, Boolean> {
         val arr = JSONArray()
-        val root = rootInActiveWindow ?: return Pair(arr, false)
+        val root = screenRoot() ?: return Pair(arr, false)
         if (sw <= 0f || sh <= 0f) return Pair(arr, false)
         val needle = filter?.trim()?.takeIf { it.isNotEmpty() }?.lowercase()
         val truncated = walkNode(root, arr, includeAll, needle, sw, sh)
@@ -211,7 +232,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             "KEYCODE_NOTIFICATION"   -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
             "KEYCODE_QUICK_SETTINGS" -> performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
             "KEYCODE_DPAD_LEFT", "KEYCODE_DPAD_RIGHT" -> {
-                val focused = rootInActiveWindow?.findFocus(
+                val focused = screenRoot()?.findFocus(
                     android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
                 val cur = focused.text?.toString() ?: ""
                 val sel = if (keycode == "KEYCODE_DPAD_LEFT")
@@ -228,7 +249,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                 focused.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
             }
             "KEYCODE_DPAD_UP", "KEYCODE_DPAD_DOWN" -> {
-                val focused = rootInActiveWindow?.findFocus(
+                val focused = screenRoot()?.findFocus(
                     android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
                 val args = Bundle()
                 args.putInt(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT,
@@ -259,7 +280,7 @@ class RemoteAccessibilityService : AccessibilityService() {
 
     /** @return true only if a focused text field accepted the edit. */
     private fun editFocusedText(transform: (String, Int, Int) -> Pair<String, Int>): Boolean {
-        val focused = rootInActiveWindow?.findFocus(
+        val focused = screenRoot()?.findFocus(
             android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
         val showingHint = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
             focused.isShowingHintText
@@ -301,7 +322,7 @@ class RemoteAccessibilityService : AccessibilityService() {
      * @return true only if a focused field accepted the paste.
      */
     fun pasteText(text: String): Boolean {
-        val focused = rootInActiveWindow?.findFocus(
+        val focused = screenRoot()?.findFocus(
             android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
         return try {
             val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
