@@ -57,7 +57,7 @@ phone-remote/
 │   │   └── turn.js            # short-lived coturn credentials
 │   └── public/                # oauth-authorize.html (approval page), shared.css
 ├── flutter_app/               # Android app (Flutter 3.44.6 + Kotlin services)
-│   └── tool/                  # build_release_apk.sh, verify_release_apk.sh
+│   └── pubspec.yaml
 ├── nginx/                     # nginx image: TLS, SNI router (stream.conf), default.conf
 ├── deploy/deploy.sh           # CI/CD deploy script (runs on EC2)
 ├── .github/workflows/deploy.yml
@@ -167,9 +167,9 @@ App-storage details:
 
 ### Build & publish the APK (on EC2, never on the PC)
 ```bash
-ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && git pull -q --ff-only && flutter_app/tool/build_release_apk.sh"
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && git pull -q --ff-only && ~/bin/build-apk.sh"
 ```
-The script builds **arm64-only** (`--target-platform android-arm64` plus `packagingOptions` excluding other ABIs for release builds; `ndk.abiFilters` does NOT work because Flutter's Gradle plugin overrides it), runs `verify_release_apk.sh` (must print **PASS**: catches R8 stripping libwebrtc / jni_zero classes, and any non-arm64 ABI sneaking back), publishes, and stops the Gradle daemon so the SSH call returns. One build at a time. Result: **~31 MB** APK (was 88 MB), ~2–5 min build.
+The script builds **arm64-only** (`--target-platform android-arm64` plus `packagingOptions` excluding other ABIs for release builds; `ndk.abiFilters` does NOT work because Flutter's Gradle plugin overrides it), runs `~/bin/verify-apk.sh` (EC2-only helpers, kept outside the repo; must print **PASS**: catches R8 stripping libwebrtc / jni_zero classes, and any non-arm64 ABI sneaking back), publishes, and stops the Gradle daemon so the SSH call returns. One build at a time. Result: **~31 MB** APK (was 88 MB), ~2–5 min build.
 
 Install on the test phone over USB from the PC: `scp` the APK down, then `adb -s FYDUAMAM9DZDR84D install -r phone-remote.apk` (adb at `E:\Android\Sdk\platform-tools`). Updating stops the app's services; launch it again (`adb shell monkey -p com.phoneremote -c android.intent.category.LAUNCHER 1`) and it reconnects within seconds.
 

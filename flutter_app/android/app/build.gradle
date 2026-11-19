@@ -42,7 +42,7 @@ android {
     }
 
     // Release APKs are 64-bit ARM only (every phone from the last ~6 years):
-    // build with --target-platform android-arm64 (tool/build_release_apk.sh).
+    // build with --target-platform android-arm64 (flutter build apk --release --target-platform android-arm64).
     // Plugins and libwebrtc's AAR still bring their own .so for other ABIs,
     // and ndk.abiFilters is overridden by Flutter's Gradle plugin, so drop
     // those folders at packaging time. Otherwise a 32-bit phone would get

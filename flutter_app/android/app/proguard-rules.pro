@@ -2,8 +2,7 @@
 # Its native code finds Java classes, methods and fields by exact name over JNI;
 # if R8 renames or strips any of them the app aborts (uncatchable native crash)
 # the moment WebRTC starts — the phone drops right after "Start now" on the
-# screen-cast prompt. Checked after every release build by
-# tool/verify_release_apk.sh.
+# screen-cast prompt.
 
 # BUG-R1: the org.webrtc API classes.
 -keep class org.webrtc.** { *; }

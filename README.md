@@ -157,7 +157,7 @@ flowchart LR
 │   ├── android/app/src/main/kotlin/com/phoneremote/
 │   │                       Native services: connection, screen/camera capture,
 │   │                       WebRTC, accessibility input, notifications
-│   └── tool/verify_release_apk.sh   Release-build regression check
+│   └── pubspec.yaml
 ├── nginx/                  nginx image: SNI router (stream.conf) + site (default.conf)
 ├── docker-compose.yml      nginx · app · coturn (+ turn-init)
 ├── DEPLOY.md               Production deployment runbook
@@ -271,17 +271,16 @@ APK, image publishing and moving to your own domain — is in
 | Camera, location, storage | Camera stream, location, file manager |
 | Battery: unrestricted | Keeps the background service alive on aggressive OEMs |
 
-**Build a release APK.** Run the regression check every time:
+**Build a release APK:**
 
 ```bash
 cd flutter_app
-flutter build apk --release
-bash tool/verify_release_apk.sh   # must print PASS
+flutter build apk --release --target-platform android-arm64
 ```
 
 libwebrtc ships no shrinker rules. If R8 strips its Java classes, the app
-crashes the moment WebRTC starts. `android/app/proguard-rules.pro` keeps them,
-and `verify_release_apk.sh` fails the build if they go missing again.
+crashes the moment WebRTC starts. `android/app/proguard-rules.pro` keeps them:
+leave those rules in place.
 
 ---
 
@@ -508,7 +507,7 @@ cd ~/phone-remote && docker compose logs app-blue app-green | grep -E "🔗|🧭
 
 | Symptom | Check |
 |---|---|
-| App closes the moment streaming starts | Run `tool/verify_release_apk.sh`: R8 keep rules missing |
+| App closes the moment streaming starts | R8 keep rules missing: check `android/app/proguard-rules.pro` |
 | Stuck on "Connecting video…" | `🧭` trace; TURN ports open; `turn.<domain>` included in the certificate |
 | Phone shows offline | App battery set to Unrestricted; the phone's own logs |
 | Agent gets `401` | Token expired: sign in again, or re-authorize the connector |

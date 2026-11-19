@@ -53,17 +53,18 @@ which would start both colours. Which colour is live: `cat ~/phone-remote/.deplo
 `~/phone-remote` is a git checkout; `server/.env`, `server/data/`, `downloads/`
 and build output are gitignored, so deploys never touch them.
 
-**Build, check and publish the APK on EC2:**
+**Build and publish the APK:**
 
 ```bash
-ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && git pull -q --ff-only && flutter_app/tool/build_release_apk.sh"
-scp -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152:~/phone-remote/downloads/phone-remote.apk .
+cd flutter_app
+flutter build apk --release --target-platform android-arm64
+cp build/app/outputs/flutter-apk/app-release.apk ../downloads/phone-remote.apk
 ```
 
-`tool/verify_release_apk.sh` must print **PASS** — it fails if R8 stripped the
-libwebrtc / jni_zero classes (that crashes the app the moment WebRTC starts;
-keep rules in `flutter_app/android/app/proguard-rules.pro`). Publishing is just
-the `cp` into `downloads/` — no image rebuild needed.
+Keep the R8 rules in `flutter_app/android/app/proguard-rules.pro`: without them
+the libwebrtc / jni_zero classes are stripped and the app crashes the moment
+WebRTC starts. Publishing is just the `cp` into `downloads/`, with no image
+rebuild needed.
 
 **Debug WebRTC on a USB-connected phone:** `adb logcat -s PhoneRemote` prints
 `rtc screen: <fps> <size> <kbps> limit=… path=<local>→<remote> rtt=…` every 5 s
