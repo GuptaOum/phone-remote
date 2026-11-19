@@ -46,3 +46,7 @@ week7_submission/
 
 # Blue-green deploy state (which app colour is live) — EC2 only
 .deploy/
+
+# Plugin zips are published on the GitHub release, not stored in git
+phone-remote-plugin.zip
+phone-remote-skill.zip
