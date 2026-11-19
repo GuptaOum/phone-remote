@@ -559,6 +559,57 @@ function createPhoneRemoteServer() {
     }
   );
 
+  // 7b. find_unused_apps
+  server.tool(
+    'find_unused_apps',
+    'Find apps the user has not opened for a while, biggest first: the best candidates for freeing storage. Each result has its size (MB), the date it was last used (or "not in the last year"), and how many days ago that was. Apps installed more recently than `days` are skipped (they have not had the chance to be used). Read-only: follow up with uninstall_app or clear_app_storage only for apps the user picks. Needs the one-time "Usage access" grant on the phone.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      days: z.coerce.number().min(1).max(365).optional().describe('Unused for at least this many days (default 30)'),
+      minSizeMB: z.coerce.number().min(0).optional().describe('Only apps using at least this many MB (default 0)'),
+    },
+    async ({ deviceId, days, minSizeMB }, { authInfo }) => {
+      const userId = authInfo.userId;
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'app_usage')) {
+        return textResult('This phone build cannot report when apps were last used — update the app.', true);
+      }
+      const minDays = days ?? 30;
+      const minMB = minSizeMB ?? 0;
+      let r;
+      try {
+        r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'list_apps', id, sizes: true, usage: true }), 30000, 'list_apps');
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+      if (r.error) return textResult(`The phone could not list apps: ${r.error}`, true);
+      if (r.usage_error || r.sizes_error) {
+        return textResult('This needs "Usage access": on the phone open Phone Remote → Permissions → Safety 7 (or Settings → Usage access → plusU) and turn it on.', true);
+      }
+      const now = Date.now();
+      const DAY = 24 * 3600 * 1000;
+      const mb = (b) => Math.round(((b || 0) / (1024 * 1024)) * 10) / 10;
+      const unused = (r.apps || [])
+        .filter((a) => a.package !== 'com.phoneremote')
+        .filter((a) => !a.installedMs || now - a.installedMs >= minDays * DAY)
+        .filter((a) => !a.lastUsedMs || now - a.lastUsedMs >= minDays * DAY)
+        .map((a) => ({
+          name: a.name,
+          package: a.package,
+          totalMB: mb((a.appBytes || 0) + (a.dataBytes || 0)),
+          lastUsed: a.lastUsedMs ? new Date(a.lastUsedMs).toISOString().slice(0, 10) : 'not in the last year',
+          daysUnused: a.lastUsedMs ? Math.floor((now - a.lastUsedMs) / DAY) : null,
+        }))
+        .filter((a) => a.totalMB >= minMB)
+        .sort((x, y) => y.totalMB - x.totalMB);
+      if (!unused.length) return textResult(`No app has gone unused for ${minDays}+ days${minMB ? ` while using ${minMB}+ MB` : ''}.`);
+      const totalMB = Math.round(unused.reduce((s, a) => s + a.totalMB, 0));
+      const result = textResult(unused);
+      result.content.push({ type: 'text', text: `${unused.length} app(s) unused for ${minDays}+ days, ${totalMB} MB in total.` });
+      return result;
+    }
+  );
+
   // 8b. uninstall_app
   server.tool(
     'uninstall_app',

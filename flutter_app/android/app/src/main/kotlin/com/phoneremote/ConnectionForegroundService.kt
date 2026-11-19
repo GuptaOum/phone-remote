@@ -277,7 +277,7 @@ class ConnectionForegroundService : Service() {
                                     // builds omit it and keep the fire-and-forget path.
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
-                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings",
+                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage",
                                         "frame_ack", "webrtc_screen", "webrtc_camera",
                                     )))
                                 }
@@ -1125,10 +1125,30 @@ class ConnectionForegroundService : Service() {
                     }
                 }
                 val statsMgr = stats
+                // usage:true → when each app was last used (and installed), for
+                // find_unused_apps. Same "Usage access" grant as sizes.
+                var lastUsed: Map<String, android.app.usage.UsageStats>? = null
+                if (json.optBoolean("usage", false)) {
+                    if (!UsageAccess.granted(this)) {
+                        out.put("usage_error", "usage_access_not_granted")
+                    } else {
+                        val usm = getSystemService(Context.USAGE_STATS_SERVICE) as android.app.usage.UsageStatsManager
+                        val now = System.currentTimeMillis()
+                        lastUsed = usm.queryAndAggregateUsageStats(now - 365L * 24 * 3600 * 1000, now)
+                    }
+                }
+                val usageMap = lastUsed
                 val arr = org.json.JSONArray()
                 apps.forEach { (lbl, pkg) ->
                     arr.put(JSONObject().apply {
                         put("name", lbl); put("package", pkg)
+                        if (usageMap != null) {
+                            put("lastUsedMs", usageMap[pkg]?.lastTimeUsed ?: 0L)
+                            put("foregroundMs", usageMap[pkg]?.totalTimeInForeground ?: 0L)
+                            try {
+                                put("installedMs", pm.getPackageInfo(pkg, 0).firstInstallTime)
+                            } catch (_: Exception) {}
+                        }
                         if (statsMgr != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                             try {
                                 val st = statsMgr.queryStatsForPackage(

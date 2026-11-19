@@ -46,7 +46,7 @@ phone-remote/
 │   ├── src/routes/
 │   │   ├── auth.js            # register / login / JWT, /api/me
 │   │   ├── files.js           # PC-side file upload/download
-│   │   ├── mcp.js             # MCP Streamable HTTP at /mcp (@modelcontextprotocol/sdk, 28 tools)
+│   │   ├── mcp.js             # MCP Streamable HTTP at /mcp (@modelcontextprotocol/sdk, 29 tools)
 │   │   └── oauth.js           # OAuth 2.1 + PKCE, dynamic client registration, discovery
 │   ├── src/services/
 │   │   ├── signaling.js       # multi-tenant WebSocket relay + WebRTC signaling
@@ -127,7 +127,7 @@ Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/ph
 
 ---
 
-## ⚡ 6. MCP Tool Catalog (28 tools, `server/src/routes/mcp.js`)
+## ⚡ 6. MCP Tool Catalog (29 tools, `server/src/routes/mcp.js`)
 
 ### Perception
 1. **`list_devices()`** — linked phones, online status, model, screen size.
@@ -136,7 +136,8 @@ Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/ph
 4. **`get_foreground_app(deviceId)`** — active package.
 5. **`get_ui_tree(deviceId, all, filter)`** — structured tree with normalized `(x, y)` centers.
 6. **`wait_for(deviceId, text, id, app, gone, timeout)`** — polls the tree until the condition holds.
-7. **`list_apps(deviceId, filter, sizes, minSizeMB)`** — installed apps with packages; `sizes` adds storage per app (needs the Usage access grant, Safety 7).
+7. **`find_unused_apps(deviceId, days, minSizeMB)`**: apps not opened for `days` (default 30), biggest first, skipping apps installed more recently; needs Usage access.
+7a. **`list_apps(deviceId, filter, sizes, minSizeMB)`** — installed apps with packages; `sizes` adds storage per app (needs the Usage access grant, Safety 7).
 
 ### Touch & keys
 8. **`take_screenshot`** · 9. **`tap`** · 10. **`long_press`** · 11. **`swipe`** · 12. **`scroll`** · 13. **`type_text`** (`method: set|paste`, `submit`) · 14. **`press_key`** (back, home, recents, lock, volume)
