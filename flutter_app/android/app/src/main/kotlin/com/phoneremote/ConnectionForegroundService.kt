@@ -277,7 +277,7 @@ class ConnectionForegroundService : Service() {
                                     // builds omit it and keep the fire-and-forget path.
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
-                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes",
+                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings",
                                         "frame_ack", "webrtc_screen", "webrtc_camera",
                                     )))
                                 }
@@ -390,6 +390,10 @@ class ConnectionForegroundService : Service() {
                             }
                             "uninstall_app" -> {
                                 handleUninstallApp(json)
+                                return@post
+                            }
+                            "open_app_settings" -> {
+                                handleOpenAppSettings(json)
                                 return@post
                             }
                         }
@@ -744,6 +748,8 @@ class ConnectionForegroundService : Service() {
         }
         field("charging") { (getSystemService(BATTERY_SERVICE) as android.os.BatteryManager).isCharging }
         field("screenOn") { (getSystemService(POWER_SERVICE) as android.os.PowerManager).isInteractive }
+        // Lock screen showing (PIN/pattern/swipe). Taps can't reach apps until unlocked.
+        field("locked") { (getSystemService(KEYGUARD_SERVICE) as KeyguardManager).isKeyguardLocked }
         // The single most useful field: touch/type silently no-op without this.
         field("accessibilityEnabled") { RemoteAccessibilityService.instance != null }
         field("notificationAccess") { NotificationService.isGranted(this) }
@@ -1182,6 +1188,42 @@ class ConnectionForegroundService : Service() {
             }
         }
         reply(true) { put("name", name) }
+    }
+
+    /**
+     * Opens Android's "App info" page for an exact package — the page with
+     * Storage → Clear cache / Clear data. A normal app can't clear another
+     * app's data itself (CLEAR_APP_USER_DATA is system-only), so the MCP
+     * clear_app_storage tool opens this page and taps through it.
+     */
+    private fun handleOpenAppSettings(json: JSONObject) {
+        val id = json.optString("id")
+        if (id.isEmpty()) return
+        val pkg = json.optString("package").trim()
+        val reply = { ok: Boolean, extra: JSONObject.() -> Unit ->
+            send(JSONObject().apply {
+                put("type", "open_app_settings_result"); put("id", id); put("ok", ok); put("package", pkg); extra()
+            }.toString())
+        }
+        if (pkg.isEmpty()) { reply(false) { put("error", "A package name is required") }; return }
+        val info = try {
+            packageManager.getApplicationInfo(pkg, 0)
+        } catch (_: Exception) {
+            reply(false) { put("error", "No installed app has package \"$pkg\"") }; return
+        }
+        val name = try { packageManager.getApplicationLabel(info).toString() } catch (_: Exception) { pkg }
+        val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            android.net.Uri.parse("package:$pkg")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val ctx: Context = RemoteAccessibilityService.instance ?: this
+        handler.post {
+            try { ctx.startActivity(intent) } catch (_: Exception) {
+                try { startActivity(intent) } catch (_: Exception) {}
+            }
+        }
+        reply(true) {
+            put("name", name)
+            put("system", info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0)
+        }
     }
 
     // Schemes that would let a caller reach into this app's own files or

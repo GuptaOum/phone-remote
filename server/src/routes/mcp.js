@@ -618,6 +618,140 @@ function createPhoneRemoteServer() {
     }
   );
 
+  // 8c. clear_app_storage
+  //
+  // Android has no way for a normal app to clear another app's cache or data
+  // (CLEAR_APP_USER_DATA is system-only), so this runs the fixed, minimal UI
+  // path: App info (opened directly by the phone) → Storage → Clear cache /
+  // Clear data → confirm. Button names vary by vendor, hence the lists below.
+  const SETTINGS_STORAGE = /^(storage|storage usage|storage & cache|storage and cache|storage & memory)$/i;
+  const SETTINGS_CLEAR_CACHE = /^(clear cache|delete cache|clear cache data)$/i;
+  const SETTINGS_CLEAR_DATA = /^(clear data|clear storage|clear all data|delete data|clear user data)$/i;
+  const SETTINGS_CONFIRM = /^(ok|delete|clear|confirm|delete data|clear data|yes)$/i;
+  const PROTECTED_PACKAGES = new Set([
+    'com.phoneremote', 'com.google.android.gms', 'com.google.android.gsf',
+    'com.android.vending', 'com.android.systemui', 'com.android.settings', 'com.android.phone',
+  ]);
+
+  // Poll the UI tree until a node's text/label fully matches re. Returns the node or null.
+  async function findOnScreen(userId, deviceId, re, timeoutMs = 6000) {
+    const end = Date.now() + timeoutMs;
+    while (Date.now() < end) {
+      try {
+        const t = await fetchUiTree(userId, deviceId, false, 5000);
+        const n = (t.nodes || []).find((x) => re.test(String(x.text || x.desc || '').trim()));
+        if (n) return n;
+      } catch { /* keep polling */ }
+      await sleep(WAIT_POLL_MS);
+    }
+    return null;
+  }
+
+  async function appSizeMB(userId, deviceId, pkg) {
+    if (!signaling.deviceSupports(userId, deviceId, 'app_sizes')) return null;
+    try {
+      const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'list_apps', id, sizes: true }), 30000, 'list_apps');
+      const a = (r.apps || []).find((x) => x.package === pkg);
+      if (!a || r.sizes_error || a.dataBytes == null) return null;
+      const mb = (b) => Math.round(((b || 0) / (1024 * 1024)) * 10) / 10;
+      return { totalMB: mb((a.appBytes || 0) + (a.dataBytes || 0)), dataMB: mb(a.dataBytes), cacheMB: mb(a.cacheBytes) };
+    } catch {
+      return null;
+    }
+  }
+
+  server.tool(
+    'clear_app_storage',
+    'Clear an app\'s cache and/or data on the phone by exact package name (get it from list_apps). Android does not let apps do this directly, so the tool runs the minimal Settings path itself: App info → Storage → Clear cache / Clear data → confirm, then reports the size before and after. Clearing CACHE is harmless (temporary files). Clearing DATA is PERMANENT: it deletes the app\'s downloads, settings and login (the user must sign in again); only do it when the user explicitly asked for that app\'s data to be cleared. The phone must be unlocked. Refuses Phone Remote itself and core system packages.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      package: z.string().describe('Exact package name, e.g. com.google.android.apps.youtube.music'),
+      what: z.enum(['cache', 'data', 'both']).optional().describe('cache = temporary files only; data = everything (includes cache); both = clear cache then data. Default cache.'),
+    },
+    async ({ deviceId, package: pkg, what }, { authInfo }) => {
+      const userId = authInfo.userId;
+      const mode = what || 'cache';
+      if (!pkg) return textResult('A package name is required (see list_apps).', true);
+      if (PROTECTED_PACKAGES.has(pkg) || pkg.startsWith('com.android.providers.')) {
+        return textResult(`Refusing to clear ${pkg}: it is a core system package or Phone Remote itself.`, true);
+      }
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'app_settings')) {
+        return textResult('This phone build cannot open App info pages — update the app.', true);
+      }
+      try {
+        const st = await fetchDeviceStatus(userId, deviceId);
+        if (st.locked) return textResult('The phone is locked. Ask the user to unlock it, then try again.', true);
+      } catch { /* older build: carry on, the steps below fail clearly if locked */ }
+
+      const before = await appSizeMB(userId, deviceId, pkg);
+      let r;
+      try {
+        r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'open_app_settings', id, package: pkg }), 12000, 'app_settings');
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+      if (!r.ok) return textResult(r.error || 'Could not open the App info page.', true);
+      const label = `${r.name || pkg} (${pkg})`;
+      const tapNode = async (n) => {
+        const t = await runControl(userId, deviceId, { type: 'control', action: 'tap', x: n.x, y: n.y });
+        return t.err;
+      };
+      const stuck = (step) => textResult(`Opened App info for ${label} but could not find "${step}". Take a screenshot to see the screen and finish by hand (tap, get_ui_tree).`, true);
+
+      const storage = await findOnScreen(userId, deviceId, SETTINGS_STORAGE, 8000);
+      if (!storage) return stuck('Storage');
+      let err = await tapNode(storage);
+      if (err) return err;
+
+      const done = [];
+      if (mode === 'cache' || mode === 'both') {
+        const btn = await findOnScreen(userId, deviceId, SETTINGS_CLEAR_CACHE);
+        if (!btn) return stuck('Clear cache');
+        if (btn.f && btn.f.includes('d')) {
+          done.push('cache was already empty');
+        } else {
+          err = await tapNode(btn);
+          if (err) return err;
+          done.push('cleared cache');
+          await sleep(800);
+        }
+      }
+      if (mode === 'data' || mode === 'both') {
+        const btn = await findOnScreen(userId, deviceId, SETTINGS_CLEAR_DATA);
+        if (!btn) return stuck('Clear data');
+        err = await tapNode(btn);
+        if (err) return err;
+        // Confirmation dialog: look for its button, but not the "Clear data"
+        // button we just tapped (it can still be on screen behind the dialog).
+        await sleep(600);
+        const end = Date.now() + 6000;
+        let confirm = null;
+        while (Date.now() < end && !confirm) {
+          try {
+            const t = await fetchUiTree(userId, deviceId, false, 5000);
+            confirm = (t.nodes || []).find((x) => {
+              const s = String(x.text || x.desc || '').trim();
+              return SETTINGS_CONFIRM.test(s) && !(x.x === btn.x && x.y === btn.y);
+            });
+          } catch { /* keep polling */ }
+          if (!confirm) await sleep(WAIT_POLL_MS);
+        }
+        if (!confirm) return stuck('the OK button in the "clear data?" popup');
+        err = await tapNode(confirm);
+        if (err) return err;
+        done.push('cleared data');
+        await sleep(1500);
+      }
+
+      const after = await appSizeMB(userId, deviceId, pkg);
+      const sizes = before && after
+        ? ` Size: ${before.totalMB} MB → ${after.totalMB} MB (data ${before.dataMB} → ${after.dataMB} MB, cache ${before.cacheMB} → ${after.cacheMB} MB).`
+        : '';
+      return textResult(`${label}: ${done.join(', ')}.${sizes}${mode !== 'cache' ? ' The app is reset: the user will need to sign in to it again.' : ''}`);
+    }
+  );
+
   // 9. read_notifications
   server.tool(
     'read_notifications',
