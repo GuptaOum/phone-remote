@@ -41,14 +41,24 @@ android {
         versionName flutterVersionName
     }
 
+    // Release APKs are 64-bit ARM only (every phone from the last ~6 years):
+    // build with --target-platform android-arm64 (tool/build_release_apk.sh).
+    // Plugins and libwebrtc's AAR still bring their own .so for other ABIs,
+    // and ndk.abiFilters is overridden by Flutter's Gradle plugin, so drop
+    // those folders at packaging time. Otherwise a 32-bit phone would get
+    // libwebrtc without libflutter and crash.
+    // Release only, so `flutter run` on an x86 emulator keeps working.
+    if (gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") }) {
+        packagingOptions {
+            jniLibs {
+                excludes += ['lib/armeabi-v7a/**', 'lib/x86/**', 'lib/x86_64/**']
+            }
+        }
+    }
+
     buildTypes {
         release {
             signingConfig signingConfigs.debug
-            // 64-bit ARM only: every phone from the last ~6 years. Drops the
-            // 32-bit ARM and x86 copies of libwebrtc (~20 MB each), halving the
-            // APK and the build time. Must be set here, not only via
-            // --target-platform: libwebrtc's AAR brings its own .so per ABI.
-            ndk { abiFilters 'arm64-v8a' }
             // Keep rules for JNI-reached classes (libwebrtc) — see proguard-rules.pro.
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
