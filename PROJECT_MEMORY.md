@@ -59,7 +59,6 @@ phone-remote/
 ├── flutter_app/               # Android app (Flutter 3.44.6 + Kotlin services)
 │   └── pubspec.yaml
 ├── nginx/                     # nginx image: TLS, SNI router (stream.conf), default.conf
-├── deploy/deploy.sh           # CI/CD deploy script (runs on EC2)
 ├── .github/workflows/deploy.yml
 ├── docker-compose.yml         # nginx, app, turn-init, coturn
 ├── Dockerfile                 # app image (client build + server)
@@ -115,7 +114,7 @@ Docker Hub user **`oumgupta`**:
 ### Deploy = push to `main`
 `.github/workflows/deploy.yml`:
 1. **CI** — builds client, syntax-checks server, validates compose. Failure → production untouched.
-2. **Deploy** — SSH with a key locked (forced command) to `~/bin/phone-remote-deploy`, which runs `deploy/deploy.sh` from `origin/main`:
+2. **Deploy** — SSH with a key locked (forced command) to `~/bin/phone-remote-deploy`, which runs `~/bin/deploy.sh` (kept on the server, not in the repo; to change it, scp a new copy there):
    fast-forward → map `git diff` to services → build while the live colour serves → start the idle colour (`app-blue` ↔ `app-green`) → health-check it → graceful nginx switch → public check → stop old colour → push images. Failures before the switch-over completes roll back with zero downtime.
 
 | Files changed | Restarted |
@@ -127,7 +126,7 @@ Docker Hub user **`oumgupta`**:
 
 Why git diff and not image IDs: the EC2 uses the containerd image store, where every build yields a new image ID even when fully cached, so compose would restart app + nginx on every deploy.
 
-Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/phone-remote/deploy/deploy.sh` (`FORCE=1` rebuilds everything). Secrets: `EC2_HOST`, `EC2_SSH_KEY`, `EC2_KNOWN_HOSTS`.
+Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/bin/deploy.sh` (`FORCE=1` rebuilds everything). Secrets: `EC2_HOST`, `EC2_SSH_KEY`, `EC2_KNOWN_HOSTS`.
 
 ---
 
@@ -185,7 +184,7 @@ ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && docke
 # Health
 curl https://65-1-96-152.sslip.io/health        # {"ok":true}
 # Rebuild everything
-ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "FORCE=1 ~/phone-remote/deploy/deploy.sh"
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "FORCE=1 ~/bin/deploy.sh"
 ```
 Code changes: commit + push to `main`; CI/CD does the rest (section 5). Watch it in GitHub Actions.
 
@@ -193,7 +192,7 @@ Code changes: commit + push to `main`; CI/CD does the rest (section 5). Watch it
 
 ## 🚨 9. Known Quirks & Open Issues
 
-1. **App deploys are blue-green** — no failed requests; only live WebSockets reconnect (1–2 s) when the old colour stops. Live colour: `cat ~/phone-remote/.deploy/app-upstream.conf`. Use `deploy/deploy.sh`, not a bare `docker compose up`.
+1. **App deploys are blue-green** — no failed requests; only live WebSockets reconnect (1–2 s) when the old colour stops. Live colour: `cat ~/phone-remote/.deploy/app-upstream.conf`. Use `~/bin/deploy.sh`, not a bare `docker compose up`.
 2. **Disk space** — `docker image prune -f` runs after each deploy; keep swap at 2 GB.
 3. **Killing processes over SSH** — `pkill -f <name>` matches the SSH command itself; use `grep '[G]radleDaemon'` or `./gradlew --stop`.
 4. **Agents cache the tool list** at session start. New tools or parameters appear only after the client reconnects (new chat / session, or reconnect the claude.ai connector). A client with a stale schema sends new params as strings, so numeric/boolean params use `z.coerce` / `z.preprocess`.

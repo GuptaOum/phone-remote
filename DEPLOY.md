@@ -29,7 +29,7 @@
    validates `docker-compose.yml`. A failure stops here; production is untouched.
 2. **Deploy**: SSHes to the EC2 with a key that can only run
    `~/bin/phone-remote-deploy` (forced command in `authorized_keys`), which runs
-   [`deploy/deploy.sh`](deploy/deploy.sh) from `origin/main`:
+   the deploy script kept on the server (`~/bin/deploy.sh`, not in this repo):
    fast-forward → build the new app image **while the live colour keeps
    serving** → start the other colour (`app-blue` ↔ `app-green`) and
    health-check it → point nginx at it with a graceful reload
@@ -41,14 +41,14 @@
 
 Docs-only (`*.md`) and Android-only (`flutter_app/**`) pushes skip the deploy.
 Re-run by hand: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on the
-server `~/phone-remote/deploy/deploy.sh` (`FORCE=1` redeploys everything,
+server `~/bin/deploy.sh` (`FORCE=1` redeploys everything,
 `FORCE=app` / `FORCE=nginx` just that part, even with no new commit). Secrets: `EC2_HOST`, `EC2_SSH_KEY`, `EC2_KNOWN_HOSTS`.
 
 **Downtime:** none for page loads, REST and MCP calls. When the old app stops
 it closes its WebSockets (code 1012); phones and browsers reconnect to the new
 one within a second or two, and live streams recover via ICE restart (that
 state lives in process memory and can't be handed over). An `nginx/` change
-recreates nginx (~1 s). Use `deploy/deploy.sh`, not a bare `docker compose up`,
+recreates nginx (~1 s). Use `~/bin/deploy.sh`, not a bare `docker compose up`,
 which would start both colours. Which colour is live: `cat ~/phone-remote/.deploy/app-upstream.conf`.
 `~/phone-remote` is a git checkout; `server/.env`, `server/data/`, `downloads/`
 and build output are gitignored, so deploys never touch them.

@@ -19,14 +19,14 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
       # certbot (on the host) writes HTTP-01 challenges here for renewals
       - /var/www/certbot:/var/www/certbot:ro
-      # Which app colour is live (written by deploy/deploy.sh)
+      # Which app colour is live (written by the server's deploy script)
       - ./.deploy:/etc/nginx/live:ro
 
   # 2. Web Frontend (React + Vite) & Express Node.js Backend — blue-green.
   #    Two identical services share one image; only the live colour runs and
   #    gets traffic. A deploy starts the other colour with the new image,
   #    health-checks it, switches nginx to it, then stops the old one.
-  #    Deploy with deploy/deploy.sh (or a push to main), not `compose up`.
+  #    Deploy with the server's deploy script (or a push to main), not `compose up`.
   app-blue: &app
     build:
       context: .

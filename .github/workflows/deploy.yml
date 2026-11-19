@@ -58,6 +58,6 @@ jobs:
           install -m 700 -d ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
-          # The key is locked to deploy/deploy.sh on the server (forced command),
+          # The key is locked to the deploy script on the server (forced command),
           # so it can't open a shell or run anything else.
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "ubuntu@$HOST"
