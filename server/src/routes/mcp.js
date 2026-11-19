@@ -529,7 +529,7 @@ function createPhoneRemoteServer() {
   // 7. list_apps
   tool(
     'list_apps',
-    'List every app installed on the phone, with display name and package name. Use this when you are unsure what an app is called or whether it is installed, rather than guessing a package name at open_app. With sizes:true each app also gets its storage use (app, data, cache and total, in MB), sorted largest first; minSizeMB keeps only apps at least that big (e.g. 2048 for "over 2 GB"). Sizes need the one-time "Usage access" grant on the phone.',
+    'List every app installed on the phone, with display name and package name. Use this when you are unsure what an app is called or whether it is installed, rather than guessing a package name at open_app. Each app has system:true when it came preinstalled with the phone (vendor or Google apps; updated:true if since updated from the Play Store) and system:false when the user installed it; pass system:true or system:false to list only one kind. With sizes:true each app also gets its storage use (app, data, cache and total, in MB), sorted largest first; minSizeMB keeps only apps at least that big (e.g. 2048 for "over 2 GB"). Sizes need the one-time "Usage access" grant on the phone.',
     {
       deviceId: z.string().describe('Device id from list_devices'),
       filter: z.string().optional().describe('Optional case-insensitive substring to match against the name or package'),
@@ -537,8 +537,10 @@ function createPhoneRemoteServer() {
       sizes: z.preprocess((v) => (v === 'true' ? true : v === 'false' ? false : v), z.boolean().optional())
         .describe('Include storage used per app, sorted largest first (default false)'),
       minSizeMB: z.coerce.number().optional().describe('With sizes: only apps using at least this many MB in total (1 GB = 1024 MB)'),
+      system: z.preprocess((v) => (v === 'true' ? true : v === 'false' ? false : v), z.boolean().optional())
+        .describe('true = only preinstalled system apps; false = only apps the user installed; omit for all'),
     },
-    async ({ deviceId, filter, sizes, minSizeMB }, { authInfo }) => {
+    async ({ deviceId, filter, sizes, minSizeMB, system }, { authInfo }) => {
       if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
       if (!signaling.deviceSupports(authInfo.userId, deviceId, 'list_apps')) {
         return textResult('This phone build cannot list apps — update the app.', true);
@@ -561,13 +563,20 @@ function createPhoneRemoteServer() {
           apps = apps.filter((a) => `${a.name} ${a.package}`.toLowerCase().includes(f));
           if (!apps.length) return textResult(`No installed app matches "${filter}".`, true);
         }
+        if (system != null) {
+          if (apps.length && !apps.some((a) => typeof a.system === 'boolean')) {
+            return textResult('This phone build does not report which apps are system apps — update the app.', true);
+          }
+          apps = apps.filter((a) => a.system === system);
+          if (!apps.length) return textResult(`No ${system ? 'system' : 'user-installed'} app found${filter ? ` matching "${filter}"` : ''}.`);
+        }
         if (wantSizes) {
           const MB = 1024 * 1024;
           const mb = (b) => Math.round(((b || 0) / MB) * 10) / 10;
           apps = apps
             .map((a) => {
               const total = (a.appBytes || 0) + (a.dataBytes || 0);
-              return { name: a.name, package: a.package, totalMB: mb(total), appMB: mb(a.appBytes), dataMB: mb(a.dataBytes), cacheMB: mb(a.cacheBytes) };
+              return { name: a.name, package: a.package, ...(typeof a.system === 'boolean' ? { system: a.system } : {}), totalMB: mb(total), appMB: mb(a.appBytes), dataMB: mb(a.dataBytes), cacheMB: mb(a.cacheBytes) };
             })
             .sort((x, y) => y.totalMB - x.totalMB);
           if (minSizeMB != null) {

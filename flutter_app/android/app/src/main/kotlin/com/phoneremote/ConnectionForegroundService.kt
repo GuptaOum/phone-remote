@@ -1107,7 +1107,7 @@ class ConnectionForegroundService : Service() {
                 val apps = pm.queryIntentActivities(mainIntent, 0)
                     .mapNotNull { ri ->
                         val lbl = ri.loadLabel(pm)?.toString() ?: return@mapNotNull null
-                        Pair(lbl, ri.activityInfo.packageName)
+                        Triple(lbl, ri.activityInfo.packageName, ri.activityInfo.applicationInfo.flags)
                     }
                     .distinctBy { it.second }
                     .sortedBy { it.first.lowercase() }
@@ -1139,9 +1139,14 @@ class ConnectionForegroundService : Service() {
                 }
                 val usageMap = lastUsed
                 val arr = org.json.JSONArray()
-                apps.forEach { (lbl, pkg) ->
+                apps.forEach { (lbl, pkg, flags) ->
                     arr.put(JSONObject().apply {
                         put("name", lbl); put("package", pkg)
+                        // Came with the phone's firmware (realme/Google preinstalls
+                        // included). updated = a preinstalled app since updated from
+                        // the Play Store — still a system app.
+                        put("system", flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0)
+                        if (flags and android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0) put("updated", true)
                         if (usageMap != null) {
                             put("lastUsedMs", usageMap[pkg]?.lastTimeUsed ?: 0L)
                             put("foregroundMs", usageMap[pkg]?.totalTimeInForeground ?: 0L)
