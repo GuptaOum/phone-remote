@@ -179,6 +179,36 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                     return@setMethodCallHandler
                 }
+                "isIgnoringBatteryOptimizations" -> {
+                    val ok = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+                        (getSystemService(POWER_SERVICE) as PowerManager)
+                            .isIgnoringBatteryOptimizations(packageName)
+                    result.success(ok)
+                    return@setMethodCallHandler
+                }
+                // Notification access (NotificationService) is a special
+                // permission: it can't be requested at runtime, only granted
+                // by the user on the system settings screen.
+                "isNotificationAccessEnabled" -> {
+                    val enabled = Settings.Secure.getString(
+                        contentResolver, "enabled_notification_listeners")
+                    result.success(enabled?.contains(packageName) == true)
+                    return@setMethodCallHandler
+                }
+                "openNotificationAccessSettings" -> {
+                    val tried = mutableListOf<Intent>()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        tried += Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+                            .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,
+                                ComponentName(this, NotificationService::class.java).flattenToString())
+                    }
+                    tried += Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
+                    for (i in tried) {
+                        try { startActivity(i); break } catch (_: Exception) {}
+                    }
+                    result.success(null)
+                    return@setMethodCallHandler
+                }
                 "openAutoLaunchSettings" -> {
                     // Try Realme/OPPO/ColorOS auto-launch settings, fall back to app info
                     val tried = listOf(

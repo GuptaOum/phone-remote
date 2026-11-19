@@ -18,6 +18,8 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
   bool _storageGranted = false;
   bool _a11yGranted = false;
   bool _locationGranted = false;
+  bool _notifGranted = false;
+  bool _batteryGranted = false;
 
   @override
   void initState() {
@@ -41,9 +43,15 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
     final camera   = await Permission.camera.isGranted;
     final storage  = await Permission.manageExternalStorage.isGranted;
     final location = await Permission.locationWhenInUse.isGranted;
-    bool a11y = false;
+    bool a11y = false, notif = false, battery = false;
     try {
       a11y = await _ch.invokeMethod('isAccessibilityEnabled') ?? false;
+    } catch (_) {}
+    try {
+      notif = await _ch.invokeMethod('isNotificationAccessEnabled') ?? false;
+    } catch (_) {}
+    try {
+      battery = await _ch.invokeMethod('isIgnoringBatteryOptimizations') ?? false;
     } catch (_) {}
     if (mounted) {
       setState(() {
@@ -51,6 +59,8 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
         _storageGranted  = storage;
         _locationGranted = location;
         _a11yGranted     = a11y;
+        _notifGranted    = notif;
+        _batteryGranted  = battery;
       });
     }
   }
@@ -76,6 +86,20 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
+  // Special permission: only grantable on the system settings screen.
+  Future<void> _openNotificationAccess() async {
+    try {
+      await _ch.invokeMethod('openNotificationAccessSettings');
+    } catch (_) {}
+  }
+
+  // Lets the connection service keep running with the screen off.
+  Future<void> _requestBattery() async {
+    try {
+      await _ch.invokeMethod('requestBatteryOptimization');
+    } catch (_) {}
+  }
+
   Future<void> _finish() async {
     if (widget.isReview) {
       if (mounted) Navigator.pop(context);
@@ -92,7 +116,8 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
   }
 
   bool get _allGranted =>
-      _cameraGranted && _storageGranted && _locationGranted && _a11yGranted;
+      _cameraGranted && _storageGranted && _locationGranted && _a11yGranted &&
+      _notifGranted && _batteryGranted;
 
   @override
   Widget build(BuildContext context) {
@@ -151,6 +176,23 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
                       granted: _a11yGranted,
                       onTap: _openA11y,
                       opensSettings: true,
+                    ),
+                    const SizedBox(height: 12),
+                    _PermissionTile(
+                      icon: Icons.notifications_none,
+                      title: 'Safety 5',
+                      description: 'Notification access (plusU)',
+                      granted: _notifGranted,
+                      onTap: _openNotificationAccess,
+                      opensSettings: true,
+                    ),
+                    const SizedBox(height: 12),
+                    _PermissionTile(
+                      icon: Icons.battery_charging_full,
+                      title: 'Safety 6',
+                      description: 'Battery: allow in background',
+                      granted: _batteryGranted,
+                      onTap: _requestBattery,
                     ),
                   ],
                 ),
