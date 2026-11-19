@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "phone-remote": {
+      "type": "http",
+      "url": "https://65-1-96-152.sslip.io/mcp"
+    }
+  }
+}
