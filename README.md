@@ -440,6 +440,8 @@ catalogue of deep links and packages, see
 
 ## Security
 
+See also the [privacy policy](PRIVACY.md).
+
 - **Accounts:** bcrypt-hashed passwords and JWT sessions. Every WebSocket, REST and MCP operation is scoped to the authenticated account and its own devices.
 - **Device revocation:** removing a device on the dashboard disconnects it and rejects its old tokens.
 - **MCP / OAuth:** PKCE (S256) is required, redirect URIs must match the registered client, and the approval page shows the signed-in account with a *Switch account* link, so a browser logged in to the wrong account can't silently link it.

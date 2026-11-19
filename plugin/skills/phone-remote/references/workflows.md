@@ -34,8 +34,8 @@ email (`mailto:` link). Never send without the user's go-ahead.
 ## Send a file from the PC to someone on WhatsApp
 
 1. Put the file on the phone: `send_local_file(name, folder:"Download")` →
-   POST the bytes to the returned `upload_url` (with a shell:
-   `curl -sS -X POST --data-binary @"<local path>" "<upload_url>"`).
+   send the file's raw bytes in an HTTP POST to the returned `upload_url`
+   (any HTTP client works; the link is single-use and expires in 10 minutes).
    Small files can go inline with `send_file(data_base64=...)` (≤ 18 MB).
 2. Open the chat (recipe above).
 3. Tap Attach (`desc:"Attach"`) → Document.
@@ -52,7 +52,8 @@ For photos use Attach → Gallery instead of Document.
 1. `list_files(path="Download")` (or `DCIM/Camera`, `Pictures/Screenshots`,
    `Documents`, `WhatsApp/Media/...` under `Android/media/com.whatsapp/`).
 2. `get_file(path="/storage/emulated/0/...")` → one-time `download_url`.
-3. With a shell: `curl -sS -o "<local path>" "<download_url>"`. Without one,
+3. Save the `download_url` response to the local path with any HTTP client
+   (it is a plain file download, nothing to run). Without one,
    give the user the link. Max 100 MB.
 
 ## Download something from the web onto the phone

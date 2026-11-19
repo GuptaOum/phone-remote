@@ -43,6 +43,7 @@ servers; it only points Claude at the remote MCP server and adds the skill.
 - The server does not store screen contents, screenshots or notifications. A
   file you fetch from the phone is held in server memory for at most 10 minutes
   behind a one-time download link; upload links also expire after 10 minutes.
+- Full privacy policy: https://github.com/GuptaOum/phone-remote/blob/main/PRIVACY.md
 - The server is self-hosted on AWS. The full source is public under the MIT
   license: https://github.com/GuptaOum/phone-remote
 
