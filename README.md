@@ -296,8 +296,10 @@ fraction of the screen width and height), not pixels.
 **Using Claude? The easy way:** install the app (step 1 below), download
 [`phone-remote-plugin.zip`](https://github.com/GuptaOum/phone-remote/releases/latest/download/phone-remote-plugin.zip),
 add it as a plugin in Claude, and sign in when the browser opens. That's it:
-the plugin brings the MCP server and the skill together. For any other agent,
-follow the steps below.
+the plugin brings the MCP server and the skill together. In the Claude Code
+terminal, run `/plugin marketplace add GuptaOum/phone-remote` and then
+`/plugin install phone-remote@phone-remote` instead of using the zip. For any
+other agent, follow the steps below.
 
 Three steps, free:
 

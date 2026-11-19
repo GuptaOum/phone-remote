@@ -36,6 +36,17 @@ servers; it only points Claude at the remote MCP server and adds the skill.
 4. Ask things like "what's on my phone screen", "open my Download folder" or
    "find apps I haven't used in a month".
 
+### Using Claude Code in the terminal?
+
+Skip the zip and run these two commands instead:
+
+```
+/plugin marketplace add GuptaOum/phone-remote
+/plugin install phone-remote@phone-remote
+```
+
+Then continue from step 3. To update later: `/plugin update phone-remote`.
+
 ## Make it yours
 
 The skill is plain Markdown. Edit your installed copy to teach Claude how your
