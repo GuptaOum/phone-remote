@@ -56,7 +56,7 @@ and build output are gitignored, so deploys never touch them.
 **Build, check and publish the APK on EC2:**
 
 ```bash
-ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote/flutter_app && ANDROID_HOME=~/android-sdk ~/flutter/bin/flutter build apk --release && bash tool/verify_release_apk.sh && cp build/app/outputs/flutter-apk/app-release.apk ../downloads/phone-remote.apk"
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && git pull -q --ff-only && flutter_app/tool/build_release_apk.sh"
 scp -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152:~/phone-remote/downloads/phone-remote.apk .
 ```
 

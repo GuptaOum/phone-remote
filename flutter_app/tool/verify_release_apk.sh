@@ -50,13 +50,21 @@ for cls in "${REQUIRED[@]}"; do
   fi
 done
 
-# Native libs for the common phone ABIs.
+# Release APKs are arm64-only (build.gradle abiFilters). Every native lib
+# Flutter and WebRTC need must be there for arm64, and no other ABI may sneak
+# back in (a half-populated 32-bit folder would crash on 32-bit phones).
 LISTING="$(unzip -l "$APK")"
-for abi in arm64-v8a armeabi-v7a; do
-  if [[ "$LISTING" == *"lib/$abi/libjingle_peerconnection_so.so"* ]]; then
-    echo "ok    lib/$abi/libjingle_peerconnection_so.so"
+for lib in libjingle_peerconnection_so.so libflutter.so libapp.so; do
+  if [[ "$LISTING" == *"lib/arm64-v8a/$lib"* ]]; then
+    echo "ok    lib/arm64-v8a/$lib"
   else
-    echo "FAIL  lib/$abi/libjingle_peerconnection_so.so missing"
+    echo "FAIL  lib/arm64-v8a/$lib missing"
+    fail=1
+  fi
+done
+for abi in armeabi-v7a x86 x86_64; do
+  if [[ "$LISTING" == *"lib/$abi/"* ]]; then
+    echo "FAIL  lib/$abi/ present — release should be arm64-only"
     fail=1
   fi
 done

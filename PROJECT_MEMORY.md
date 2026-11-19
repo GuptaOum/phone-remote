@@ -161,9 +161,9 @@ Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/ph
 
 ### Build & publish the APK (on EC2, never on the PC)
 ```bash
-ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote/flutter_app && ANDROID_HOME=~/android-sdk ~/flutter/bin/flutter build apk --release && bash tool/verify_release_apk.sh && cp build/app/outputs/flutter-apk/app-release.apk ../downloads/phone-remote.apk"
+ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && git pull -q --ff-only && flutter_app/tool/build_release_apk.sh"
 ```
-`verify_release_apk.sh` must print **PASS** (catches R8 stripping libwebrtc / jni_zero classes). One build at a time; ~10 min cold.
+The script builds **arm64-only** (`abiFilters` in `build.gradle`), runs `verify_release_apk.sh` (must print **PASS**: catches R8 stripping libwebrtc / jni_zero classes, and any non-arm64 ABI sneaking back), publishes, and stops the Gradle daemon so the SSH call returns. One build at a time.
 
 ---
 
