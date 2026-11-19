@@ -112,6 +112,28 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
+  // ── Turning permissions off ─────────────────────────────────────────
+  // Android never lets an app revoke its own permissions, so each "Turn off"
+  // opens the settings page where the user can switch it off. The tile
+  // updates when they come back (didChangeAppLifecycleState → _checkAll).
+
+  // Camera / location live under App info → Permissions.
+  Future<void> _openAppPermissions() async {
+    await openAppSettings();
+  }
+
+  Future<void> _openStorageSettings() async {
+    try {
+      await _ch.invokeMethod('openAllFilesAccessSettings');
+    } catch (_) {}
+  }
+
+  Future<void> _openBatterySettings() async {
+    try {
+      await _ch.invokeMethod('openBatteryOptimizationSettings');
+    } catch (_) {}
+  }
+
   Future<void> _finish() async {
     if (widget.isReview) {
       if (mounted) Navigator.pop(context);
@@ -162,6 +184,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
                       description: '',
                       granted: _cameraGranted,
                       onTap: _requestCamera,
+                      onTurnOff: _openAppPermissions,
                     ),
                     const SizedBox(height: 12),
                     _PermissionTile(
@@ -170,6 +193,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
                       description: '',
                       granted: _storageGranted,
                       onTap: _requestStorage,
+                      onTurnOff: _openStorageSettings,
                       opensSettings: true,
                     ),
                     const SizedBox(height: 12),
@@ -179,6 +203,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
                       description: '',
                       granted: _locationGranted,
                       onTap: _requestLocation,
+                      onTurnOff: _openAppPermissions,
                     ),
                     const SizedBox(height: 12),
                     _PermissionTile(
@@ -187,6 +212,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
                       description: '(plusU)',
                       granted: _a11yGranted,
                       onTap: _openA11y,
+                      onTurnOff: _openA11y,
                       opensSettings: true,
                     ),
                     const SizedBox(height: 12),
@@ -196,6 +222,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
                       description: 'Notification access (plusU)',
                       granted: _notifGranted,
                       onTap: _openNotificationAccess,
+                      onTurnOff: _openNotificationAccess,
                       opensSettings: true,
                     ),
                     const SizedBox(height: 12),
@@ -205,6 +232,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
                       description: 'Battery: allow in background',
                       granted: _batteryGranted,
                       onTap: _requestBattery,
+                      onTurnOff: _openBatterySettings,
                     ),
                     const SizedBox(height: 12),
                     _PermissionTile(
@@ -213,6 +241,7 @@ class _SetupScreenState extends State<SetupScreen> with WidgetsBindingObserver {
                       description: 'Usage access (app sizes)',
                       granted: _usageGranted,
                       onTap: _openUsageAccess,
+                      onTurnOff: _openUsageAccess,
                       opensSettings: true,
                     ),
                   ],
@@ -253,6 +282,8 @@ class _PermissionTile extends StatelessWidget {
   final String description;
   final bool granted;
   final VoidCallback onTap;
+  /// Opens the settings page where a granted permission can be switched off.
+  final VoidCallback? onTurnOff;
   final bool opensSettings;
 
   const _PermissionTile({
@@ -261,6 +292,7 @@ class _PermissionTile extends StatelessWidget {
     required this.description,
     required this.granted,
     required this.onTap,
+    this.onTurnOff,
     this.opensSettings = false,
   });
 
@@ -331,13 +363,13 @@ class _PermissionTile extends StatelessWidget {
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(8)),
                     ),
-                    onPressed: granted ? null : onTap,
+                    onPressed: granted ? onTurnOff : onTap,
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
                           granted
-                              ? 'Granted'
+                              ? (onTurnOff != null ? 'Granted · Turn off' : 'Granted')
                               : opensSettings
                                   ? 'Open Settings'
                                   : 'Grant',
@@ -348,7 +380,7 @@ class _PermissionTile extends StatelessWidget {
                                 : const Color(0xFFEC4899),
                           ),
                         ),
-                        if (opensSettings && !granted) ...[
+                        if ((opensSettings && !granted) || (granted && onTurnOff != null)) ...[
                           const SizedBox(width: 4),
                           const Icon(Icons.open_in_new,
                               size: 13, color: Color(0xFF6366F1)),

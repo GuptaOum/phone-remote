@@ -225,6 +225,31 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                     return@setMethodCallHandler
                 }
+                // "Turn off" for permissions the user already granted: an app
+                // can't revoke them itself, so open the page where they can.
+                "openBatteryOptimizationSettings" -> {
+                    val tried = listOf(
+                        Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")),
+                    )
+                    for (i in tried) {
+                        try { startActivity(i); break } catch (_: Exception) {}
+                    }
+                    result.success(null)
+                    return@setMethodCallHandler
+                }
+                "openAllFilesAccessSettings" -> {
+                    val tried = mutableListOf<Intent>()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        tried += Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))
+                    }
+                    tried += Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+                    for (i in tried) {
+                        try { startActivity(i); break } catch (_: Exception) {}
+                    }
+                    result.success(null)
+                    return@setMethodCallHandler
+                }
                 "openAutoLaunchSettings" -> {
                     // Try Realme/OPPO/ColorOS auto-launch settings, fall back to app info
                     val tried = listOf(
