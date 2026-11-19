@@ -12,6 +12,8 @@
   - Reactive polling (`wait_for`) instead of screenshot/OCR loops.
   - Bidirectional file transfer (PC ↔ phone `/storage/emulated/0`).
   - GPS location, notification reading (OTPs, SMS), ring / flashlight.
+  - App storage housekeeping: app sizes, unused apps, clear cache/data, uninstall.
+* **License**: MIT, public repo. Anyone can use the hosted server or self-host; README has copy-paste setup for Claude Code, claude.ai, Antigravity, Cursor and VS Code.
 
 ---
 
@@ -50,17 +52,18 @@ phone-remote/
 │   │   └── oauth.js           # OAuth 2.1 + PKCE, dynamic client registration, discovery
 │   ├── src/services/
 │   │   ├── signaling.js       # multi-tenant WebSocket relay + WebRTC signaling
-│   │   ├── db.js              # SQLite users/devices
-│   │   ├── oauthStore.js      # OAuth clients / codes
+│   │   ├── db.js              # SQLite (or Postgres): users, devices, oauth_clients
+│   │   ├── oauthStore.js      # OAuth clients (persisted in db) / codes (memory)
 │   │   └── turn.js            # short-lived coturn credentials
 │   └── public/                # oauth-authorize.html (approval page), shared.css
 ├── flutter_app/               # Android app (Flutter 3.44.6 + Kotlin services)
+│   └── tool/                  # build_release_apk.sh, verify_release_apk.sh
 ├── nginx/                     # nginx image: TLS, SNI router (stream.conf), default.conf
 ├── deploy/deploy.sh           # CI/CD deploy script (runs on EC2)
 ├── .github/workflows/deploy.yml
 ├── docker-compose.yml         # nginx, app, turn-init, coturn
 ├── Dockerfile                 # app image (client build + server)
-├── DEPLOY.md · README.md · MCP_PHONE_NAVIGATION.md
+├── DEPLOY.md · README.md · MCP_PHONE_NAVIGATION.md · LICENSE (MIT)
 └── PROJECT_MEMORY.md          # this file
 ```
 
@@ -92,7 +95,8 @@ flowchart TD
 
 ### MCP access
 * **Endpoint**: `https://65-1-96-152.sslip.io/mcp` — **Streamable HTTP only** (SSE, FastMCP and the internal bridge were removed 2026-11-18).
-* **Auth**: OAuth 2.1 + PKCE (S256) with dynamic client registration (`/oauth/register`), discovery at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server`. The approval page shows **"Signed in as … / Switch account"**; login returns to it via `?next=`. A plain `Authorization: Bearer <JWT>` also works. JWT TTL 30 days, no refresh tokens.
+* **Auth**: OAuth 2.1 + PKCE (S256) with dynamic client registration (`/oauth/register`), discovery at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server`. The approval page shows **"Signed in as … / Switch account"**; login returns to it via `?next=`. A plain `Authorization: Bearer <JWT>` also works. Tokens are JWTs with no refresh: OAuth (MCP) tokens last 90 days (`MCP_TOKEN_TTL`), app/login tokens 30 days.
+* **Registered clients are persisted** in the `oauth_clients` table (since 2026-11-19). Before that they lived in memory and every deploy forgot them, so agents that don't re-register on `invalid_client` couldn't sign in again. Registration is bounded (≤10 redirect URIs, valid URLs, ≤2000 chars).
 * Unauthenticated `POST /mcp` → 401 with `WWW-Authenticate`, which starts the client's login flow.
 
 ---
@@ -129,36 +133,32 @@ Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/ph
 
 ## ⚡ 6. MCP Tool Catalog (29 tools, `server/src/routes/mcp.js`)
 
-Registered with `registerTool` (MCP SDK 1.32): each tool has a title and annotations from `READ_ONLY_TOOLS` / `DESTRUCTIVE_TOOLS` / `OPEN_WORLD_TOOLS` near the top of `mcp.js`; **add a new tool's name to the right set and to `TOOL_TITLES`**. The server also sends `SERVER_INSTRUCTIONS` to every client on connect.
+**SDK** `@modelcontextprotocol/sdk` 1.32.2 (latest as of 2026-11-19), server `phone-remote` v2.1.0. Tools use `registerTool` with a **title** and **annotations** taken from `READ_ONLY_TOOLS`, `DESTRUCTIVE_TOOLS`, `OPEN_WORLD_TOOLS` and `TOOL_TITLES` at the top of `mcp.js`. **When adding a tool, add its name to the right set and to `TOOL_TITLES`.** The server also sends `SERVER_INSTRUCTIONS` (usage guidance) to every client on connect.
 
-### Perception
-1. **`list_devices()`** — linked phones, online status, model, screen size.
-2. **`get_location(deviceId)`** — last GPS fix.
-3. **`get_device_status(deviceId)`** — battery, screen, network, accessibility state.
-4. **`get_foreground_app(deviceId)`** — active package.
-5. **`get_ui_tree(deviceId, all, filter)`** — structured tree with normalized `(x, y)` centers.
-6. **`wait_for(deviceId, text, id, app, gone, timeout)`** — polls the tree until the condition holds.
-7. **`find_unused_apps(deviceId, days, minSizeMB)`**: apps not opened for `days` (default 30), biggest first, skipping apps installed more recently; needs Usage access.
-7a. **`list_apps(deviceId, filter, sizes, minSizeMB)`** — installed apps with packages; `sizes` adds storage per app (needs the Usage access grant, Safety 7).
+Annotations: 13 read-only (marked 🔎), 2 destructive (marked ⚠️, clients should confirm), `open_url` / `send_url` open-world.
 
-### Touch & keys
-8. **`take_screenshot`** · 9. **`tap`** · 10. **`long_press`** · 11. **`swipe`** · 12. **`scroll`** · 13. **`type_text`** (`method: set|paste`, `submit`) · 14. **`press_key`** (back, home, recents, lock, volume)
+| Group | Tools |
+| :--- | :--- |
+| Perception | 🔎 `list_devices` · 🔎 `get_device_status` (battery, screen on, **locked**, accessibility, network) · 🔎 `get_location` · 🔎 `get_foreground_app` · 🔎 `get_ui_tree(all, filter)` · 🔎 `wait_for(text/id/app, gone, timeout)` · 🔎 `take_screenshot` |
+| Touch & keys | `tap` · `long_press` · `swipe` · `scroll` · `type_text(method: set or paste, submit)` · `press_key` · 🔎 `wait` |
+| Apps & navigation | `open_app` · `open_app_drawer` · `open_url` |
+| App storage | 🔎 `list_apps(filter, sizes, minSizeMB)` · 🔎 `find_unused_apps(days=30, minSizeMB)` · ⚠️ `clear_app_storage(package, what: cache, data or both)` · ⚠️ `uninstall_app(package, confirm)` |
+| Alerts | `ring` · `flash_light` · 🔎 `read_notifications` |
+| Files | 🔎 `list_files` · 🔎 `get_file` · `send_local_file` · `send_file` (base64) · `send_url` |
 
-### Apps & OS
-15. **`open_app`** · 16. **`open_app_drawer`** · 17. **`open_url`** · 18. **`wait`** · **`uninstall_app`** (exact package; opens Android's uninstall prompt, taps OK unless `confirm:false`, verifies it's gone; refuses system apps and itself) · **`clear_app_storage`** (exact package; `what: cache|data|both`; phone opens App info directly, tool taps Storage → Clear cache / Clear data → confirm, reports size before/after; stops if locked; refuses core system packages)
-
-### Alerts
-19. **`ring`** · 20. **`flash_light`** · 21. **`read_notifications`**
-
-### Files
-22. **`list_files`** · 23. **`get_file`** · 24. **`send_local_file`** · 25. **`send_file`** (base64) · 26. **`send_url`**
+App-storage details:
+* **Sizes and last-used** come from `StorageStatsManager` / `UsageStatsManager` on the phone and need the **Usage access** special permission (Safety 7). `find_unused_apps` skips apps installed more recently than `days`.
+* **`clear_app_storage`**: Android gives normal apps no API to clear another app's data (`CLEAR_APP_USER_DATA` is system-only), so the phone opens the app's *App info* page directly (`open_app_settings` command) and the server taps *Storage* → *Clear cache* / *Clear data* → confirm, then reports size before/after. Stops if the phone is locked. Refuses Phone Remote and core system packages. realme labels verified by hand: *Storage usage*, *Clear cache*, *Clear data*, *Delete*.
+* **`uninstall_app`**: opens Android's uninstall prompt (`REQUEST_DELETE_PACKAGES`), taps OK unless `confirm:false`, verifies with `list_apps`. Refuses system apps and itself.
+* The phone reports capabilities on connect (`caps`: `uninstall_app`, `app_sizes`, `app_settings`, `app_usage`, …). The server checks them and answers "update the app" for older builds.
 
 ---
 
 ## 📱 7. Android App
 * **APK**: [`https://65-1-96-152.sslip.io/phone-remote.apk`](https://65-1-96-152.sslip.io/phone-remote.apk), served from `~/phone-remote/downloads/` (mounted read-only; not in the image).
 * **Version**: 1.3.1 (versionCode 4). Default server `https://65-1-96-152.sslip.io` (`kDefaultServerUrl`).
-* **Permissions**: Accessibility service (touch, keys, UI tree), screen capture (MediaProjection, re-prompted per stream on Android 14+), All-files access, Location, Notification access.
+* **Permissions screen** (`setup_screen.dart`), tiles named "Safety N" on purpose: 1 Camera · 2 All-files access · 3 Location · 4 Accessibility · 5 Notification access · 6 Battery (ignore optimisations) · 7 Usage access. Granted tiles show **"Granted · Turn off"**, which opens the exact settings page (an app can't revoke its own permissions). Screen capture (MediaProjection) is asked per stream, not on this screen.
+* **Code split**: ~63 % Kotlin (`ConnectionForegroundService.kt` owns the WebSocket and runs every command, plus WebRTC, capture, accessibility, notification and usage services), ~37 % Flutter (the 4 screens). Flutter talks to Kotlin over MethodChannel `com.phoneremote/touch`.
 * **Streaming**: `ConnectionForegroundService` owns screen + camera capture; Flutter mirrors state. WebRTC-only (`JPEG_FALLBACK=false`), ICE restart on network switch. One virtual display per consent (Android 14 tokens are single-use).
 * **Socket**: OkHttp `pingInterval(10s)`; server heartbeat 15 s.
 
@@ -166,7 +166,9 @@ Registered with `registerTool` (MCP SDK 1.32): each tool has a title and annotat
 ```bash
 ssh -i ~/.ssh/face-attendance.pem ubuntu@65.1.96.152 "cd ~/phone-remote && git pull -q --ff-only && flutter_app/tool/build_release_apk.sh"
 ```
-The script builds **arm64-only** (`abiFilters` in `build.gradle`), runs `verify_release_apk.sh` (must print **PASS**: catches R8 stripping libwebrtc / jni_zero classes, and any non-arm64 ABI sneaking back), publishes, and stops the Gradle daemon so the SSH call returns. One build at a time.
+The script builds **arm64-only** (`--target-platform android-arm64` plus `packagingOptions` excluding other ABIs for release builds; `ndk.abiFilters` does NOT work because Flutter's Gradle plugin overrides it), runs `verify_release_apk.sh` (must print **PASS**: catches R8 stripping libwebrtc / jni_zero classes, and any non-arm64 ABI sneaking back), publishes, and stops the Gradle daemon so the SSH call returns. One build at a time. Result: **~31 MB** APK (was 88 MB), ~2–5 min build.
+
+Install on the test phone over USB from the PC: `scp` the APK down, then `adb -s FYDUAMAM9DZDR84D install -r phone-remote.apk` (adb at `E:\Android\Sdk\platform-tools`). Updating stops the app's services; launch it again (`adb shell monkey -p com.phoneremote -c android.intent.category.LAUNCHER 1`) and it reconnects within seconds.
 
 ---
 
@@ -191,7 +193,12 @@ Code changes: commit + push to `main`; CI/CD does the rest (section 5). Watch it
 1. **App deploys are blue-green** — no failed requests; only live WebSockets reconnect (1–2 s) when the old colour stops. Live colour: `cat ~/phone-remote/.deploy/app-upstream.conf`. Use `deploy/deploy.sh`, not a bare `docker compose up`.
 2. **Disk space** — `docker image prune -f` runs after each deploy; keep swap at 2 GB.
 3. **Killing processes over SSH** — `pkill -f <name>` matches the SSH command itself; use `grep '[G]radleDaemon'` or `./gradlew --stop`.
-4. **Open issues (deferred)**:
+4. **Agents cache the tool list** at session start. New tools or parameters appear only after the client reconnects (new chat / session, or reconnect the claude.ai connector). A client with a stale schema sends new params as strings, so numeric/boolean params use `z.coerce` / `z.preprocess`.
+5. **Testing without touching prod**: run new server code in a throwaway container from the live image (`docker run --rm -v <src>:/app/server/src …`) and list tools with the SDK's `Client` + `InMemoryTransport`.
+6. **realme Settings search** doesn't find apps; go Apps → App management → search. Labels can differ there (e.g. "YouTube Music", not "YT Music").
+7. **Locked phone**: taps can't reach apps; `get_device_status` reports `locked`. Agents must never enter the PIN.
+8. **claude.ai connector** is named "phome-remote" (typo) and was registered before OAuth clients were persisted; if it ever fails to re-authenticate, remove and re-add it.
+9. **Open issues (deferred)**:
    - *Device takeover (low risk)*: `db.upsertDevice` reassigns a device row to whichever account registers its `deviceId`. It cannot see or control the phone, but can hide/rename it. Fix: new deviceId on account switch + server refuses cross-account reassignment.
    - *JWT secret*: the server falls back to a dev default if `JWT_SECRET` is unset (logs a warning). Production `.env` must set it.
    - *Stale screen size after rotation* in `get_device_status` / `list_devices` (taps unaffected). One-line Kotlin fix (`refreshScreenSize()` in `handleDeviceStatus`).
@@ -381,7 +388,7 @@ When the user gives a local PC file (e.g. `C:\Users\hp\Desktop\...\image.png` or
 > **Dedicated Companion Reference**: For an exhaustive, zero-friction catalog of all Android package names (`open_app`), deep link URL schemes (`open_url`), system setting shortcuts, and in-app navigation maps for WhatsApp, Telegram, and Google Apps, see:
 > 👉 **[`MCP_PHONE_NAVIGATION.md`](file:///E:/phnrtm/phone-remote/MCP_PHONE_NAVIGATION.md)**
 
-All phone interactions MUST strictly use the 26 standard `phone-remote` MCP tools documented in Section 6 and `MCP_PHONE_NAVIGATION.md`.
+All phone interactions MUST strictly use the 29 standard `phone-remote` MCP tools documented in Section 6 and `MCP_PHONE_NAVIGATION.md`.
 
 ---
-*Last updated: 2026-11-18 (EC2 65.1.96.152, Docker Compose, CI/CD, MCP Streamable HTTP + OAuth).*
+*Last updated: 2026-11-19 (29 tools with annotations, app-storage tools, persisted OAuth clients, arm64 APK, MIT license).*

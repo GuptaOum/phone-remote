@@ -50,7 +50,7 @@ for cls in "${REQUIRED[@]}"; do
   fi
 done
 
-# Release APKs are arm64-only (build.gradle abiFilters). Every native lib
+# Release APKs are arm64-only (build.gradle packagingOptions). Every native lib
 # Flutter and WebRTC need must be there for arm64, and no other ABI may sneak
 # back in (a half-populated 32-bit folder would crash on 32-bit phones).
 LISTING="$(unzip -l "$APK")"
