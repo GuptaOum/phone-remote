@@ -34,6 +34,21 @@ servers; it only points Claude at the remote MCP server and adds the skill.
 3. Ask things like "what's on my phone screen", "open my Download folder" or
    "find apps I haven't used in a month".
 
+## Make it yours
+
+The skill is plain Markdown. Edit your installed copy to teach Claude how your
+phone works, in a line or two each:
+
+- `skills/phone-remote/references/deep-links.md`: your apps, e.g.
+  `| My gallery | com.sec.android.gallery3d |`
+- `skills/phone-remote/references/workflows.md`: your routines, e.g.
+  "Good night: turn on Do Not Disturb, then lock the phone."
+- `skills/phone-remote/SKILL.md`: your rules, e.g. "Never open my banking
+  apps" or "My phone is in Hindi: Send is भेजें."
+
+Recipes that work on your brand are welcome as pull requests at
+https://github.com/GuptaOum/phone-remote.
+
 ## Data and privacy
 
 - Commands go from Claude to the Phone Remote server and from there to the

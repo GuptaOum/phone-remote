@@ -777,6 +777,12 @@ class ConnectionForegroundService : Service() {
         field("screenH") { screenH }
         field("model") { model }
         field("androidSdk") { android.os.Build.VERSION.SDK_INT }
+        // UI language (e.g. "en-IN", "hi-IN"). Agents match on-screen labels
+        // like "Send" or "Set as wallpaper"; in another language those miss.
+        field("language") {
+            val locales = resources.configuration.locales
+            if (locales.isEmpty) java.util.Locale.getDefault().toLanguageTag() else locales[0].toLanguageTag()
+        }
         // Doze exemption: when false, the OS may throttle this service's
         // socket in the background — the usual cause of a silent offline.
         field("batteryOptimized") {

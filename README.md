@@ -333,6 +333,33 @@ To install by hand, copy the `plugin/skills/phone-remote` folder into the
 agent's skills folder: `.claude/skills/`, `.codex/skills/`, `.cursor/skills/`
 or `.agents/skills/` (Antigravity) in a project.
 
+#### Make it yours
+
+The skill is plain Markdown, so you can teach your agent how *your* phone
+works by editing your installed copy. Keep each note short; the agent reads it
+every time.
+
+- **Your phone's apps** go in `references/deep-links.md`:
+  ```
+  | My gallery | `com.sec.android.gallery3d` |
+  | Office chat | `com.slack` |
+  ```
+- **Your own recipes** go in `references/workflows.md`:
+  ```
+  ## Good night
+  1. open_settings(page="sound"), turn on Do Not Disturb.
+  2. press_key("lock").
+  ```
+- **Your rules** go in `SKILL.md`:
+  ```
+  - My phone is in Hindi: match "भेजें" for Send.
+  - Never open my banking apps.
+  - Save files from the PC to Documents/FromPC, not Download.
+  ```
+
+Found a recipe or fix that works on your brand (Samsung, Vivo, Xiaomi...)?
+Open a pull request so other people can use it too.
+
 #### Connect the MCP server
 
 **Claude Code:** one command adds both the MCP server and the skill:

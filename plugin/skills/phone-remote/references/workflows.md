@@ -9,8 +9,21 @@ Coordinates shown are typical for a 1080x2412 phone; always prefer the x/y that
 ```
 open_file(path="Download")                 # folder → system Files app
 open_file(path="DCIM/Camera/IMG_1.jpg")    # file → its default viewer
-open_file(path="...jpg", package="com.coloros.gallery3d")   # force an app
+open_file(path="...jpg", package="<gallery package>")   # force an app
 ```
+The gallery package differs by brand: find it with `list_apps(filter="gallery")`
+(see the table in [deep-links.md](deep-links.md)).
+
+## Set a PC image as wallpaper
+
+1. `send_local_file(name="wall.jpg", folder="Pictures")`, then POST the bytes
+   to the returned `upload_url`.
+2. `open_file(path="Pictures/wall.jpg", package="<gallery package>")`.
+3. Open the gallery's menu (More / ⋮), `get_ui_tree(filter:"wallpaper")`, tap
+   it. Some galleries call it "Set as" or "Use as" → Wallpaper.
+4. Tap Apply if shown, then pick Home, Lock, or both
+   (`get_ui_tree(filter:"lock")`).
+5. `press_key("home", screenshot:true)` to confirm.
 Use `list_files(path=...)` first if you don't know the exact name. To just
 tell the user what's in a folder, `list_files` alone is enough; no need to open
 anything on screen.

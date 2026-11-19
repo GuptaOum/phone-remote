@@ -13,7 +13,13 @@ screen reader: look, act, confirm.
 
 1. **Pick the device.** `list_devices` once per conversation. Use the device
    that is `online: true`; if several are online and the user didn't say which,
-   ask. Reuse the `deviceId` for every later call.
+   ask. Reuse the `deviceId` for every later call. Then call
+   `get_device_status` once and relay its warnings. If the phone's `language`
+   is not English, tell the user once that the phone's menus are in that
+   language, that switching to English makes automation far more reliable,
+   and that they can switch back when done (`open_settings(page="language")`
+   opens the page). Never change the language yourself; if they keep it,
+   match labels in their language.
 2. **Jump, don't walk.** Get to the target screen in one call when you can:
    - a Settings page → `open_settings(page=...)`
    - a file or folder → `open_file(path=...)`

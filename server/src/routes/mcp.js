@@ -301,6 +301,7 @@ function scrollGesture(direction, amount) {
 const SERVER_INSTRUCTIONS = [
   'Phone Remote operates real Android phones linked to the signed-in account.',
   'Start with list_devices to get a deviceId; most tools need it and the phone must be online.',
+  'Then call get_device_status once at the start of the session and pass on any warnings to the user (Accessibility off, phone locked, phone not in English).',
   'Coordinates are normalized 0.0-1.0 fractions of the screen, never pixels.',
   'Prefer get_ui_tree (exact tappable coordinates, cheap) over take_screenshot; use wait_for instead of fixed waits.',
   'If taps do nothing, call get_device_status: the phone may be locked or Accessibility may be off.',
@@ -407,7 +408,7 @@ function createPhoneRemoteServer() {
   // 3. get_device_status
   tool(
     'get_device_status',
-    'Check a device\'s health before acting on it: battery level, whether the screen is on, whether the Accessibility Service (which performs all taps and typing) is enabled, the current foreground app, and network type. Call this first when a tap or type seems to do nothing, or at the start of a session — it catches "accessibility is off" up front instead of after several silent no-ops.',
+    'Check a device\'s health before acting on it: battery level, whether the screen is on, whether the Accessibility Service (which performs all taps and typing) is enabled, the current foreground app, network type, and the phone\'s UI language (warns when it is not English, since on-screen labels then will not match English filters). Call this first when a tap or type seems to do nothing, or at the start of a session — it catches "accessibility is off" up front instead of after several silent no-ops.',
     { deviceId: z.string().describe('Device id from list_devices') },
     async ({ deviceId }, { authInfo }) => {
       if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
@@ -429,11 +430,13 @@ function createPhoneRemoteServer() {
           model: s.model,
           androidSdk: s.androidSdk,
           batteryOptimized: s.batteryOptimized,
+          ...(s.language ? { language: s.language } : {}),
         };
         const warnings = [];
         if (!s.accessibilityEnabled) warnings.push('Accessibility Service is OFF — taps, swipes and typing will silently do nothing until it is enabled at Settings → Accessibility → Phone Remote.');
         if (s.locked) warnings.push('The phone is locked: taps cannot reach apps until the user unlocks it.');
         if (!s.screenOn) warnings.push('The screen is off — screenshots will look blank. press_key "home" wakes it.');
+        if (s.language && !/^en\b/i.test(s.language)) warnings.push(`The phone's language is ${s.language}, not English. Button and menu labels are in that language, so filters like "send" or "wallpaper" in get_ui_tree / wait_for will miss. Tell the user once that switching the phone to English makes automation much more reliable (open_settings page "language" opens the page), and that they can switch back afterwards. Do not change the language yourself. If they keep it, match labels in their language.`);
         if (s.batteryOptimized) warnings.push('Battery optimization is ON for this app — Android may throttle or kill the connection in the background. Exempt it in the app for a stable link.');
         const result = textResult(status);
         if (warnings.length) result.content.push({ type: 'text', text: warnings.join('\n') });
@@ -648,7 +651,7 @@ function createPhoneRemoteServer() {
   // 7c. open_file
   tool(
     'open_file',
-    'Open a file or folder on the phone directly, the file-system twin of open_settings. A file (image, video, PDF, document, APK…) opens in the app that normally handles its type, or in `package` when given (e.g. com.coloros.gallery3d to get the phone gallery\'s own menu with "Set as wallpaper"). A folder opens in the system Files app at that folder. Paths are under /storage/emulated/0; a relative path like "DCIM/photo.png" is resolved from there. Find paths with list_files. It only opens the file; read the screen with get_ui_tree and act from there.',
+    'Open a file or folder on the phone directly, the file-system twin of open_settings. A file (image, video, PDF, document, APK…) opens in the app that normally handles its type, or in `package` when given. Pass the phone maker\'s own gallery to get its menu with "Set as wallpaper"; the package differs by brand, so look it up with list_apps (filter "gallery"), e.g. com.coloros.gallery3d (realme/OPPO/OnePlus), com.sec.android.gallery3d (Samsung), com.miui.gallery (Xiaomi), com.vivo.gallery (Vivo). A folder opens in the system Files app at that folder. Paths are under /storage/emulated/0; a relative path like "DCIM/photo.png" is resolved from there. Find paths with list_files. It only opens the file; read the screen with get_ui_tree and act from there.',
     {
       deviceId: z.string().describe('Device id from list_devices'),
       path: z.string().describe('File or folder path, e.g. "DCIM/photo.png" or "/storage/emulated/0/Download"'),

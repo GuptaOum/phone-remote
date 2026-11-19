@@ -71,7 +71,8 @@ When `open_app(name)` is ambiguous, use the package. Confirm with
 | Amazon / Flipkart | `in.amazon.mShop.android.shopping` / `com.flipkart.android` |
 | Swiggy / Zomato / Blinkit / Zepto | `in.swiggy.android` / `com.application.zomato` / `com.grofers.customerapp` / `com.zeptoconsumerapp` |
 | Uber / Ola | `com.ubercab` / `com.olacabs.customer` |
-| realme/ColorOS Gallery / Files / Camera | `com.coloros.gallery3d` / `com.coloros.filemanager` / `com.oppo.camera` |
+| Gallery (differs by brand; confirm with `list_apps(filter="gallery")`) | realme/OPPO/OnePlus `com.coloros.gallery3d` · Samsung `com.sec.android.gallery3d` · Xiaomi `com.miui.gallery` · Vivo `com.vivo.gallery` · Pixel/other `com.google.android.apps.photos` |
+| realme/ColorOS Files / Camera | `com.coloros.filemanager` / `com.oppo.camera` |
 | Settings | `com.android.settings` |
 
 Payment apps: you may open them and navigate, but never enter a UPI PIN or
