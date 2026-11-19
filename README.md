@@ -39,7 +39,7 @@ repository. See [Use it with your AI agent](#use-it-with-your-ai-agent).
 
 **AI agent control (MCP)**
 
-- **29 tools.** Gestures, a structured UI tree with normalized coordinates, waiting for screen states, apps (open, list with sizes, find unused, uninstall, clear cache/data), deep links, notifications/OTPs, hardware, and file transfer.
+- **30 tools.** Gestures, a structured UI tree with normalized coordinates, waiting for screen states, apps (open, list with sizes, find unused, uninstall, clear cache/data), deep links, direct Settings pages, notifications/OTPs, hardware, and file transfer.
 - **One modern endpoint.** Streamable HTTP at `/mcp` with OAuth 2.1 + PKCE and dynamic client registration: paste the URL, sign in, approve. A plain `Authorization: Bearer` token works too.
 - **Agent-friendly metadata.** Every tool has a title and MCP annotations (13 read-only, 2 destructive: `uninstall_app`, `clear_app_storage`), so clients can auto-approve safe calls and ask before risky ones. Connecting agents also receive short usage instructions.
 - **Per-account isolation.** An agent only ever sees the phones of the account that approved it, and the approval page shows which account that is.

@@ -326,8 +326,28 @@ const TOOL_TITLES = {
   type_text: 'Type text', press_key: 'Press key', open_app: 'Open app', open_app_drawer: 'Open app drawer',
   wait: 'Wait', ring: 'Ring phone', flash_light: 'Flash light', list_files: 'List phone files',
   get_file: 'Download file from phone', send_local_file: 'Send local file to phone', send_file: 'Send file to phone',
-  send_url: 'Send URL download to phone',
+  send_url: 'Send URL download to phone', open_settings: 'Open a Settings page',
 };
+
+// Pages open_settings can reach; mirrors the phone's fixed list
+// (ConnectionForegroundService.settingsPages). Only the "app" ones take a package.
+const SETTINGS_PAGES = {
+  settings: 'main Settings screen',
+  apps: 'Apps menu',
+  all_apps: 'list of every app, system apps included',
+  installed_apps: 'list of installed apps',
+  app_info: 'one app\'s App info page (app)',
+  app_notifications: 'one app\'s notification settings (app)',
+  overlay: 'one app\'s "Display over other apps" permission (app)',
+  notifications: 'notification settings',
+  usage_access: 'Usage access list',
+  battery_optimization: 'battery optimisation list',
+  accessibility: 'Accessibility',
+  wifi: 'Wi-Fi', bluetooth: 'Bluetooth', mobile_data: 'mobile network', location: 'Location',
+  display: 'Display', sound: 'Sound', storage: 'Storage', date_time: 'Date & time',
+  language: 'Language', developer: 'Developer options', about_phone: 'About phone',
+};
+const SETTINGS_APP_PAGES = new Set(['app_info', 'app_notifications', 'overlay']);
 
 /**
  * Creates an McpServer instance with all phone-remote tools registered
@@ -588,6 +608,39 @@ function createPhoneRemoteServer() {
       } catch (e) {
         return textResult(e.message, true);
       }
+    }
+  );
+
+  // 7b. open_settings
+  tool(
+    'open_settings',
+    `Jump straight to an Android Settings page instead of tapping through Settings. Uses standard Android settings pages, so it works on any vendor (realme, Samsung, Xiaomi…); a page the phone lacks opens the main Settings screen instead. Pages: ${Object.entries(SETTINGS_PAGES).map(([k, v]) => `${k} (${v})`).join(', ')}. Pages marked (app) need package (exact package name from list_apps). It only opens the page; read it with get_ui_tree and tap from there.`,
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      page: z.enum(Object.keys(SETTINGS_PAGES)).describe('Which Settings page to open'),
+      package: z.string().optional().describe('Exact package name; required for app_info, app_notifications and overlay'),
+    },
+    async ({ deviceId, page, package: pkg }, { authInfo }) => {
+      const userId = authInfo.userId;
+      if (SETTINGS_APP_PAGES.has(page) && !pkg) return textResult(`Page "${page}" needs a package (see list_apps).`, true);
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'open_settings')) {
+        return textResult('This phone build cannot open Settings pages directly — update the app.', true);
+      }
+      let r;
+      try {
+        r = await signaling.requestFromPhone(userId, deviceId,
+          (id) => ({ type: 'open_settings', id, page, ...(SETTINGS_APP_PAGES.has(page) ? { package: pkg } : {}) }),
+          12000, 'open_settings');
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+      if (!r.ok) return textResult(r.error || 'Could not open that Settings page.', true);
+      await sleep(800);
+      const what = SETTINGS_PAGES[page] + (r.name ? ` for ${r.name} (${r.package})` : '');
+      return textResult(r.fallback
+        ? `This phone has no direct "${page}" page, so the main Settings screen opened instead. Navigate from there (get_ui_tree).`
+        : `Opened ${what}.`);
     }
   );
 

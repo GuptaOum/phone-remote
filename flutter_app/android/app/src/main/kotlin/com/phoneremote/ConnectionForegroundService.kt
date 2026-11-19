@@ -277,7 +277,7 @@ class ConnectionForegroundService : Service() {
                                     // builds omit it and keep the fire-and-forget path.
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
-                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage",
+                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings",
                                         "frame_ack", "webrtc_screen", "webrtc_camera",
                                     )))
                                 }
@@ -390,6 +390,10 @@ class ConnectionForegroundService : Service() {
                             }
                             "uninstall_app" -> {
                                 handleUninstallApp(json)
+                                return@post
+                            }
+                            "open_settings" -> {
+                                handleOpenSettings(json)
                                 return@post
                             }
                             "open_app_settings" -> {
@@ -1248,6 +1252,87 @@ class ConnectionForegroundService : Service() {
         reply(true) {
             put("name", name)
             put("system", info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0)
+        }
+    }
+
+    /**
+     * Opens a named Android Settings page (all apps, one app's notifications,
+     * Wi-Fi…). Only the fixed list below is reachable — callers pick a page
+     * name, never an arbitrary intent. These actions are standard Android, so
+     * they work across vendors; if a phone lacks a page, the main Settings
+     * screen opens instead and the reply says so.
+     * "pkg" pages need a package and point the page at that app.
+     */
+    private val settingsPages: Map<String, Pair<String, Boolean>> = mapOf(
+        "settings" to (android.provider.Settings.ACTION_SETTINGS to false),
+        "apps" to (android.provider.Settings.ACTION_APPLICATION_SETTINGS to false),
+        "all_apps" to (android.provider.Settings.ACTION_MANAGE_ALL_APPLICATIONS_SETTINGS to false),
+        "installed_apps" to (android.provider.Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS to false),
+        "app_info" to (android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS to true),
+        "app_notifications" to ("android.settings.APP_NOTIFICATION_SETTINGS" to true),
+        "overlay" to (android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION to true),
+        "notifications" to ("android.settings.NOTIFICATION_SETTINGS" to false),
+        "usage_access" to (android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS to false),
+        "battery_optimization" to (android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS to false),
+        "accessibility" to (android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS to false),
+        "wifi" to (android.provider.Settings.ACTION_WIFI_SETTINGS to false),
+        "bluetooth" to (android.provider.Settings.ACTION_BLUETOOTH_SETTINGS to false),
+        "mobile_data" to (android.provider.Settings.ACTION_DATA_ROAMING_SETTINGS to false),
+        "location" to (android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS to false),
+        "display" to (android.provider.Settings.ACTION_DISPLAY_SETTINGS to false),
+        "sound" to (android.provider.Settings.ACTION_SOUND_SETTINGS to false),
+        "storage" to (android.provider.Settings.ACTION_INTERNAL_STORAGE_SETTINGS to false),
+        "date_time" to (android.provider.Settings.ACTION_DATE_SETTINGS to false),
+        "language" to (android.provider.Settings.ACTION_LOCALE_SETTINGS to false),
+        "developer" to (android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS to false),
+        "about_phone" to (android.provider.Settings.ACTION_DEVICE_INFO_SETTINGS to false),
+    )
+
+    private fun handleOpenSettings(json: JSONObject) {
+        val id = json.optString("id")
+        if (id.isEmpty()) return
+        val page = json.optString("page").trim()
+        val pkg = json.optString("package").trim()
+        val reply = { ok: Boolean, extra: JSONObject.() -> Unit ->
+            send(JSONObject().apply {
+                put("type", "open_settings_result"); put("id", id); put("ok", ok); put("page", page); extra()
+            }.toString())
+        }
+        val (action, needsPkg) = settingsPages[page]
+            ?: run { reply(false) { put("error", "Unknown page \"$page\"") }; return }
+        var appName: String? = null
+        if (needsPkg) {
+            if (pkg.isEmpty()) { reply(false) { put("error", "Page \"$page\" needs a package") }; return }
+            val info = try { packageManager.getApplicationInfo(pkg, 0) } catch (_: Exception) {
+                reply(false) { put("error", "No installed app has package \"$pkg\"") }; return
+            }
+            appName = try { packageManager.getApplicationLabel(info).toString() } catch (_: Exception) { pkg }
+        }
+        val intent = Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        if (needsPkg) {
+            when (page) {
+                "app_notifications" -> {
+                    intent.putExtra("android.provider.extra.APP_PACKAGE", pkg)
+                    // Android 5–7 spelling.
+                    intent.putExtra("app_package", pkg)
+                    intent.putExtra("app_uid", try { packageManager.getApplicationInfo(pkg, 0).uid } catch (_: Exception) { 0 })
+                }
+                else -> intent.data = android.net.Uri.parse("package:$pkg")
+            }
+        }
+        val fellBack = intent.resolveActivity(packageManager) == null
+        val target = if (fellBack)
+            Intent(android.provider.Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        else intent
+        val ctx: Context = RemoteAccessibilityService.instance ?: this
+        handler.post {
+            try { ctx.startActivity(target) } catch (_: Exception) {
+                try { startActivity(target) } catch (_: Exception) {}
+            }
+        }
+        reply(true) {
+            if (appName != null) { put("name", appName); put("package", pkg) }
+            if (fellBack) put("fallback", true)
         }
     }
 

@@ -48,7 +48,7 @@ phone-remote/
 │   ├── src/routes/
 │   │   ├── auth.js            # register / login / JWT, /api/me
 │   │   ├── files.js           # PC-side file upload/download
-│   │   ├── mcp.js             # MCP Streamable HTTP at /mcp (@modelcontextprotocol/sdk, 29 tools)
+│   │   ├── mcp.js             # MCP Streamable HTTP at /mcp (@modelcontextprotocol/sdk, 30 tools)
 │   │   └── oauth.js           # OAuth 2.1 + PKCE, dynamic client registration, discovery
 │   ├── src/services/
 │   │   ├── signaling.js       # multi-tenant WebSocket relay + WebRTC signaling
@@ -131,7 +131,7 @@ Manual: GitHub → Actions → *CI / Deploy* → *Run workflow*, or on EC2 `~/ph
 
 ---
 
-## ⚡ 6. MCP Tool Catalog (29 tools, `server/src/routes/mcp.js`)
+## ⚡ 6. MCP Tool Catalog (30 tools, `server/src/routes/mcp.js`)
 
 **SDK** `@modelcontextprotocol/sdk` 1.32.2 (latest as of 2026-11-19), server `phone-remote` v2.1.0. Tools use `registerTool` with a **title** and **annotations** taken from `READ_ONLY_TOOLS`, `DESTRUCTIVE_TOOLS`, `OPEN_WORLD_TOOLS` and `TOOL_TITLES` at the top of `mcp.js`. **When adding a tool, add its name to the right set and to `TOOL_TITLES`.** The server also sends `SERVER_INSTRUCTIONS` (usage guidance) to every client on connect.
 
@@ -141,8 +141,8 @@ Annotations: 13 read-only (marked 🔎), 2 destructive (marked ⚠️, clients s
 | :--- | :--- |
 | Perception | 🔎 `list_devices` · 🔎 `get_device_status` (battery, screen on, **locked**, accessibility, network) · 🔎 `get_location` · 🔎 `get_foreground_app` · 🔎 `get_ui_tree(all, filter)` · 🔎 `wait_for(text/id/app, gone, timeout)` · 🔎 `take_screenshot` |
 | Touch & keys | `tap` · `long_press` · `swipe` · `scroll` · `type_text(method: set or paste, submit)` · `press_key` · 🔎 `wait` |
-| Apps & navigation | `open_app` · `open_app_drawer` · `open_url` |
-| App storage | 🔎 `list_apps(filter, sizes, minSizeMB)` · 🔎 `find_unused_apps(days=30, minSizeMB)` · ⚠️ `clear_app_storage(package, what: cache, data or both)` · ⚠️ `uninstall_app(package, confirm)` |
+| Apps & navigation | `open_app` · `open_app_drawer` · `open_url` · `open_settings(page, package)` |
+| App storage | 🔎 `list_apps(filter, sizes, minSizeMB, system)` · 🔎 `find_unused_apps(days=30, minSizeMB)` · ⚠️ `clear_app_storage(package, what: cache, data or both)` · ⚠️ `uninstall_app(package, confirm)` |
 | Alerts | `ring` · `flash_light` · 🔎 `read_notifications` |
 | Files | 🔎 `list_files` · 🔎 `get_file` · `send_local_file` · `send_file` (base64) · `send_url` |
 
@@ -150,7 +150,10 @@ App-storage details:
 * **Sizes and last-used** come from `StorageStatsManager` / `UsageStatsManager` on the phone and need the **Usage access** special permission (Safety 7). `find_unused_apps` skips apps installed more recently than `days`.
 * **`clear_app_storage`**: Android gives normal apps no API to clear another app's data (`CLEAR_APP_USER_DATA` is system-only), so the phone opens the app's *App info* page directly (`open_app_settings` command) and the server taps *Storage* → *Clear cache* / *Clear data* → confirm, then reports size before/after. Stops if the phone is locked. Refuses Phone Remote and core system packages. realme labels verified by hand: *Storage usage*, *Clear cache*, *Clear data*, *Delete*.
 * **`uninstall_app`**: opens Android's uninstall prompt (`REQUEST_DELETE_PACKAGES`), taps OK unless `confirm:false`, verifies with `list_apps`. Refuses system apps and itself.
-* The phone reports capabilities on connect (`caps`: `uninstall_app`, `app_sizes`, `app_settings`, `app_usage`, …). The server checks them and answers "update the app" for older builds.
+* **`open_settings`**: opens one of a fixed list of standard Android Settings pages (`SETTINGS_PAGES` in `mcp.js`, mirrored by `settingsPages` in `ConnectionForegroundService.kt`): `all_apps`, `app_info`/`app_notifications`/`overlay` (need a package), `usage_access`, `wifi`, … Never an arbitrary intent. A page the phone lacks falls back to main Settings.
+* **`list_apps`** reports `system` (preinstalled, `FLAG_SYSTEM`) and `updated` (`FLAG_UPDATED_SYSTEM_APP`); `system:true/false` filters.
+* **`clear_app_storage`** also presses back on popups from other apps (ColorOS cleanup offers), re-taps *Storage* if a popup ate the tap, and treats a hidden *Clear cache* as an empty cache.
+* The phone reports capabilities on connect (`caps`: `uninstall_app`, `app_sizes`, `app_settings`, `app_usage`, `open_settings`, …). The server checks them and answers "update the app" for older builds.
 
 ---
 
@@ -391,4 +394,4 @@ When the user gives a local PC file (e.g. `C:\Users\hp\Desktop\...\image.png` or
 All phone interactions MUST strictly use the 29 standard `phone-remote` MCP tools documented in Section 6 and `MCP_PHONE_NAVIGATION.md`.
 
 ---
-*Last updated: 2026-11-19 (29 tools with annotations, app-storage tools, persisted OAuth clients, arm64 APK, MIT license).*
+*Last updated: 2026-11-19 (30 tools, open_settings, system-app flag, with annotations, app-storage tools, persisted OAuth clients, arm64 APK, MIT license).*
