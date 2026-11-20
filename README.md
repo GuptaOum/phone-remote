@@ -243,7 +243,7 @@ APK, image publishing and moving to your own domain — is in
 
 | Variable | Description |
 |---|---|
-| `DOMAIN` | Public hostname. nginx and the TURN-over-TLS hostname follow it. |
+| `DOMAIN` | Public hostname. The app and the TURN-over-TLS hostname follow it. The domain is written directly into `nginx/default.conf` and `nginx/stream.conf`: edit it there too when you change domains. |
 | `TURN_EXTERNAL_IP` / `TURN_PRIVATE_IP` | Override coturn's auto-detected public and private addresses. |
 | `TURN_TLS_HOST` | Hostname for `turns:` on 443, default `turn.${DOMAIN}`. |
 | `TURN_SECRET_FILE` | Shared TURN secret, generated automatically by `turn-init`. |

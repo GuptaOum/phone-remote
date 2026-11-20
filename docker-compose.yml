@@ -10,8 +10,6 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    environment:
-      - DOMAIN=${DOMAIN:-65-1-96-152.sslip.io}
     # TURN-over-TLS is forwarded to coturn, which runs on the host network.
     extra_hosts:
       - "host.docker.internal:host-gateway"

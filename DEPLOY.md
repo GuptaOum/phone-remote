@@ -76,7 +76,8 @@ rebuild needed.
 If you later buy a real domain: Route 53 A-records for **both** `yourdomain.com`
 and `turn.yourdomain.com` → 65.1.96.152, then
 `sudo certbot certonly --webroot -w /var/www/certbot --cert-name yourdomain.com -d yourdomain.com -d turn.yourdomain.com`,
-set `DOMAIN=yourdomain.com` for docker compose (nginx + `TURN_TLS_HOST` follow it),
+set `DOMAIN=yourdomain.com` for docker compose (`TURN_TLS_HOST` follows it), replace
+`65-1-96-152.sslip.io` with the new domain in `nginx/default.conf` and `nginx/stream.conf`,
 change `PUBLIC_URL` in `server/.env`, and change `kDefaultServerUrl` to
 `https://yourdomain.com` (rebuild the APK). The sslip.io setup can be dropped
 once a real domain is live.
