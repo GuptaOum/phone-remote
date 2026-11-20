@@ -160,7 +160,6 @@ flowchart LR
 │   └── pubspec.yaml
 ├── nginx/                  nginx image: SNI router (stream.conf) + site (default.conf)
 ├── docker-compose.yml      nginx · app · coturn (+ turn-init)
-├── DEPLOY.md               Production deployment runbook
 └── MCP_PHONE_NAVIGATION.md Playbook for AI agents (deep links, app navigation)
 ```
 
@@ -219,10 +218,6 @@ sudo docker compose up -d --build
 **Firewall:** open 80/tcp, 443/tcp, 3478/tcp+udp and 49160–49200/udp.
 
 **Certificates:** one Let's Encrypt certificate must cover both `<domain>` and `turn.<domain>`.
-
-The complete runbook — certificates, redeploys, building and publishing the
-APK, image publishing and moving to your own domain — is in
-**[DEPLOY.md](DEPLOY.md)**.
 
 ---
 
@@ -516,9 +511,7 @@ cd ~/phone-remote && docker compose logs app-blue app-green | grep -E "🔗|🧭
 
 ## Further documentation
 
-- **[DEPLOY.md](DEPLOY.md):** production runbook (EC2, Docker Compose, TLS, TURN, APK publishing).
 - **[MCP_PHONE_NAVIGATION.md](MCP_PHONE_NAVIGATION.md):** playbook for AI agents operating the phone.
-- **[PROJECT_MEMORY.md](PROJECT_MEMORY.md):** design history and project notes.
 
 ---
 
