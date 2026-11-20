@@ -341,15 +341,39 @@ const SETTINGS_PAGES = {
   app_info: 'one app\'s App info page (app)',
   app_notifications: 'one app\'s notification settings (app)',
   overlay: 'one app\'s "Display over other apps" permission (app)',
-  notifications: 'notification settings',
-  usage_access: 'Usage access list',
+  install_unknown_apps: 'one app\'s "Install unknown apps" permission (app)',
+  modify_system_settings: 'one app\'s "Modify system settings" permission (app)',
+  all_files_access: 'one app\'s "All files access" permission (app)',
+  alarms_reminders: 'one app\'s "Alarms & reminders" permission (app)',
+  open_by_default: 'one app\'s "Open by default" links page (app)',
+  app_language: 'one app\'s language (app)',
+  default_apps: 'Default apps (browser, phone, SMS...)',
+  home_app: 'default Home app',
+  battery: 'Battery, with battery usage by app',
+  battery_saver: 'Battery saver',
   battery_optimization: 'battery optimisation list',
+  notifications: 'notification settings',
+  do_not_disturb: 'Do Not Disturb',
+  notification_access: 'Notification access list',
+  usage_access: 'Usage access list',
   accessibility: 'Accessibility',
-  wifi: 'Wi-Fi', bluetooth: 'Bluetooth', mobile_data: 'mobile network', location: 'Location',
-  display: 'Display', sound: 'Sound', storage: 'Storage', date_time: 'Date & time',
-  language: 'Language', developer: 'Developer options', about_phone: 'About phone',
+  security: 'Security / screen lock',
+  privacy: 'Privacy',
+  location: 'Location',
+  accounts: 'Accounts & sync',
+  wifi: 'Wi-Fi', bluetooth: 'Bluetooth', mobile_data: 'mobile network',
+  data_usage: 'Data usage', network_operator: 'network operator / SIM',
+  airplane_mode: 'Airplane mode', hotspot: 'Hotspot & tethering', vpn: 'VPN', nfc: 'NFC',
+  cast: 'Cast / screen mirroring', connected_devices: 'connections & sharing',
+  display: 'Display', dark_mode: 'Dark mode', night_light: 'Night light / eye comfort',
+  sound: 'Sound', storage: 'Storage', date_time: 'Date & time',
+  language: 'Language', keyboard: 'Keyboards & input', captions: 'Captions', print: 'Printing',
+  developer: 'Developer options', about_phone: 'About phone',
 };
-const SETTINGS_APP_PAGES = new Set(['app_info', 'app_notifications', 'overlay']);
+const SETTINGS_APP_PAGES = new Set([
+  'app_info', 'app_notifications', 'overlay', 'install_unknown_apps', 'modify_system_settings',
+  'all_files_access', 'alarms_reminders', 'open_by_default', 'app_language',
+]);
 
 /**
  * Creates an McpServer instance with all phone-remote tools registered
@@ -622,7 +646,7 @@ function createPhoneRemoteServer() {
     {
       deviceId: z.string().describe('Device id from list_devices'),
       page: z.enum(Object.keys(SETTINGS_PAGES)).describe('Which Settings page to open'),
-      package: z.string().optional().describe('Exact package name; required for app_info, app_notifications and overlay'),
+      package: z.string().optional().describe('Exact package name; required for the pages marked (app)'),
     },
     async ({ deviceId, page, package: pkg }, { authInfo }) => {
       const userId = authInfo.userId;

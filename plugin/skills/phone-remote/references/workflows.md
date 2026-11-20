@@ -84,11 +84,23 @@ Report the code only to the user, or type it only where the user asked.
 
 ## Change a setting
 
-`open_settings(page=...)` with one of: settings, apps, all_apps,
-installed_apps, app_info*, app_notifications*, overlay*, notifications,
-usage_access, battery_optimization, accessibility, wifi, bluetooth,
-mobile_data, location, display, sound, storage, date_time, language,
-developer, about_phone. (*needs `package`.)
+`open_settings(page=...)` with one of:
+- Apps: settings, apps, all_apps, installed_apps, default_apps, home_app,
+  app_info*, app_notifications*, overlay*, install_unknown_apps*,
+  modify_system_settings*, all_files_access*, alarms_reminders*,
+  open_by_default*, app_language*
+- Battery: battery (usage by app), battery_saver, battery_optimization
+- Notifications & permissions: notifications, do_not_disturb,
+  notification_access, usage_access, accessibility, security, privacy,
+  location, accounts
+- Connections: wifi, bluetooth, mobile_data, data_usage, network_operator,
+  airplane_mode, hotspot, vpn, nfc, cast, connected_devices
+- Display & sound: display, dark_mode, night_light, sound
+- System: storage, date_time, language, keyboard, captions, print,
+  developer, about_phone
+
+(*needs `package`.) A page the phone lacks opens main Settings instead
+(the reply says `fallback`); then tap through from there.
 Then `get_ui_tree(filter:"<toggle label>")`, tap the switch, and re-read the
 tree to confirm the `K` (checked) flag flipped.
 
