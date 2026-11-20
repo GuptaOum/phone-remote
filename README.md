@@ -17,7 +17,7 @@ repository. See [Use it with your AI agent](#use-it-with-your-ai-agent).
 ## Demo
 
 One prompt to the agent, and it sets the phone's wallpaper on its own.
-Laptop on the left, phone on the right (sped up ~1.36×):
+Laptop on the left, phone on the right :
 
 > `C:\Users\hp\Desktop\phoneimg.jpg set this image as phone wallpaper for both homescreen and lockscreen`
 
