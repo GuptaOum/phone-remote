@@ -1357,7 +1357,7 @@ class ConnectionForegroundService : Service() {
         "connected_devices" to (android.provider.Settings.ACTION_WIRELESS_SETTINGS to false),
         // Display and sound
         "display" to (android.provider.Settings.ACTION_DISPLAY_SETTINGS to false),
-        "dark_mode" to (android.provider.Settings.ACTION_DARK_THEME_SETTINGS to false),
+        "dark_mode" to ("android.settings.DARK_THEME_SETTINGS" to false),
         "night_light" to (android.provider.Settings.ACTION_NIGHT_DISPLAY_SETTINGS to false),
         "sound" to (android.provider.Settings.ACTION_SOUND_SETTINGS to false),
         // System
