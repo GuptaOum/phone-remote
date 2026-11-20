@@ -14,10 +14,20 @@ work, and everything keeps running in the background after the app is closed.
 **Free and open source (MIT).** Use the hosted server, or run your own from this
 repository. See [Use it with your AI agent](#use-it-with-your-ai-agent).
 
+## Demo
+
+One prompt to the agent, and it sets the phone's wallpaper on its own.
+Laptop on the left, phone on the right (sped up ~1.36×):
+
+> `C:\Users\hp\Desktop\phoneimg.jpg set this image as phone wallpaper for both homescreen and lockscreen`
+
+https://github.com/user-attachments/assets/2f5ebf74-f221-4b2c-9a6e-888cfde5c90a
+
 ---
 
 ## Contents
 
+- [Demo](#demo)
 - [Features](#features)
 - [Architecture](#architecture)
 - [How streaming works](#how-streaming-works)
