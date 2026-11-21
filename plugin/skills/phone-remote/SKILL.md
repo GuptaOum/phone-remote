@@ -35,6 +35,15 @@ screen reader: look, act, confirm.
    game/video/canvas, or you need to see something genuinely visual. Take
    one screenshot to understand what's wrong, then go straight back to
    `get_ui_tree` for the next steps.
+   Reading the compact tree: one node per line; a node without `cls` is a
+   plain TextView; `desc` is left out when it repeats `text`; a label flagged
+   `c` can stand for its whole list row, so tap the label to open the row.
+   Cheapest first: a `filter`ed tree (a few nodes), then the full tree, then
+   a screenshot. `all:true` returns the raw, unmerged tree; use it only when
+   something seems missing.
+   In lists, an item's header (an email, a date) can sit just above its own
+   row, so read the order before tapping, and scroll inside a list by
+   swiping within its scrollable node (`f:"s"`), not elsewhere on screen.
 4. **Act.** `tap` / `long_press` / `scroll` / `type_text` / `press_key`.
    Coordinates are always 0.0-1.0 fractions of the screen, never pixels.
 5. **Wait for the result, don't sleep.** After anything that loads or
