@@ -1,23 +1,22 @@
 # Phone Remote
 
-**An MCP server that gives AI agents a real Android phone, plus a live browser dashboard to watch and take over.**
+**Give your AI agent a real Android phone.**
 
-Phone Remote is a self-hosted, multi-user platform that lets AI agents (Claude,
-Cursor, Antigravity, …) see and operate Android phones through the Model
-Context Protocol (MCP): read the screen, tap, type, open apps, read OTPs and
-move files. The same phones are available to people in a web dashboard that
-streams the screen and camera over WebRTC and accepts touch input back.
+Phone Remote lets AI agents like Claude, Cursor, Codex and Antigravity see and
+use your Android phone: read the screen, tap, type, open apps, read OTPs,
+find your phone and move files between phone and computer. You can also watch
+and control the phone yourself from a web dashboard, with live screen and
+camera.
 
-It runs without root: a native Android companion app does the capture and input
-work, and everything keeps running in the background after the app is closed.
+No root needed. Install the app once, and it keeps working in the background,
+even with the app closed.
 
-**Free and open source (MIT).** Use the hosted server, or run your own from this
-repository. See [Use it with your AI agent](#use-it-with-your-ai-agent).
+**Free and open source (MIT).** Use the hosted server, or run your own.
 
 ## Demo
 
 One prompt to the agent, and it sets the phone's wallpaper on its own.
-Laptop on the left, phone on the right :
+Laptop on the left, phone on the right:
 
 > `C:\Users\hp\Desktop\phoneimg.jpg set this image as phone wallpaper for both homescreen and lockscreen`
 
@@ -27,275 +26,109 @@ https://github.com/user-attachments/assets/2f5ebf74-f221-4b2c-9a6e-888cfde5c90a
 
 ## Contents
 
-- [Demo](#demo)
+- [What you can ask it](#what-you-can-ask-it)
+- [Automate it: scheduled workflows and your own agents](#automate-it-scheduled-workflows-and-your-own-agents)
 - [Features](#features)
-- [Architecture](#architecture)
-- [How streaming works](#how-streaming-works)
-- [Tech stack](#tech-stack)
-- [Repository layout](#repository-layout)
-- [Quick start (local development)](#quick-start-local-development)
-- [Production deployment](#production-deployment)
-- [Configuration](#configuration)
+- [Use it with your AI agent](#use-it-with-your-ai-agent)
 - [The Android app](#the-android-app)
-- [AI agents (MCP)](#ai-agents-mcp)
-  - [Use it with your AI agent](#use-it-with-your-ai-agent)
-- [Security](#security)
-- [Diagnostics and troubleshooting](#diagnostics-and-troubleshooting)
-- [Further documentation](#further-documentation)
+- [Works while the phone is locked?](#works-while-the-phone-is-locked)
+- [Privacy and safety](#privacy-and-safety)
+
+---
+
+## What you can ask it
+
+Talk to your agent in plain words. These all work today.
+
+**Everyday**
+
+- *"How's my phone? Battery, storage, anything wrong?"*
+- *"Which app is draining my battery?"*
+- *"Where is my phone?"* and then *"Make it ring."*
+- *"Read my notifications and tell me what's important."*
+- *"Did an OTP come in? Read it to me."*
+
+**Files between phone and computer**
+
+- *"List the PDFs in my Download folder."*
+- *"Get me medical.pdf from my phone."*
+- *"Put C:\Users\me\Desktop\photo.jpg on my phone."*
+- *"Download this link straight to my phone."*
+- *"Set this picture as my wallpaper."*
+
+**Cleaning up**
+
+- *"Find apps I haven't used in 3 months."*
+- *"Which apps take the most storage?"*
+- *"Clear the cache of this app."* (the agent asks before deleting anything)
+
+**Using the phone for you**
+
+- *"Open WhatsApp, find Mom, and type 'on my way', but don't send it."*
+- *"Turn on dark mode."* / *"Turn on my hotspot."*
+- *"Open YouTube and search for lo-fi music."*
+- *"Take a screenshot and tell me what's on screen."*
+
+**Chained tasks**
+
+- **Morning check:** *"Check my battery, read my notifications, and tell me if any new file landed in Downloads."*
+- **Phone to PC:** *"Find my latest screenshot on the phone and save it to my PC."*
+- **Settings tour:** *"Open each settings page and tell me what's turned on."*
+- **App report:** *"Open my battery usage and tell me the top 3 apps."*
+
+---
+
+## Automate it: scheduled workflows and your own agents
+
+Because Phone Remote is a standard MCP server, anything that can use MCP tools
+can use your phone. That means you can build **your own workflows and agents**
+on top of it, and have them run **on a schedule** without you typing anything.
+
+With **Claude's scheduled tasks** (`/schedule` in Claude Code, or scheduled
+tasks in the Claude app), write a workflow once in plain words, pick a time,
+and Claude runs it for you:
+
+| Schedule | Workflow |
+|---|---|
+| Every morning, 8:00 | *"Check my phone's battery and storage, summarize overnight notifications, and list any OTPs or missed calls."* |
+| Every night, 23:00 | *"If the battery is below 30%, remind me to charge it. Turn on Do Not Disturb."* |
+| Every Sunday | *"Find apps I haven't opened in 60 days and list them with their size, so I can decide what to uninstall."* |
+| Every Friday | *"Copy this week's new photos and PDFs from my phone to my PC."* |
+| Every hour | *"Read my notifications. If anything mentions 'urgent' or comes from my boss, tell me right away."* |
+| Once, at 18:00 | *"Ring my phone so I remember to leave."* |
+
+You can also make **your own agents** that use the phone as one of their tools:
+
+- **A personal assistant agent** that reads your messages and notifications and drafts replies for you to approve.
+- **A phone health agent** that watches battery, storage and unused apps, and reports problems.
+- **A file sync agent** that moves files between your phone and computer on its own.
+- **An app tester agent** that opens your Android app, taps through its screens and reports what broke.
+
+**Tip:** teach your agent your own recipes by editing the
+[phone-remote skill](plugin/skills/phone-remote). It's plain Markdown:
+
+```
+## Good night
+1. open_settings(page="do_not_disturb"), turn it on.
+2. press_key("lock").
+```
+
+Then just say *"run my good night routine"*, or schedule it.
 
 ---
 
 ## Features
 
-**AI agent control (MCP)**
-
-- **31 tools.** Gestures, a structured UI tree with normalized coordinates, waiting for screen states, apps (open, list with sizes, find unused, uninstall, clear cache/data), deep links, direct Settings pages, opening files and folders, notifications/OTPs, hardware, and file transfer.
-- **One modern endpoint.** Streamable HTTP at `/mcp` with OAuth 2.1 + PKCE and dynamic client registration: paste the URL, sign in, approve. A plain `Authorization: Bearer` token works too.
-- **Agent-friendly metadata.** Every tool has a title and MCP annotations (13 read-only, 2 destructive: `uninstall_app`, `clear_app_storage`), so clients can auto-approve safe calls and ask before risky ones. Connecting agents also receive short usage instructions.
-- **Per-account isolation.** An agent only ever sees the phones of the account that approved it, and the approval page shows which account that is.
-
-**Web dashboard (React)**
-
-- **Live screen mirror with touch control.** Tap, swipe, scroll, type, use system keys. The phone frame follows the phone's orientation, so landscape videos and games fill the view.
-- **Live camera.** Front or back camera, also over WebRTC.
-- **File manager.** Browse the phone's storage, upload with drag and drop, and download. Your place survives a page refresh.
-- **Location**, **ring** (even on silent), **flashlight blink**, **screenshots**.
-- **Multi-account, multi-device.** Each user sees only their own phones, with live online status.
-
-**Streaming**
-
-- **WebRTC only.** Hardware H.264/VP8 encoding at up to 60 fps, typically 3–5× less data than frame-by-frame images.
-- **Works across networks.** A direct peer-to-peer path when possible; otherwise a built-in TURN relay over UDP, TCP, or TLS on port 443, which gets through firewalls that only allow HTTPS.
-- **Survives network switches.** Moving between Wi-Fi and mobile data repairs the same call (ICE restart), measured at 1–6 s, with automatic fallbacks so it never stays stuck.
-- **Low latency.** Real-time encoding that keeps the frame rate and lowers resolution under tight bandwidth, and no playback buffering.
-
-**Operations**
-
-- **One command to deploy.** `docker compose up -d --build` starts the web app and MCP server, nginx and the TURN relay.
-- **Free HTTPS.** Let's Encrypt certificates with automatic renewal.
+- **31 tools for AI agents.** Tap, swipe, type, read the screen, open apps and links, jump straight to 50 Android settings pages, read notifications and OTPs, find and clean up apps, ring and flashlight, location, and file transfer both ways.
+- **Live screen and camera** in the browser, with touch control. Fast and smooth, up to 60 fps.
+- **File manager** in the browser: browse the phone, drag and drop to upload, download.
+- **Works anywhere.** Phone and computer don't need to be on the same Wi-Fi, and the stream keeps going when the phone switches from Wi-Fi to mobile data.
+- **Runs in the background.** Close the app and everything keeps working.
+- **Safe by default.** Agents only see the phones of the account that approved them, and risky actions (uninstall, clear data) are marked so your agent asks first.
 
 ---
 
-## Architecture
-
-```mermaid
-flowchart LR
-    subgraph Users
-        Browser["Web browser<br/>(React dashboard)"]
-        Agent["AI agent<br/>(Claude / Cursor / Antigravity)"]
-    end
-
-    subgraph Server["Server — Docker Compose"]
-        Nginx["nginx :443<br/>SNI router + TLS"]
-        App["app — Node.js :3000<br/>MCP /mcp · REST · WebSocket signalling<br/>serves the React build"]
-        TURN["coturn<br/>TURN :3478 + TLS via :443"]
-        DB[("SQLite / PostgreSQL<br/>users · devices")]
-    end
-
-    subgraph Phone["Android phone"]
-        Svc["Companion app<br/>Kotlin foreground services"]
-    end
-
-    Browser -- "HTTPS + WebSocket" --> Nginx
-    Agent -- "MCP (Streamable HTTP + OAuth)" --> Nginx
-    Nginx --> App
-    Nginx -- "turn.&lt;domain&gt;" --> TURN
-    App <--> DB
-    Svc <-- "WebSocket (control, files, signalling)" --> Nginx
-
-    Svc == "WebRTC video: direct P2P" ==> Browser
-    Svc -. "or relayed when direct is blocked" .-> TURN
-    TURN -. relay .-> Browser
-```
-
-- **Control plane.** The phone holds a persistent secure WebSocket to the server. Every command (touch, keys, files, MCP tool calls) and all WebRTC signalling goes through it, scoped to the authenticated account and device.
-- **Media plane.** Screen and camera video go **directly from phone to browser** over WebRTC. Only when no direct path exists does the video pass through the server's TURN relay.
-- **Background operation.** Capture, input injection, the socket and WebRTC all live in native Kotlin foreground services, so streaming continues with the app UI closed.
-
----
-
-## How streaming works
-
-1. You click **Start Streaming** or **Front/Back camera**. The browser sends a WebRTC offer through the server, and the phone answers.
-2. The phone's capture (MediaProjection for the screen, Camera2 for the camera) is routed straight into a hardware video encoder.
-3. WebRTC tries every phone↔browser address pair and uses the best one that works:
-
-   | Order | Path | Typical latency | Used when |
-   |---|---|---|---|
-   | 1 | Direct, same network | ~5 ms | Phone and browser on the same Wi-Fi |
-   | 2 | Direct over the internet (STUN / IPv6) | 20–60 ms | Most home and mobile networks |
-   | 3 | TURN relay, UDP/TCP 3478 | +50–100 ms | Strict NAT / carrier-grade NAT |
-   | 4 | TURN relay, TLS on 443 | +50–100 ms | Networks that only allow HTTPS |
-
-4. **When the network changes** (for example Wi-Fi → mobile data), the phone reconnects instantly and the browser **ICE-restarts** the same call onto the new path. If that can't complete, it falls back to a fresh call, with a 20 s safety deadline and page watchdogs, so the stream always comes back on its own.
-
-> The legacy JPEG-over-WebSocket streaming path still exists in the code but is
-> switched off (`JPEG_FALLBACK = false`). Screenshots for AI agents are
-> unaffected.
-
----
-
-## Tech stack
-
-| Layer | Technology |
-|---|---|
-| Android app | Flutter (UI) + **Kotlin** foreground services, libwebrtc (`io.github.webrtc-sdk:android`), MediaProjection, Camera2, AccessibilityService, NotificationListenerService, OkHttp |
-| Web client | React 19, Vite, Context API, `lucide-react` |
-| Server + MCP | Node.js 22, Express, `ws`, JWT (bcryptjs), `@modelcontextprotocol/sdk` (Streamable HTTP), `sharp` |
-| Media relay | coturn 4.7 (TURN REST API, short-lived HMAC credentials) |
-| Data | SQLite (default) or PostgreSQL (`DATABASE_URL`) |
-| Infrastructure | Docker Compose, nginx (stream SNI router + TLS), Let's Encrypt, AWS EC2 |
-
----
-
-## Repository layout
-
-```
-.
-├── client/                 React web dashboard (Vite)
-│   └── src/
-│       ├── context/        Auth + device/WebSocket state (DeviceContext)
-│       ├── hooks/          useRtcStream — WebRTC client, ICE restart, recovery
-│       └── pages/          Dashboard, Mirror, Camera, Files, Location, MCP test
-├── server/                 Node.js backend
-│   ├── src/
-│   │   ├── routes/         mcp (28 tools, Streamable HTTP), oauth, auth, files
-│   │   └── services/       signaling (WebSocket hub), turn, db, oauthStore
-│   └── public/             OAuth consent page
-├── flutter_app/            Android companion app
-│   ├── lib/                Flutter UI (login, home, files)
-│   ├── android/app/src/main/kotlin/com/phoneremote/
-│   │                       Native services: connection, screen/camera capture,
-│   │                       WebRTC, accessibility input, notifications
-│   └── pubspec.yaml
-├── nginx/                  nginx image: SNI router (stream.conf) + site (default.conf)
-├── docker-compose.yml      nginx · app · coturn (+ turn-init)
-└── MCP_PHONE_NAVIGATION.md Playbook for AI agents (deep links, app navigation)
-```
-
----
-
-## Quick start (local development)
-
-**Prerequisites:** Node.js 22+, Flutter 3.44+ with Android SDK 36 / NDK 28.2, and an Android phone running Android 7.0 or later.
-
-```bash
-# 1. Server
-cd server
-cp .env.example .env          # set JWT_SECRET (see Configuration)
-npm install
-npm run dev                   # http://localhost:3000
-```
-
-```bash
-# 2. Web client (proxies /api, /ws and /mcp to :3000)
-cd client
-npm install
-npm run dev                   # http://localhost:5173
-```
-
-```bash
-# 3. Android app — point it at your server and run on a USB-connected phone
-cd flutter_app
-flutter run
-```
-
-Create an account in the browser, sign in with the same account on the phone,
-and grant the permissions the app asks for. The phone then appears on the
-dashboard.
-
-> Without a TURN server, WebRTC still works when the phone and browser can reach
-> each other directly (for example on the same Wi-Fi).
-
----
-
-## Production deployment
-
-The whole stack is defined in `docker-compose.yml`:
-
-```bash
-cd ~/phone-remote
-sudo docker compose up -d --build
-```
-
-| Service | Role |
-|---|---|
-| `nginx` | Public `:80/:443`. Routes TLS by hostname: `turn.<domain>` → TURN, everything else → the site |
-| `app` | Node.js server: MCP endpoint, REST, WebSocket signalling, and the built React client |
-| `coturn` | TURN relay (host networking, relay ports 49160–49200/udp) |
-| `turn-init` | One-shot job that generates the TURN shared secret on first run |
-
-**Firewall:** open 80/tcp, 443/tcp, 3478/tcp+udp and 49160–49200/udp.
-
-**Certificates:** one Let's Encrypt certificate must cover both `<domain>` and `turn.<domain>`.
-
----
-
-## Configuration
-
-**`server/.env`**
-
-| Variable | Required | Description |
-|---|---|---|
-| `JWT_SECRET` | yes | Secret used to sign login tokens. Generate a long random value. |
-| `PUBLIC_URL` | yes (prod) | Public base URL, for example `https://example.com`. Used for OAuth metadata and TURN hostnames. |
-| `PORT` | no | HTTP port, default `3000`. |
-| `TOKEN_TTL` | no | Login token lifetime, default `30d`. |
-| `DATABASE_URL` | no | PostgreSQL connection string. Empty means SQLite in `server/data/`. |
-| `FILE_DIR` | no | Root folder for per-account file storage. |
-
-**Set by `docker-compose.yml` (override from the shell or a root `.env`)**
-
-| Variable | Description |
-|---|---|
-| `DOMAIN` | Public hostname. The app and the TURN-over-TLS hostname follow it. The domain is written directly into `nginx/default.conf` and `nginx/stream.conf`: edit it there too when you change domains. |
-| `TURN_EXTERNAL_IP` / `TURN_PRIVATE_IP` | Override coturn's auto-detected public and private addresses. |
-| `TURN_TLS_HOST` | Hostname for `turns:` on 443, default `turn.${DOMAIN}`. |
-| `TURN_SECRET_FILE` | Shared TURN secret, generated automatically by `turn-init`. |
-| `DOWNLOADS_DIR` | Mounted folder served at the site root (for example `/phone-remote.apk`). |
-
-**Feature switches**
-
-| Switch | Where | Default |
-|---|---|---|
-| `ICE_RESTART` | `client/src/hooks/useRtcStream.js` | `true`: repair calls across network switches |
-| `ICE_RESTART_HINT` | `server/src/services/signaling.js` | `true`: tell browsers to repair when the phone reconnects |
-| `JPEG_FALLBACK` | `useRtcStream.js` + `ConnectionForegroundService.kt` | `false`: WebRTC-only streaming |
-
----
-
-## The Android app
-
-**Install.** Download `/phone-remote.apk` from your server, install it, sign in, and grant:
-
-| Permission | Used for |
-|---|---|
-| Screen capture (asked on first stream) | Screen mirroring |
-| Accessibility service | Touch, swipe, typing, system keys, UI tree |
-| Notification access | `read_notifications` (OTPs, messages) |
-| Camera, location, storage | Camera stream, location, file manager |
-| Battery: unrestricted | Keeps the background service alive on aggressive OEMs |
-
-**Build a release APK:**
-
-```bash
-cd flutter_app
-flutter build apk --release --target-platform android-arm64
-```
-
-libwebrtc ships no shrinker rules. If R8 strips its Java classes, the app
-crashes the moment WebRTC starts. `android/app/proguard-rules.pro` keeps them:
-leave those rules in place.
-
----
-
-## AI agents (MCP)
-
-One endpoint, `https://<domain>/mcp`, using the current MCP transport
-(Streamable HTTP). All coordinates are normalized from `0.0` to `1.0` (a
-fraction of the screen width and height), not pixels.
-
-### Use it with your AI agent
+## Use it with your AI agent
 
 **Using Claude? The easy way:** install the app (step 1 below), download
 [`phone-remote-plugin.zip`](https://github.com/GuptaOum/phone-remote/releases/latest/download/phone-remote-plugin.zip),
@@ -308,73 +141,42 @@ other agent, follow the steps below.
 Three steps, free:
 
 1. **Get the app.** Install the Android app on your phone:
-   `https://65-1-96-152.sslip.io/phone-remote.apk` (hosted server), or the
-   `/phone-remote.apk` of your own server. Create an account in the app and grant
-   the permissions it lists.
-2. **Add the MCP server to your agent** with the snippet for your tool below.
-   Use `https://65-1-96-152.sslip.io/mcp`, or `https://<your-domain>/mcp` if you
-   self-host.
+   `https://65-1-96-152.sslip.io/phone-remote.apk`. Create an account in the
+   app and grant the permissions it lists.
+2. **Add the MCP server to your agent** with the snippet for your tool below,
+   using `https://65-1-96-152.sslip.io/mcp`.
 3. **Sign in once.** On first use a browser window opens: sign in with the same
    account, check the **Signed in as** line, and click **Approve**. Then ask
-   your agent things like *"take a screenshot of my phone"* or *"find apps I
-   haven't used in a month"*.
+   your agent things like *"take a screenshot of my phone"*.
 
-No API key to copy: the server supports OAuth 2.1 discovery
-(`/.well-known/oauth-protected-resource`) with dynamic client registration and
-PKCE, so agents only need the URL.
+No API key to copy: agents only need the URL.
 
-#### The skill (recommended for every agent)
+### The skill (recommended for every agent)
 
 The MCP server gives an agent the tools. The **`phone-remote` skill** in
 [`plugin/skills/phone-remote`](plugin/skills/phone-remote) teaches it to use
-them well: jump with deep links, `open_settings` and `open_file` instead of
-tapping through menus, read the screen with `get_ui_tree`, wait with
-`wait_for`, follow the safety rules (ask before sending, never type PINs), plus
-step-by-step recipes and a troubleshooting table. It uses the open Agent
-Skills `SKILL.md` format, so the same folder works in Claude Code, Codex,
-Cursor, Antigravity and other agents. One command installs it into whichever
-agents you have:
+them well: faster shortcuts, reading the screen instead of guessing, and safety
+rules like asking before sending anything. One command installs it into
+whichever agents you have:
 
 ```bash
 npx skills add GuptaOum/phone-remote
 ```
 
-(Add `-g` to install it for your user instead of the current project, or
-`-a codex` / `-a cursor` / `-a antigravity` / `-a claude-code` to pick agents.)
-To install by hand, copy the `plugin/skills/phone-remote` folder into the
-agent's skills folder: `.claude/skills/`, `.codex/skills/`, `.cursor/skills/`
-or `.agents/skills/` (Antigravity) in a project.
+### Make it yours
 
-#### Make it yours
+The skill is plain Markdown, so you can teach your agent how *your* phone works:
 
-The skill is plain Markdown, so you can teach your agent how *your* phone
-works by editing your installed copy. Keep each note short; the agent reads it
-every time.
+- **Your phone's apps** go in `references/deep-links.md`.
+- **Your own recipes** go in `references/workflows.md`.
+- **Your rules** go in `SKILL.md`, for example *"Never open my banking apps."*
 
-- **Your phone's apps** go in `references/deep-links.md`:
-  ```
-  | My gallery | `com.sec.android.gallery3d` |
-  | Office chat | `com.slack` |
-  ```
-- **Your own recipes** go in `references/workflows.md`:
-  ```
-  ## Good night
-  1. open_settings(page="sound"), turn on Do Not Disturb.
-  2. press_key("lock").
-  ```
-- **Your rules** go in `SKILL.md`:
-  ```
-  - My phone is in Hindi: match "भेजें" for Send.
-  - Never open my banking apps.
-  - Save files from the PC to Documents/FromPC, not Download.
-  ```
+Found a recipe that works on your brand (Samsung, Vivo, Xiaomi...)? Open a
+pull request so other people can use it too.
 
-Found a recipe or fix that works on your brand (Samsung, Vivo, Xiaomi...)?
-Open a pull request so other people can use it too.
+### Connect the MCP server
 
-#### Connect the MCP server
-
-**Claude Code:** one command adds both the MCP server and the skill:
+**Claude Code:**
 
 ```
 /plugin marketplace add GuptaOum/phone-remote
@@ -382,29 +184,19 @@ Open a pull request so other people can use it too.
 ```
 
 Then run `/mcp`, pick `plugin:phone-remote:phone-remote` and choose
-*Authenticate*. (MCP only, without the skill:
-`claude mcp add --transport http phone-remote https://65-1-96-152.sslip.io/mcp`.)
+*Authenticate*.
 
 **claude.ai, Claude Desktop, Claude mobile:** *Settings → Connectors → Add
-custom connector*, URL `https://65-1-96-152.sslip.io/mcp`. Connectors can't
-carry skills; the server's built-in instructions cover the basics.
+custom connector*, URL `https://65-1-96-152.sslip.io/mcp`.
 
-**OpenAI Codex (CLI and IDE extension):**
+**OpenAI Codex:**
 
 ```bash
 codex mcp add phone-remote --url https://65-1-96-152.sslip.io/mcp
 codex mcp login phone-remote
 ```
 
-Or by hand in `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.phone-remote]
-url = "https://65-1-96-152.sslip.io/mcp"
-```
-
-**Google Antigravity:** add to `mcp_config.json` (*Agent panel → … → MCP
-Servers → Manage MCP Servers → View raw config*):
+**Google Antigravity:** add to `mcp_config.json`:
 
 ```json
 {
@@ -415,16 +207,7 @@ Servers → Manage MCP Servers → View raw config*):
 ```
 
 **Cursor:** one click:
-[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=phone-remote&config=eyJ1cmwiOiJodHRwczovLzY1LTEtOTYtMTUyLnNzbGlwLmlvL21jcCJ9),
-or add to `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project):
-
-```json
-{
-  "mcpServers": {
-    "phone-remote": { "url": "https://65-1-96-152.sslip.io/mcp" }
-  }
-}
-```
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=phone-remote&config=eyJ1cmwiOiJodHRwczovLzY1LTEtOTYtMTUyLnNzbGlwLmlvL21jcCJ9)
 
 **VS Code (Copilot agent mode):** `.vscode/mcp.json`:
 
@@ -436,94 +219,57 @@ or add to `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project):
 }
 ```
 
-**Any other MCP client** that speaks Streamable HTTP: point it at the `/mcp`
-URL. New tools appear after the client reconnects (for example a new chat, or
-reconnecting the connector).
+**Any other MCP client:** point it at `https://65-1-96-152.sslip.io/mcp`.
 
-**Clients without OAuth** can send a login token instead (`POST /api/login`
-returns one, valid for 30 days):
+---
 
-```json
-{
-  "mcpServers": {
-    "phone-remote": {
-      "url": "https://<domain>/mcp",
-      "headers": { "Authorization": "Bearer <YOUR_TOKEN>" }
-    }
-  }
-}
-```
+## The Android app
 
-> The legacy SSE transport (`/sse`) was removed: Streamable HTTP replaced it in
-> the MCP specification, and every client listed above supports it.
+Download [`phone-remote.apk`](https://65-1-96-152.sslip.io/phone-remote.apk),
+install it, sign in, and grant:
 
-**Tools**
-
-| Group | Tools |
+| Permission | Used for |
 |---|---|
-| Device and perception | `list_devices`, `get_device_status`, `get_location`, `get_foreground_app`, `get_ui_tree`, `wait_for`, `take_screenshot` |
-| Interaction | `tap`, `long_press`, `swipe`, `scroll`, `type_text`, `press_key`, `wait` |
-| Apps and navigation | `open_app`, `open_app_drawer`, `open_url`, `open_settings`, `open_file` |
-| App storage | `list_apps` (with sizes), `find_unused_apps`, `clear_app_storage`, `uninstall_app` |
-| Hardware and notifications | `ring`, `flash_light`, `read_notifications` |
-| Files | `list_files`, `get_file`, `send_local_file`, `send_file`, `send_url` |
-
-`get_ui_tree` returns every visible text, button and input with ready-to-tap
-coordinates. Agents should prefer it over screenshots: it's faster, cheaper, and
-leaves no room for guessing pixels. For how agents should combine the tools,
-see the [phone-remote skill](plugin/skills/phone-remote/SKILL.md); for a longer
-catalogue of deep links and packages, see
-[MCP_PHONE_NAVIGATION.md](MCP_PHONE_NAVIGATION.md).
+| Screen capture (asked on first stream) | Screen mirroring |
+| Accessibility service | Tapping, swiping, typing, reading the screen |
+| Notification access | Reading notifications and OTPs |
+| Camera, location, storage | Camera stream, location, files |
+| Battery: unrestricted | Keeps it running in the background |
 
 ---
 
-## Security
+## Works while the phone is locked?
 
-See also the [privacy policy](PRIVACY.md).
-
-- **Accounts:** bcrypt-hashed passwords and JWT sessions. Every WebSocket, REST and MCP operation is scoped to the authenticated account and its own devices.
-- **Device revocation:** removing a device on the dashboard disconnects it and rejects its old tokens.
-- **MCP / OAuth:** PKCE (S256) is required, redirect URIs must match the registered client, and the approval page shows the signed-in account with a *Switch account* link, so a browser logged in to the wrong account can't silently link it.
-- **TURN:** credentials are short-lived (24 h, HMAC-signed per user), the relay refuses private and loopback destinations, and wrong credentials get `401`.
-- **Transport:** HTTPS/WSS everywhere, and WebRTC media is encrypted end to end (DTLS-SRTP).
-- **Files:** one-time signed URLs for downloads and uploads, with per-account storage roots.
-
----
-
-## Diagnostics and troubleshooting
-
-**WebRTC on the phone** (USB debugging enabled):
-
-```bash
-adb logcat -s PhoneRemote
-# rtc screen: 60fps 564x1266 1400kbps limit=bandwidth path=host/udp→srflx rtt=0.032
-```
-
-`path` shows the route: `host`, `srflx` and `prflx` are direct; `relay` goes through coturn. `limit` shows what is capping quality.
-
-**WebRTC in the browser:** each step is reported to the server log:
-
-```bash
-cd ~/phone-remote && docker compose logs app-blue app-green | grep -E "🔗|🧭"
-# 🧭 rtc screen ice-restart attempt 1
-# 🧭 rtc screen answer
-# 🔗 WebRTC screen connected
-```
-
-| Symptom | Check |
+| Works when locked | Needs the phone unlocked |
 |---|---|
-| App closes the moment streaming starts | R8 keep rules missing: check `android/app/proguard-rules.pro` |
-| Stuck on "Connecting video…" | `🧭` trace; TURN ports open; `turn.<domain>` included in the certificate |
-| Phone shows offline | App battery set to Unrestricted; the phone's own logs |
-| Agent gets `401` | Token expired: sign in again, or re-authorize the connector |
+| Files: list, download, upload | Tapping, swiping, typing |
+| Reading notifications and OTPs | Opening apps and settings |
+| Location, battery and status | Reading the screen, screenshots |
+| Ring and flashlight | Live screen mirror |
+
+Nothing can get past your PIN or fingerprint.
 
 ---
 
-## Further documentation
+## Privacy and safety
 
-- **[MCP_PHONE_NAVIGATION.md](MCP_PHONE_NAVIGATION.md):** playbook for AI agents operating the phone.
+Your Phone Remote account can read your files, notifications and location,
+even when the phone is locked. So:
+
+1. Use a **strong, unique password** for your account.
+2. Only connect AI tools you trust, and remove the ones you don't use.
+3. Lost your phone or PC? **Remove the device** from the dashboard to cut it off immediately.
+
+The skill tells agents to ask before sending messages or deleting anything. See the
+[privacy policy](PRIVACY.md).
 
 ---
+
+## For developers
+
+Want to host your own server or see how it works inside? Architecture,
+self-hosting, configuration and troubleshooting are in
+[docs/TECHNICAL.md](docs/TECHNICAL.md).
 
 ## License
 
