@@ -884,8 +884,13 @@ function createPhoneRemoteServer() {
   //    moment, the tap was swallowed by a popup: tap it again;
   //  - `alsoOk` ends the wait early: return { other: node } when it shows,
   //    e.g. "Clear data" visible but no "Clear cache" (cache already empty).
+  //  - `minY` skips nodes above it (the title bar, which can repeat a row's
+  //    words: the Storage page is titled "Storage usage").
+  //  - `require` only accepts a screen that also shows a node matching it
+  //    (the app's name), so a Settings page left open for ANOTHER app is
+  //    never acted on.
   async function findOnScreen(userId, deviceId, re, timeoutMs = 6000, opts = {}) {
-    const { home, retap, alsoOk } = opts;
+    const { home, retap, alsoOk, minY, require: mustShow } = opts;
     const start = Date.now();
     const end = start + timeoutMs;
     let backs = 0;
@@ -902,7 +907,11 @@ function createPhoneRemoteServer() {
           await sleep(700);
           continue;
         }
-        const n = nodes.find((x) => re.test(nodeLabel(x)));
+        if (mustShow && !nodes.some((x) => mustShow.test(nodeLabel(x)))) {
+          await sleep(WAIT_POLL_MS);
+          continue;
+        }
+        const n = nodes.find((x) => (minY == null || x.y > minY) && re.test(nodeLabel(x)));
         if (n) return n;
         if (alsoOk) {
           const o = nodes.find((x) => alsoOk.test(nodeLabel(x)));
@@ -964,6 +973,13 @@ function createPhoneRemoteServer() {
       } catch { /* older build: carry on, the steps below fail clearly if locked */ }
 
       const before = await appSizeMB(userId, deviceId, pkg);
+      // Start from the home screen: if Settings is still showing another
+      // app's page (say a previous run's Storage page), some phones (realme)
+      // bring that page back instead of opening the new App info.
+      try {
+        await runControl(userId, deviceId, { type: 'control', action: 'keyevent', keycode: KEY_MAP.home });
+        await sleep(600);
+      } catch { /* not fatal: the name check below still guards */ }
       let r;
       try {
         r = await signaling.requestFromPhone(userId, deviceId, (id) => ({ type: 'open_app_settings', id, package: pkg }), 12000, 'app_settings');
@@ -982,16 +998,21 @@ function createPhoneRemoteServer() {
       const reData = withLabels(SETTINGS_CLEAR_DATA, L.clearData);
       const reConfirm = withLabels(SETTINGS_CONFIRM, L.ok);
       const stuck = (step) => textResult(`Opened App info for ${label} but could not find "${step}". Take a screenshot to see the screen and finish by hand (tap, get_ui_tree).`, true);
+      // Both App info and its Storage page show the app's name. Requiring it
+      // (exact, so "WhatsApp" never matches "WhatsApp Business") makes sure
+      // every tap below lands on THIS app's page.
+      const appName = r.name && r.name !== pkg ? r.name.trim() : null;
+      const nameRe = appName ? new RegExp(`^${escapeRe(appName)}$`, 'i') : null;
 
-      const storage = await findOnScreen(userId, deviceId, reStorage, 8000);
-      if (!storage) return stuck('Storage');
+      const storage = await findOnScreen(userId, deviceId, reStorage, 8000, { minY: 0.15, require: nameRe });
+      if (!storage) return stuck(`Storage (on the App info page of ${appName || pkg})`);
       // Remember which package Settings is, so a popup from any other app
       // can be recognised and closed on the next steps.
       let home = null;
       try { home = (await fetchUiTree(userId, deviceId, false, 5000)).package || null; } catch { /* no popup handling */ }
       let err = await tapNode(storage);
       if (err) return err;
-      const step = { home, retap: reStorage };
+      const step = { home, retap: reStorage, require: nameRe };
 
       const done = [];
       if (mode === 'cache' || mode === 'both') {
