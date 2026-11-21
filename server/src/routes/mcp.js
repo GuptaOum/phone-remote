@@ -973,10 +973,17 @@ function createPhoneRemoteServer() {
       } catch { /* older build: carry on, the steps below fail clearly if locked */ }
 
       const before = await appSizeMB(userId, deviceId, pkg);
-      // Start from the home screen: if Settings is still showing another
-      // app's page (say a previous run's Storage page), some phones (realme)
-      // bring that page back instead of opening the new App info.
+      // Close any Settings pages left open first. If Settings still shows
+      // another app's page (say a previous run's Storage page), some phones
+      // (realme) bring that old page back instead of opening the new App
+      // info, even after Home. Backing out of Settings clears them.
       try {
+        for (let i = 0; i < 5; i++) {
+          const t = await fetchUiTree(userId, deviceId, false, 5000);
+          if ((t.package || t.app) !== 'com.android.settings') break;
+          await runControl(userId, deviceId, { type: 'control', action: 'keyevent', keycode: KEY_MAP.back });
+          await sleep(500);
+        }
         await runControl(userId, deviceId, { type: 'control', action: 'keyevent', keycode: KEY_MAP.home });
         await sleep(600);
       } catch { /* not fatal: the name check below still guards */ }
