@@ -13,6 +13,7 @@ const { z } = require('zod');
 const db = require('../services/db');
 const { verifyToken } = require('../middleware/auth');
 const signaling = require('../services/signaling');
+const { compactNodes, formatTree } = require('../services/uiTreeCompact');
 
 /**
  * MCP server — Powered by Anthropic's official @modelcontextprotocol/sdk and zod.
@@ -495,7 +496,7 @@ function createPhoneRemoteServer() {
   // 5. get_ui_tree
   tool(
     'get_ui_tree',
-    'Read the screen as structured data instead of an image: every visible text, button and input field, with the normalized x/y you can pass straight to tap. PREFER THIS OVER take_screenshot for finding and acting on things — it is far cheaper, has no capture throttle, and gives exact coordinates instead of estimates from pixels. Use take_screenshot only when you need to see something genuinely visual (an image, a layout problem, a CAPTCHA). Each node has: i (index), text, desc (accessibility label), id (resource id), cls (widget class), x/y (normalized centre — pass to tap), f (flags: c=clickable, e=editable/text field, s=scrollable, k=checkable, K=checked, f=focused, d=disabled).',
+    'Read the screen as structured data instead of an image: every visible text, button and input field, with the normalized x/y you can pass straight to tap. PREFER THIS OVER take_screenshot for finding and acting on things — it is far cheaper, has no capture throttle, and gives exact coordinates instead of estimates from pixels. Use take_screenshot only when you need to see something genuinely visual (an image, a layout problem, a CAPTCHA). Each node has: i (index), text, desc (accessibility label, left out when it repeats text), id (resource id), cls (widget class; left out for plain TextView), x/y (normalized centre — pass to tap), f (flags: c=clickable, e=editable/text field, s=scrollable, k=checkable, K=checked, f=focused, d=disabled). A label marked c may stand for its whole list row: tap it to open that row.',
     {
       deviceId: z.string().describe('Device id from list_devices'),
       all: z.boolean().optional().describe('Include layout containers with no text or action (default false). Leave false unless the tree looks incomplete — it adds a lot of noise.'),
@@ -515,9 +516,12 @@ function createPhoneRemoteServer() {
             ? `No elements matched "${filter}". Try a different substring, or call get_ui_tree without filter to see everything currently on screen.`
             : 'The screen reported no readable elements. It is probably off or locked, or showing content that blocks accessibility. Try press_key "home", or take_screenshot to look.', true);
         }
-        const out = { app: t.package, nodes };
+        // all:true is the raw tree, untouched. Otherwise drop the repeats
+        // (see uiTreeCompact.js); neighbour merging needs the full tree.
+        const shown = all ? nodes : compactNodes(nodes, { neighbours: !filter });
+        const out = { app: t.package, nodes: shown };
         if (t.truncated) out.note = `Truncated: only the first ${nodes.length} elements are listed. Scroll, or add filter to narrow the search.`;
-        return textResult(out);
+        return textResult(formatTree(out));
       } catch (e) {
         return textResult(e.message, true);
       }
