@@ -412,7 +412,7 @@ async function uploadToPhone(userId, deviceId, destPath, buffer, timeoutMs = 200
  * already acks each chunk (pf_chunk_ack), so flow control comes for free.
  * No phone-side (Kotlin) changes needed.
  */
-function downloadFromPhone(userId, deviceId, path, { idleTimeoutMs = 20000, maxBytes = 50 * 1024 * 1024 } = {}) {
+function downloadFromPhone(userId, deviceId, path, { idleTimeoutMs = 20000, maxBytes = 100 * 1024 * 1024 } = {}) {
   const phone = getPhoneSocket(userId, deviceId);
   if (!phone) return Promise.reject(new Error('Device is offline'));
   const a = acct(userId);
