@@ -28,8 +28,13 @@ screen reader: look, act, confirm.
    Only fall back to `open_app_drawer` + tapping when none of these fit.
 3. **Read the screen as data.** `get_ui_tree` with a `filter` for what you
    expect (`filter:"send"`, `filter:"search"`). It returns exact normalized
-   x/y to pass to `tap`. Use `take_screenshot` only for genuinely visual things
-   (a photo, a layout bug, a page with no accessible text).
+   x/y to pass to `tap`. The tree is the default: it is faster and downloads
+   no image. Switch to `take_screenshot` only when the tree doesn't explain
+   the screen: a tap did nothing, something seems to cover the target (web
+   pages often draw tips and popups the tree doesn't show), the page is a
+   game/video/canvas, or you need to see something genuinely visual. Take
+   one screenshot to understand what's wrong, then go straight back to
+   `get_ui_tree` for the next steps.
 4. **Act.** `tap` / `long_press` / `scroll` / `type_text` / `press_key`.
    Coordinates are always 0.0-1.0 fractions of the screen, never pixels.
 5. **Wait for the result, don't sleep.** After anything that loads or

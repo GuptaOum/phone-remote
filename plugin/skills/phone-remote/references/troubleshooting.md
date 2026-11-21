@@ -15,12 +15,16 @@ Start every diagnosis with `get_device_status`.
 | `wait_for` times out | Label differs from what you expected | `get_ui_tree` with no filter once to see the real labels, then retry with the right text. |
 | `read_notifications` errors | Notification access not granted | `open_settings(page:"notifications")`; the user enables Phone Remote under Device & app notifications. |
 | `clear_app_storage` stops midway | Vendor popup or button label differs (realme/ColorOS, MIUI) | Read the tree, finish the last step by hand (tap Clear / OK), re-run to see the new size. |
+| A tap on a button the tree shows does nothing | A popup, tip or banner covers it (common on web pages like Google My Activity; the tree may not include the overlay) | One `take_screenshot` to see what's on top, dismiss it (its Dismiss/close button, or `press_key("back")`), then continue with `get_ui_tree`. |
+| Tree coordinates have x above 1.0 | The page is still sliding in | Re-read the tree a moment later before tapping. |
 | `take_screenshot` errors "too soon" | Capture is throttled | Use `get_ui_tree` instead, or wait ~1 s. |
 
 ## Rules of thumb
 
 - Two failed attempts at the same tap → stop and look (`get_ui_tree` without
   filter, or one screenshot). Don't keep hammering coordinates.
+- Screenshots are for diagnosing, not for every step: after one screenshot,
+  go back to `get_ui_tree`.
 - Never loop more than ~8 scrolls hunting for something; ask the user.
 - If the phone shows a permission prompt you didn't expect, tell the user what
   it asks for instead of tapping Allow on your own.
