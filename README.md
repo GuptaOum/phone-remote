@@ -47,6 +47,7 @@ Talk to your agent in plain words. These all work today.
 - *"Where is my phone?"* and then *"Make it ring."*
 - *"Read my notifications and tell me what's important."*
 - *"Did an OTP come in? Read it to me."*
+- *"I just copied a link on my phone, open it on my PC."* / *"Summarise what I copied."*
 
 **Files between phone and computer**
 
@@ -246,6 +247,7 @@ install it, sign in, and grant:
 | Reading notifications and OTPs | Opening apps and settings |
 | Location, battery and status | Reading the screen, screenshots |
 | Ring and flashlight | Live screen mirror |
+| | Reading what you copied |
 
 Nothing can get past your PIN or fingerprint.
 
