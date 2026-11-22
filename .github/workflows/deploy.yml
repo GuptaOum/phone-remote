@@ -40,6 +40,11 @@ jobs:
           npm ci --omit=dev
           find src -name '*.js' -print0 | xargs -0 -n1 node --check
 
+      # A failing test stops the deploy job below (it needs this job).
+      - name: Server — unit tests
+        working-directory: server
+        run: npm test
+
       - name: Compose file is valid
         run: touch server/.env && DOMAIN=example.com docker compose config -q
 
