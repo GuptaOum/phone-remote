@@ -21,13 +21,14 @@ function makeRows(n, titles = {}) {
   }));
 }
 
-function snapshot(rows, offset) {
+function snapshot(rows, offset, { lateTitle = false } = {}) {
   const nodes = [
-    { text: 'mixed', x: 0.37, y: 0.08 },
     { desc: 'Back', x: 0.08, y: 0.08, f: 'c' },
     { text: 'Home', x: 0.17, y: 0.931 },
     { text: 'Library', x: 0.83, y: 0.931 },
   ];
+  // A collapsing title bar shows up only once the list has scrolled.
+  if (!lateTitle || offset > 0) nodes.push({ text: 'mixed', x: 0.37, y: 0.08 });
   rows.forEach((r, i) => {
     const y = FIRST_ROW_Y + i * SPACING - offset;
     const show = (yy) => yy >= TOP && yy <= BOTTOM;
@@ -40,23 +41,23 @@ function snapshot(rows, offset) {
 }
 
 // What the tool does: read, scroll, read, until the screen stops changing.
-function scrollAndRead(rows, shift, opts = {}) {
+function scrollAndRead(rows, shift, opts = {}, snapOpts = {}) {
   const screens = [];
   let offset = 0;
   const maxOffset = Math.max(0, FIRST_ROW_Y + rows.length * SPACING - BOTTOM); // end of list
-  let cur = screenLabels(snapshot(rows, offset), opts);
+  let cur = screenLabels(snapshot(rows, offset, snapOpts), opts);
   for (let step = 0; step < 200; step++) {
     screens.push(cur);
     offset = Math.min(offset + shift, maxOffset);
-    const next = screenLabels(snapshot(rows, offset), opts);
+    const next = screenLabels(snapshot(rows, offset, snapOpts), opts);
     if (sameScreen(cur, next)) break;
     cur = next;
   }
   return screens;
 }
 
-function collect(rows, shift) {
-  const screens = scrollAndRead(rows, shift);
+function collect(rows, shift, snapOpts = {}) {
+  const screens = scrollAndRead(rows, shift, {}, snapOpts);
   const merged = mergeScreens(screens);
   const cleaned = dropRepeated(merged.labels);
   return { merged, rows: toRows(cleaned.labels), cleaned, screens };
@@ -92,6 +93,18 @@ test('drops the title bar and bottom bar', () => {
   assert.ok(merged.dropped.includes('mixed'));
   assert.ok(merged.dropped.includes('Home'));
   assert.ok(!rows.join('\n').includes('Library'));
+});
+
+test('drops a title bar that only appears after the first scroll, keeping a row with the same text', () => {
+  // Like YT Music: the playlist name is the first list row, and the small
+  // title bar with the same name appears once the header scrolls away.
+  const data = makeRows(60, { 0: 'mixed' });
+  const { merged, rows } = collect(data, 0.35, { lateTitle: true });
+  assert.strictEqual(merged.gaps, 0);
+  assert.strictEqual(rows.length, 60);
+  assert.ok(merged.dropped.includes('mixed'));
+  assert.strictEqual(rows[0], `mixed | ${data[0].artist}`);
+  assert.strictEqual(rows.filter((r) => r.startsWith('mixed')).length, 1);
 });
 
 test('drops row furniture that every row repeats, and says so', () => {

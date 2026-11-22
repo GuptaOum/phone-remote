@@ -45,17 +45,27 @@ function sameScreen(a, b) {
   return true;
 }
 
-// Labels that sit in the same place on every snapshot are not list content:
-// a title bar, a bottom navigation bar, a mini player. Drop them.
+const samePlace = (a, b) =>
+  a.t === b.t && Math.abs(a.x - b.x) <= SAME_POS && Math.abs(a.y - b.y) <= SAME_POS;
+
+// Labels that sit in the same place on most snapshots are not list content:
+// a title bar, a bottom navigation bar, a mini player. List rows move on every
+// scroll, so they never stay put. "Most" rather than "every", because some
+// bars only show up after the first scroll (a collapsing title bar that
+// appears once the big header has scrolled away). Returns the labels with
+// their positions, so a row that happens to share a bar's text is kept.
 function staticSet(screens) {
-  const set = new Set();
-  if (screens.length < 2) return set;
-  for (const l of screens[0]) {
-    const everywhere = screens.every((s) => s.some((m) =>
-      m.t === l.t && Math.abs(m.x - l.x) <= SAME_POS && Math.abs(m.y - l.y) <= SAME_POS));
-    if (everywhere) set.add(l.t);
+  const found = [];
+  if (screens.length < 2) return found;
+  const need = Math.max(2, Math.ceil(screens.length / 2));
+  for (const s of screens) {
+    for (const l of s) {
+      if (found.some((f) => samePlace(f, l))) continue;
+      const count = screens.filter((o) => o.some((m) => samePlace(m, l))).length;
+      if (count >= need) found.push({ t: l.t, x: l.x, y: l.y });
+    }
   }
-  return set;
+  return found;
 }
 
 // Mark where each row starts (a big vertical gap from the previous label).
@@ -85,7 +95,7 @@ function mergeScreens(screens) {
   const acc = [];
   let gaps = 0;
   screens.forEach((s, idx) => {
-    const flagged = withBreaks(s.filter((l) => !skip.has(l.t)));
+    const flagged = withBreaks(s.filter((l) => !skip.some((f) => samePlace(f, l))));
     if (!flagged.length) return;
     if (idx === 0 || !acc.length) { acc.push(...flagged); return; }
     const k = overlap(acc, flagged);
@@ -95,7 +105,7 @@ function mergeScreens(screens) {
     }
     acc.push(...flagged.slice(k));
   });
-  return { labels: acc, gaps, dropped: [...skip] };
+  return { labels: acc, gaps, dropped: [...new Set(skip.map((f) => f.t))] };
 }
 
 // Labels like "0" or "Play" that every row repeats are row furniture, not
