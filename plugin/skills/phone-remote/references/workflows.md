@@ -82,6 +82,18 @@ phone has no browser session. Then `open_file` if the user wants to see it.
    `open_settings(page:"notifications")` and tell them which toggle.
 Report the code only to the user, or type it only where the user asked.
 
+## Use what the user copied on the phone
+
+"I copied a link, open it on my PC", "summarise what I copied", "save this
+address":
+1. `get_clipboard`. It returns `{kind, text}` (`kind` is `text` or `uri`).
+   The phone must be unlocked; Android may briefly show "Phone Remote pasted
+   from your clipboard", which is expected.
+2. Act on the text: open the link (`open_url` on the phone, or use it on the
+   PC), summarise it, or paste it where the user wants (`type_text`).
+The clipboard can hold passwords or codes: read it only when asked and don't
+repeat secrets back unless the user wants them.
+
 ## Change a setting
 
 `open_settings(page=...)` with one of:
