@@ -14,6 +14,9 @@ const db = require('../services/db');
 const { verifyToken } = require('../middleware/auth');
 const signaling = require('../services/signaling');
 const { compactNodes, formatTree } = require('../services/uiTreeCompact');
+const {
+  screenLabels, sameScreen, mergeScreens, dropRepeated, toRows,
+} = require('../services/listCollect');
 
 /**
  * MCP server — Powered by Anthropic's official @modelcontextprotocol/sdk and zod.
@@ -174,6 +177,11 @@ async function runControl(userId, deviceId, msg, timeoutMs) {
 
 const WAIT_POLL_MS = 600;
 
+// collect_list: pause after each scroll so the list stops flinging, and the
+// most rows it will return.
+const COLLECT_SETTLE_MS = 400;
+const COLLECT_MAX_ROWS = 1500;
+
 function fetchUiTree(userId, deviceId, all = false, timeoutMs = 10000, filter = null) {
   return signaling.requestFromPhone(
     userId, deviceId,
@@ -326,6 +334,7 @@ const TOOL_TITLES = {
   list_apps: 'List installed apps', find_unused_apps: 'Find unused apps', open_url: 'Open URL or deep link',
   uninstall_app: 'Uninstall app', clear_app_storage: 'Clear app cache / data', read_notifications: 'Read notifications',
   take_screenshot: 'Take screenshot', tap: 'Tap', long_press: 'Long press', swipe: 'Swipe', scroll: 'Scroll',
+  collect_list: 'Read a whole scrolling list',
   type_text: 'Type text', press_key: 'Press key', open_app: 'Open app', open_app_drawer: 'Open app drawer',
   wait: 'Wait', ring: 'Ring phone', flash_light: 'Flash light', list_files: 'List phone files',
   get_file: 'Download file from phone', send_local_file: 'Send local file to phone', send_file: 'Send file to phone',
@@ -1281,6 +1290,97 @@ function createPhoneRemoteServer() {
       const r = await runControl(authInfo.userId, deviceId, { type: 'control', action: 'swipe', ...g, ms: 260 });
       if (r.err) return r.err;
       return maybeScreenshot(authInfo.userId, deviceId, textResult(`Scrolled ${direction}.${r.note}`), screenshot);
+    }
+  );
+
+  // 14b. collect_list
+  tool(
+    'collect_list',
+    'Read an ENTIRE scrolling list in one call: playlists, contacts, chats, search results, settings, app lists. The server scrolls the list, reads the screen after every step, stitches the overlaps together and returns one numbered row per list item (the texts of a row joined with " | "), without repeats. Use this instead of calling scroll + get_ui_tree over and over. It first scrolls to the top (fromTop, default true), then down to the end. Title bars, bottom bars and mini players are removed automatically, and so are labels every row repeats (like a "0" counter), which the result lists. It only reads text, so use get_ui_tree afterwards if you need coordinates to tap a row. It scrolls the middle of the screen, so it reads the main vertical list; it does not work on carousels. Scrolling up to the top can trigger pull-to-refresh on feeds: pass fromTop:false there. Reads about 6 rows per step, so very long lists may need a higher maxScrolls.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      fromTop: z.boolean().optional().describe('Scroll to the top of the list first (default true). Pass false to collect from the current position down.'),
+      maxScrolls: z.coerce.number().int().min(1).max(150).optional().describe('Safety limit on scroll steps downward (default 60, about 380 rows). The result says whether the end of the list was reached.'),
+      amount: z.coerce.number().min(0.2).max(0.6).optional().describe('How far each step scrolls (default 0.35). Smaller steps overlap more and are safer but slower.'),
+      descriptions: z.boolean().optional().describe('Also include accessibility labels of items that have no visible text, such as icon-only rows (default false).'),
+      keepRepeated: z.boolean().optional().describe('Keep labels that repeat on nearly every row instead of dropping them (default false).'),
+    },
+    async ({ deviceId, fromTop, maxScrolls, amount, descriptions, keepRepeated }, { authInfo }) => {
+      const { userId } = authInfo;
+      if (!signaling.presence.isOnline(userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(userId, deviceId, 'ui_tree')) {
+        return textResult('This phone build cannot read the UI tree — update the app.', true);
+      }
+      const limit = maxScrolls || 60;
+      const step = amount || 0.35;
+      const read = async () => {
+        const t = await fetchUiTree(userId, deviceId, false, 8000);
+        if (t.error) throw new Error(CONTROL_ERRORS[t.error] || t.error);
+        return { pkg: t.package || null, labels: screenLabels(t.nodes || [], { descriptions: !!descriptions }) };
+      };
+      const scrollBy = async (direction, amt) => {
+        const g = scrollGesture(direction, amt);
+        const r = await runControl(userId, deviceId, { type: 'control', action: 'swipe', ...g, ms: 260 });
+        if (r.err) throw Object.assign(new Error('scroll failed'), { result: r.err });
+        await sleep(COLLECT_SETTLE_MS);
+      };
+      try {
+        let cur = await read();
+        if (!cur.labels.length) {
+          return textResult('The screen has no readable text. It is probably off or locked, or the list is drawn in a way that blocks accessibility. Try take_screenshot to look.', true);
+        }
+        const app = cur.pkg;
+        const notes = [];
+
+        let scrollsUp = 0;
+        if (fromTop !== false) {
+          while (scrollsUp < 60) {
+            await scrollBy('up', 0.9);
+            scrollsUp++;
+            const next = await read();
+            if (next.pkg !== app) { notes.push('The app changed while scrolling to the top, so the result may start mid-list.'); break; }
+            if (sameScreen(cur.labels, next.labels)) break;
+            cur = next;
+          }
+          if (scrollsUp >= 60) notes.push('Did not reach the top after 60 scrolls; the list starts at the position where scrolling stopped.');
+        }
+
+        const screens = [];
+        let scrolls = 0;
+        let reachedEnd = false;
+        for (;;) {
+          screens.push(cur.labels);
+          if (scrolls >= limit) break;
+          await scrollBy('down', step);
+          scrolls++;
+          const next = await read();
+          if (next.pkg !== app) { notes.push('The app changed while scrolling down, so the list may be cut short.'); break; }
+          if (sameScreen(cur.labels, next.labels)) { reachedEnd = true; break; }
+          cur = next;
+        }
+
+        const merged = mergeScreens(screens);
+        const cleaned = keepRepeated ? { labels: merged.labels, dropped: [] } : dropRepeated(merged.labels);
+        let rows = toRows(cleaned.labels);
+        if (rows.length > COLLECT_MAX_ROWS) {
+          notes.push(`Only the first ${COLLECT_MAX_ROWS} rows are shown.`);
+          rows = rows.slice(0, COLLECT_MAX_ROWS);
+        }
+
+        const head = [`Collected ${rows.length} rows from ${app || 'the foreground app'} (${screens.length} screens, ${scrolls} scrolls down${scrollsUp ? `, ${scrollsUp} up to reach the top` : ''}).`];
+        head.push(reachedEnd
+          ? 'Reached the end of the list.'
+          : `The end of the list was NOT reached (stopped at maxScrolls=${limit}). Call again with a higher maxScrolls, or fromTop:false to continue from here.`);
+        if (screens.length === 1) head.push('The whole list fit on one screen, so title and bottom bars could not be told apart from rows and may be included.');
+        if (merged.gaps) head.push(`WARNING: ${merged.gaps} step(s) had no overlap with the previous screen, so some rows may be missing. Call again with a smaller amount (for example 0.25).`);
+        if (merged.dropped.length) head.push(`Removed fixed bars: ${merged.dropped.map((t) => `"${t}"`).join(', ')}.`);
+        if (cleaned.dropped.length) head.push(`Removed labels repeated on every row: ${cleaned.dropped.map((d) => `"${d.text}" (x${d.count})`).join(', ')}. Pass keepRepeated:true to keep them.`);
+        head.push(...notes);
+        return textResult(`${head.join('\n')}\n\n${rows.map((r, i) => `${i + 1}. ${r}`).join('\n')}`);
+      } catch (e) {
+        if (e.result) return e.result;
+        return textResult(e.message, true);
+      }
     }
   );
 

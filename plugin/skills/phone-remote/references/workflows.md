@@ -151,7 +151,24 @@ Tap the search icon (`get_ui_tree(filter:"search")`), `type_text(query,
 submit:true)`, `wait_for(text=<expected result>)`. Many apps also accept a
 search deep link (YouTube, Play Store, Maps); see deep-links.md.
 
+## Read a whole list
+
+"List every song in my playlist", "all my contacts", "every result":
+1. Open the list (`open_app`, `open_url`, then `wait_for` something in it).
+2. `collect_list(deviceId)`. It scrolls to the top, goes to the end, and
+   returns one numbered row per item (a row's texts joined with ` | `).
+3. Read the header it prints: whether the end was reached, any gap warning,
+   and which labels it removed. If the end wasn't reached, call again with a
+   higher `maxScrolls`; if it warns about a gap, call again with
+   `amount:0.25`.
+4. Present or save the rows (a table, a CSV file). The count shown by the
+   app (e.g. "193 tracks") can be a little higher than the rows you get when
+   the app hides unavailable items.
+On a feed that refreshes when you pull down (YouTube Home), pass
+`fromTop:false` so it doesn't reload.
+
 ## Scroll to find something
 
 `get_ui_tree(filter=X)`; if empty, `scroll(direction:"down")` and repeat.
 Stop after ~8 scrolls or when two consecutive trees are identical (end of list).
+To find an item in a very long list, `collect_list` and search the rows.

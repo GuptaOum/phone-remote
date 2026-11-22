@@ -28,6 +28,7 @@ Every action performed on the phone MUST use one of these standard MCP tools. Ne
 | **`find_unused_apps`** | `deviceId`, `days=30`, `minSizeMB` | Unused apps, biggest first | Best candidates for freeing storage. Read-only. |
 | **`clear_app_storage`** | `deviceId`, `package`, `what` (`cache`/`data`/`both`) | Size before/after | Cache is harmless; data wipes the app. Only for the app the user named. |
 | **`uninstall_app`** | `deviceId`, `package`, `confirm=true` | Uninstall status | PERMANENT. Only when the user explicitly asked for that app. |
+| **`collect_list`** | `deviceId`, `fromTop=true`, `maxScrolls=60`, `amount=0.35`, `descriptions`, `keepRepeated` | Numbered rows, one per list item | Scrolls a list to the end, stitches the screens, removes bars and repeated labels. Replaces manual scroll + get_ui_tree loops. Text only. |
 | **`open_app_drawer`**| `deviceId` | Drawer status | Opens launcher app drawer (fallback only). |
 | **`open_url`** | `deviceId`, `url` | Intent dispatch status | **Fastest Navigation Method**. Bypasses multiple UI steps via Android Deep Links. |
 | **`wait`** | `deviceId`, `seconds=1.5` | Sleep status | Use sparingly for animations where `wait_for` cannot match a specific node. |

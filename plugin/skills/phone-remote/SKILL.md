@@ -1,6 +1,6 @@
 ---
 name: phone-remote
-description: How to drive a real Android phone through the Phone Remote MCP tools (list_devices, get_ui_tree, tap, type_text, open_url, open_settings, open_file, send_local_file, get_file, read_notifications, get_clipboard, set_clipboard, clear_app_storage...). Use whenever the user asks to do anything on their phone - open an app or folder, send a WhatsApp/SMS/email, read an OTP or what they copied, move files between PC and phone, change a setting, free up storage, find a lost phone - even if they don't say "MCP" or name a tool.
+description: How to drive a real Android phone through the Phone Remote MCP tools (list_devices, get_ui_tree, tap, type_text, open_url, open_settings, open_file, send_local_file, get_file, read_notifications, get_clipboard, set_clipboard, collect_list, clear_app_storage...). Use whenever the user asks to do anything on their phone - open an app or folder, send a WhatsApp/SMS/email, read an OTP or what they copied, list everything in a long playlist/contacts/chat/results list, move files between PC and phone, change a setting, free up storage, find a lost phone - even if they don't say "MCP" or name a tool.
 ---
 
 # Phone Remote
@@ -44,6 +44,12 @@ screen reader: look, act, confirm.
    In lists, an item's header (an email, a date) can sit just above its own
    row, so read the order before tapping, and scroll inside a list by
    swiping within its scrollable node (`f:"s"`), not elsewhere on screen.
+   **To read a whole long list (a playlist, contacts, a chat, results, app
+   or settings lists), call `collect_list` once.** The tree only shows the
+   ~8 rows on screen, and scrolling + reading by hand is slow and easy to
+   get wrong. `collect_list` scrolls, stitches the screens and returns one
+   numbered row per item. It reads text only; use `get_ui_tree` afterwards
+   when you need to tap a row.
 4. **Act.** `tap` / `long_press` / `scroll` / `type_text` / `press_key`.
    Coordinates are always 0.0-1.0 fractions of the screen, never pixels.
 5. **Wait for the result, don't sleep.** After anything that loads or

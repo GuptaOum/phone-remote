@@ -83,6 +83,7 @@ you copied last, never a history, and reads it only when you ask.
 - *"Turn on dark mode."* / *"Turn on my hotspot."*
 - *"Open YouTube and search for lo-fi music."*
 - *"Take a screenshot and tell me what's on screen."*
+- *"List every song in my 'mixed' playlist and save it as a spreadsheet."* (it scrolls the whole list for you)
 
 **Chained tasks**
 
@@ -135,7 +136,7 @@ Then just say *"run my good night routine"*, or schedule it.
 
 ## Features
 
-- **33 tools for AI agents.** Tap, swipe, type, read the screen, read or set what is copied, open apps and links, jump straight to 50 Android settings pages, read notifications and OTPs, find and clean up apps, ring and flashlight, location, and file transfer both ways.
+- **34 tools for AI agents.** Tap, swipe, type, read the screen, read a whole long list in one go, read or set what is copied, open apps and links, jump straight to 50 Android settings pages, read notifications and OTPs, find and clean up apps, ring and flashlight, location, and file transfer both ways.
 - **Live screen and camera** in the browser, with touch control. Fast and smooth, up to 60 fps.
 - **File manager** in the browser: browse the phone, drag and drop to upload, download.
 - **Works anywhere.** Phone and computer don't need to be on the same Wi-Fi, and the stream keeps going when the phone switches from Wi-Fi to mobile data.
