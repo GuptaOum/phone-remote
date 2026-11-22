@@ -331,6 +331,7 @@ const TOOL_TITLES = {
   get_file: 'Download file from phone', send_local_file: 'Send local file to phone', send_file: 'Send file to phone',
   send_url: 'Send URL download to phone', open_settings: 'Open a Settings page',
   open_file: 'Open a file or folder', get_clipboard: 'Read phone clipboard',
+  set_clipboard: 'Copy text to phone clipboard',
 };
 
 // Pages open_settings can reach; mirrors the phone's fixed list
@@ -1156,6 +1157,29 @@ function createPhoneRemoteServer() {
         if (r.label) out.label = r.label;
         if (r.truncated) out.note = 'Long clip: only the first 20000 characters are shown.';
         return textResult(out);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+  );
+
+  // 9c. set_clipboard
+  tool(
+    'set_clipboard',
+    'Put text on the phone\'s clipboard so the user can paste it anywhere on the phone (a message, an address, a link, a code from the PC). Works in the background: no text box, no change on screen; Android 13+ shows a small "copied" preview. It replaces whatever was on the clipboard. To type into a specific field instead, use type_text.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      text: z.string().min(1).max(20000).describe('The text to put on the clipboard (up to 20000 characters)'),
+    },
+    async ({ deviceId, text }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(authInfo.userId, deviceId, 'set_clipboard')) {
+        return textResult('This phone build cannot set the clipboard — update the Phone Remote app on the phone. Until then, tap a text box and use type_text with method "paste", which also puts the text on the clipboard.', true);
+      }
+      try {
+        const r = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({ type: 'set_clipboard', id, text }), 8000, 'set_clipboard');
+        if (!r.ok) return textResult(r.error || 'The phone could not set the clipboard.', true);
+        return textResult(`Copied to the phone's clipboard (${r.length ?? text.length} characters). The user can paste it anywhere.`);
       } catch (e) {
         return textResult(e.message, true);
       }

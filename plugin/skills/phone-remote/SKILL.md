@@ -1,6 +1,6 @@
 ---
 name: phone-remote
-description: How to drive a real Android phone through the Phone Remote MCP tools (list_devices, get_ui_tree, tap, type_text, open_url, open_settings, open_file, send_local_file, get_file, read_notifications, get_clipboard, clear_app_storage...). Use whenever the user asks to do anything on their phone - open an app or folder, send a WhatsApp/SMS/email, read an OTP or what they copied, move files between PC and phone, change a setting, free up storage, find a lost phone - even if they don't say "MCP" or name a tool.
+description: How to drive a real Android phone through the Phone Remote MCP tools (list_devices, get_ui_tree, tap, type_text, open_url, open_settings, open_file, send_local_file, get_file, read_notifications, get_clipboard, set_clipboard, clear_app_storage...). Use whenever the user asks to do anything on their phone - open an app or folder, send a WhatsApp/SMS/email, read an OTP or what they copied, move files between PC and phone, change a setting, free up storage, find a lost phone - even if they don't say "MCP" or name a tool.
 ---
 
 # Phone Remote

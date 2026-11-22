@@ -94,6 +94,15 @@ address":
 The clipboard can hold passwords or codes: read it only when asked and don't
 repeat secrets back unless the user wants them.
 
+## Make text ready to paste on the phone
+
+"Copy this to my phone", "put this address on my phone's clipboard":
+1. `set_clipboard(text)`. It works in the background, even with no text box
+   open, and leaves the screen as it is.
+2. Tell the user it's ready to paste (long-press any text box → Paste).
+It replaces what was on the clipboard. To fill one specific field instead,
+tap it and use `type_text`.
+
 ## Change a setting
 
 `open_settings(page=...)` with one of:

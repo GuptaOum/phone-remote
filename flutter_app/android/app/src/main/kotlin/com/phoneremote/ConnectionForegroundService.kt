@@ -277,7 +277,7 @@ class ConnectionForegroundService : Service() {
                                     // builds omit it and keep the fire-and-forget path.
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
-                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings", "open_file", "clipboard",
+                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings", "open_file", "clipboard", "set_clipboard",
                                         "frame_ack", "webrtc_screen", "webrtc_camera",
                                     )))
                                 }
@@ -386,6 +386,10 @@ class ConnectionForegroundService : Service() {
                             }
                             "clipboard" -> {
                                 handleClipboard(json)
+                                return@post
+                            }
+                            "set_clipboard" -> {
+                                handleSetClipboard(json)
                                 return@post
                             }
                             "notifications" -> {
@@ -1562,6 +1566,28 @@ class ConnectionForegroundService : Service() {
                 fail("The phone did not let Phone Remote read the clipboard. It is probably locked: ask the user to unlock it and try again.")
             }
         }, 4000)
+    }
+
+    /**
+     * set_clipboard: unlike reading, Android lets a background app write the
+     * clipboard, so this needs no screen and no text field. Android 13+ shows
+     * its own small "copied" preview.
+     */
+    private fun handleSetClipboard(json: JSONObject) {
+        val id = json.optString("id")
+        if (id.isEmpty()) return
+        val text = json.optString("text")
+        handler.post {
+            val result = JSONObject().apply { put("type", "set_clipboard_result"); put("id", id) }
+            try {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("phone-remote", text))
+                result.put("ok", true); result.put("length", text.length)
+            } catch (e: Exception) {
+                result.put("ok", false); result.put("error", e.message ?: "Could not set the clipboard")
+            }
+            send(result.toString())
+        }
     }
 
     private fun handleOpenUrl(json: JSONObject) {

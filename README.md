@@ -48,6 +48,7 @@ Talk to your agent in plain words. These all work today.
 - *"Read my notifications and tell me what's important."*
 - *"Did an OTP come in? Read it to me."*
 - *"I just copied a link on my phone, open it on my PC."* / *"Summarise what I copied."*
+- *"Copy this address to my phone so I can paste it."*
 
 **Files between phone and computer**
 
@@ -120,7 +121,7 @@ Then just say *"run my good night routine"*, or schedule it.
 
 ## Features
 
-- **32 tools for AI agents.** Tap, swipe, type, read the screen, read what you copied, open apps and links, jump straight to 50 Android settings pages, read notifications and OTPs, find and clean up apps, ring and flashlight, location, and file transfer both ways.
+- **33 tools for AI agents.** Tap, swipe, type, read the screen, read or set what is copied, open apps and links, jump straight to 50 Android settings pages, read notifications and OTPs, find and clean up apps, ring and flashlight, location, and file transfer both ways.
 - **Live screen and camera** in the browser, with touch control. Fast and smooth, up to 60 fps.
 - **File manager** in the browser: browse the phone, drag and drop to upload, download.
 - **Works anywhere.** Phone and computer don't need to be on the same Wi-Fi, and the stream keeps going when the phone switches from Wi-Fi to mobile data.

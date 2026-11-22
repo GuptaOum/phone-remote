@@ -1,6 +1,6 @@
 {
   "name": "phone-remote",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Control your Android phone from Claude: read the screen, tap and type, open apps, settings and files, send messages, move files between PC and phone, read OTPs, free up storage.",
   "author": {
     "name": "GuptaOum"
