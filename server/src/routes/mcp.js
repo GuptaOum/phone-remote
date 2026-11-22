@@ -84,6 +84,41 @@ ${JSON.stringify(v)}`).join(',')}
   return JSON.stringify(value);
 }
 
+// list_files used to repeat the full path and a meaningless folder size on
+// every row (~25 tokens/entry; ~9,500 for a 245-entry Download folder).
+function humanSize(b) {
+  if (b == null) return '';
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${Math.round(b / 1024)} KB`;
+  if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
+  return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function formatFileList(dir, entries, { filter, sort, limit, offset } = {}) {
+  let list = entries;
+  if (filter) {
+    const f = String(filter).toLowerCase();
+    list = list.filter((e) => String(e.name).toLowerCase().includes(f));
+  }
+  const dirs = list.filter((e) => e.type === 'dir').length;
+  if (sort === 'newest') list = [...list].sort((a, b) => (b.modified || 0) - (a.modified || 0));
+  else if (sort === 'largest') list = [...list].sort((a, b) => (b.type === 'file' ? b.size : -1) - (a.type === 'file' ? a.size : -1));
+  const from = offset || 0;
+  const n = limit || 60;
+  const page = list.slice(from, from + n);
+  const day = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : '');
+  const rows = page.map((e) => (e.type === 'dir'
+    ? `${e.name}/ | | ${day(e.modified)}`
+    : `${e.name} | ${humanSize(e.size)} | ${day(e.modified)}`));
+  let head = `${dir}: ${list.length} entries (${dirs} folders, ${list.length - dirs} files)`;
+  if (filter) head += ` matching "${filter}"`;
+  if (list.length) head += `, showing ${from + 1}-${from + page.length}` + (sort && sort !== 'name' ? `, ${sort} first` : '');
+  head += rows.length ? '. Rows: name | size | modified.' : '.';
+  const left = list.length - from - page.length;
+  const more = left > 0 ? `\n(${left} more: call again with offset:${from + page.length})` : '';
+  return [head, ...rows].join('\n') + more;
+}
+
 function textResult(text, isError = false) {
   return { content: [{ type: 'text', text: typeof text === 'string' ? text : compactJson(text) }], isError };
 }
@@ -618,8 +653,9 @@ function createPhoneRemoteServer() {
       minSizeMB: z.coerce.number().optional().describe('With sizes: only apps using at least this many MB in total (1 GB = 1024 MB)'),
       system: z.preprocess((v) => (v === 'true' ? true : v === 'false' ? false : v), z.boolean().optional())
         .describe('true = only preinstalled system apps; false = only apps the user installed; omit for all'),
+      limit: z.coerce.number().int().min(1).optional().describe('With sizes: how many of the largest apps to show (default 30)'),
     },
-    async ({ deviceId, filter, sizes, minSizeMB, system }, { authInfo }) => {
+    async ({ deviceId, filter, sizes, minSizeMB, system, limit }, { authInfo }) => {
       if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
       if (!signaling.deviceSupports(authInfo.userId, deviceId, 'list_apps')) {
         return textResult('This phone build cannot list apps — update the app.', true);
@@ -648,24 +684,29 @@ function createPhoneRemoteServer() {
           }
           apps = apps.filter((a) => a.system === system);
           if (!apps.length) return textResult(`No ${system ? 'system' : 'user-installed'} app found${filter ? ` matching "${filter}"` : ''}.`);
-          // Every row would repeat the filter value: drop it.
-          apps = apps.map(({ system: _s, ...rest }) => rest);
         }
-        if (wantSizes) {
-          const MB = 1024 * 1024;
-          const mb = (b) => Math.round(((b || 0) / MB) * 10) / 10;
-          apps = apps
-            .map((a) => {
-              const total = (a.appBytes || 0) + (a.dataBytes || 0);
-              return { name: a.name, package: a.package, ...(typeof a.system === 'boolean' ? { system: a.system } : {}), totalMB: mb(total), appMB: mb(a.appBytes), dataMB: mb(a.dataBytes), cacheMB: mb(a.cacheBytes) };
-            })
-            .sort((x, y) => y.totalMB - x.totalMB);
-          if (minSizeMB != null) {
-            apps = apps.filter((a) => a.totalMB >= minSizeMB);
-            if (!apps.length) return textResult(`No app uses ${minSizeMB} MB or more.`);
-          }
+        // Compact rows instead of one JSON object per app (sizes:true repeated
+        // 7 keys on every app, ~3,100 tokens for 75 apps).
+        const sysTag = (a) => (system == null && a.system === true ? ' | sys' : '');
+        if (!wantSizes) {
+          const head = `${apps.length} apps. Rows: name | package` + (system == null ? ' (| sys = preinstalled)' : '');
+          return textResult([head, ...apps.map((a) => `${a.name} | ${a.package}${sysTag(a)}`)].join('\n'));
         }
-        return textResult(apps);
+        const MB = 1024 * 1024;
+        const mb = (b) => Math.round((b || 0) / MB);
+        let rows = apps
+          .map((a) => ({ a, total: mb((a.appBytes || 0) + (a.dataBytes || 0)) }))
+          .sort((x, y) => y.total - x.total);
+        if (minSizeMB != null) {
+          rows = rows.filter((r) => r.total >= minSizeMB);
+          if (!rows.length) return textResult(`No app uses ${minSizeMB} MB or more.`);
+        }
+        const cap = limit || (minSizeMB != null ? rows.length : 30);
+        const shown = rows.slice(0, cap);
+        let head = `${rows.length} apps, largest first`;
+        if (shown.length < rows.length) head += `, top ${shown.length} shown (pass limit for more)`;
+        head += '. Rows: name | package | total | app | data | cache (MB)' + (system == null ? ' (| sys = preinstalled)' : '');
+        return textResult([head, ...shown.map(({ a, total }) => `${a.name} | ${a.package} | ${total} | ${mb(a.appBytes)} | ${mb(a.dataBytes)} | ${mb(a.cacheBytes)}${sysTag(a)}`)].join('\n'));
       } catch (e) {
         return textResult(e.message, true);
       }
@@ -675,11 +716,11 @@ function createPhoneRemoteServer() {
   // 7b. open_settings
   tool(
     'open_settings',
-    `Jump straight to an Android Settings page instead of tapping through Settings. Uses standard Android settings pages, so it works on any vendor (realme, Samsung, Xiaomi…); a page the phone lacks opens the main Settings screen instead. Pages: ${Object.entries(SETTINGS_PAGES).map(([k, v]) => `${k} (${v})`).join(', ')}. Pages marked (app) need package (exact package name from list_apps). It only opens the page; read it with get_ui_tree and tap from there.`,
+    `Jump straight to an Android Settings page instead of tapping through Settings. Uses standard Android settings pages, so it works on any vendor (realme, Samsung, Xiaomi…); a page the phone lacks opens the main Settings screen instead. The page names say what they open. These need package (exact package name from list_apps): ${[...SETTINGS_APP_PAGES].join(', ')}. It only opens the page; read it with get_ui_tree and tap from there.`,
     {
       deviceId: z.string().describe('Device id from list_devices'),
       page: z.enum(Object.keys(SETTINGS_PAGES)).describe('Which Settings page to open'),
-      package: z.string().optional().describe('Exact package name; required for the pages marked (app)'),
+      package: z.string().optional().describe('Exact package name; required for the per-app pages'),
     },
     async ({ deviceId, page, package: pkg }, { authInfo }) => {
       const userId = authInfo.userId;
@@ -1181,7 +1222,7 @@ function createPhoneRemoteServer() {
         if (!r.ok) return textResult(r.error || 'The phone could not read the clipboard.', true);
         if (r.kind === 'empty' || !r.text) return textResult('The clipboard is empty.');
         const out = { kind: r.kind, text: r.text };
-        if (r.label) out.label = r.label;
+        if (r.label && r.label !== 'text/plain') out.label = r.label;
         if (r.truncated) out.note = 'Long clip: only the first 20000 characters are shown.';
         return textResult(out);
       } catch (e) {
@@ -1566,18 +1607,22 @@ function createPhoneRemoteServer() {
   // 22. list_files
   tool(
     'list_files',
-    'List files and folders in a directory of the device\'s shared storage. Browsing is confined to /storage/emulated/0 (the Android storage root) and its subfolders; paths outside it are clamped to the root.',
+    'List a folder on the phone (under /storage/emulated/0; outside paths are clamped to it). Compact: one header with the folder path, then one row per entry: name (folders end with /) | size | modified date. A file\'s full path is the folder path + "/" + name. Shows 60 entries by default; use filter, sort and offset for big folders.',
     {
       deviceId: z.string(),
-      path: z.string().optional().describe('Absolute path under /storage/emulated/0 (defaults to the root)'),
+      path: z.string().optional().describe('Folder path under /storage/emulated/0 (default: the root)'),
+      filter: z.string().optional().describe('Only names containing this (case-insensitive)'),
+      sort: z.enum(['name', 'newest', 'largest']).optional().describe('name (default; folders first), newest, or largest'),
+      limit: z.coerce.number().int().min(1).max(500).optional().describe('Max entries to show (default 60)'),
+      offset: z.coerce.number().int().min(0).optional().describe('Skip this many entries, to page through a big folder'),
     },
-    async ({ deviceId, path }, { authInfo }) => {
+    async ({ deviceId, path, filter, sort, limit, offset }, { authInfo }) => {
       try {
         const safePath = confineToBase(path);
         const reply = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({
           type: 'pf_list', id, path: safePath,
         }));
-        return textResult(reply.entries.map((e) => ({ name: e.name, type: e.type, size: e.size, path: e.path })));
+        return textResult(formatFileList(reply.path || safePath, reply.entries || [], { filter, sort, limit, offset }));
       } catch (e) {
         return textResult(e.message, true);
       }
