@@ -181,6 +181,9 @@ const WAIT_POLL_MS = 600;
 // most rows it will return.
 const COLLECT_SETTLE_MS = 400;
 const COLLECT_MAX_ROWS = 1500;
+// MCP clients give up on a tool call after about 60 s (the server keeps going,
+// but the agent never sees the result), so stop and return what we have first.
+const COLLECT_BUDGET_MS = 45000;
 
 function fetchUiTree(userId, deviceId, all = false, timeoutMs = 10000, filter = null) {
   return signaling.requestFromPhone(
@@ -1296,7 +1299,7 @@ function createPhoneRemoteServer() {
   // 14b. collect_list
   tool(
     'collect_list',
-    'Read an ENTIRE scrolling list in one call: playlists, contacts, chats, search results, settings, app lists. The server scrolls the list, reads the screen after every step, stitches the overlaps together and returns one numbered row per list item (the texts of a row joined with " | "), without repeats. Use this instead of calling scroll + get_ui_tree over and over. It first scrolls to the top (fromTop, default true), then down to the end. Title bars, bottom bars and mini players are removed automatically, and so are labels every row repeats (like a "0" counter), which the result lists. It only reads text, so use get_ui_tree afterwards if you need coordinates to tap a row. It scrolls the middle of the screen, so it reads the main vertical list; it does not work on carousels. Scrolling up to the top can trigger pull-to-refresh on feeds: pass fromTop:false there. Reads about 6 rows per step, so very long lists may need a higher maxScrolls.',
+    'Read an ENTIRE scrolling list in one call: playlists, contacts, chats, search results, settings, app lists. The server scrolls the list, reads the screen after every step, stitches the overlaps together and returns one numbered row per list item (the texts of a row joined with " | "), without repeats. Use this instead of calling scroll + get_ui_tree over and over. It first scrolls to the top (fromTop, default true), then down to the end. Title bars, bottom bars and mini players are removed automatically, and so are labels every row repeats (like a "0" counter), which the result lists. It only reads text, so use get_ui_tree afterwards if you need coordinates to tap a row. It scrolls the middle of the screen, so it reads the main vertical list; it does not work on carousels. Scrolling up to the top can trigger pull-to-refresh on feeds: pass fromTop:false there. Reads about 6 rows per step, so very long lists may need a higher maxScrolls. One call runs for at most about 45 seconds (roughly 30 scroll steps); if the list is longer, it returns what it read and says to call again with fromTop:false to continue.',
     {
       deviceId: z.string().describe('Device id from list_devices'),
       fromTop: z.boolean().optional().describe('Scroll to the top of the list first (default true). Pass false to collect from the current position down.'),
@@ -1305,8 +1308,20 @@ function createPhoneRemoteServer() {
       descriptions: z.boolean().optional().describe('Also include accessibility labels of items that have no visible text, such as icon-only rows (default false).'),
       keepRepeated: z.boolean().optional().describe('Keep labels that repeat on nearly every row instead of dropping them (default false).'),
     },
-    async ({ deviceId, fromTop, maxScrolls, amount, descriptions, keepRepeated }, { authInfo }) => {
-      const { userId } = authInfo;
+    async ({ deviceId, fromTop, maxScrolls, amount, descriptions, keepRepeated }, extra) => {
+      const { userId } = extra.authInfo;
+      const deadline = Date.now() + COLLECT_BUDGET_MS;
+      const outOfTime = () => Date.now() >= deadline;
+      // Progress notifications let clients that support it keep waiting.
+      const progressToken = extra._meta && extra._meta.progressToken;
+      let progress = 0;
+      const tick = async (message) => {
+        progress++;
+        if (progressToken === undefined || !extra.sendNotification) return;
+        try {
+          await extra.sendNotification({ method: 'notifications/progress', params: { progressToken, progress, message } });
+        } catch { /* progress is best effort */ }
+      };
       if (!signaling.presence.isOnline(userId, deviceId)) return offline();
       if (!signaling.deviceSupports(userId, deviceId, 'ui_tree')) {
         return textResult('This phone build cannot read the UI tree — update the app.', true);
@@ -1335,8 +1350,12 @@ function createPhoneRemoteServer() {
         let scrollsUp = 0;
         if (fromTop !== false) {
           while (scrollsUp < 60) {
+            if (outOfTime()) {
+              return textResult(`Still scrolling up to the top of the list after ${scrollsUp} scrolls when the ${COLLECT_BUDGET_MS / 1000} s time limit ran out, so nothing was collected yet. Call collect_list again: it carries on from here, closer to the top.`, true);
+            }
             await scrollBy('up', 0.9);
             scrollsUp++;
+            await tick(`Scrolling to the top (${scrollsUp})`);
             const next = await read();
             if (next.pkg !== app) { notes.push('The app changed while scrolling to the top, so the result may start mid-list.'); break; }
             if (sameScreen(cur.labels, next.labels)) break;
@@ -1348,11 +1367,14 @@ function createPhoneRemoteServer() {
         const screens = [];
         let scrolls = 0;
         let reachedEnd = false;
+        let timedOut = false;
         for (;;) {
           screens.push(cur.labels);
           if (scrolls >= limit) break;
+          if (outOfTime()) { timedOut = true; break; }
           await scrollBy('down', step);
           scrolls++;
+          await tick(`Reading the list (${screens.length} screens)`);
           const next = await read();
           if (next.pkg !== app) { notes.push('The app changed while scrolling down, so the list may be cut short.'); break; }
           if (sameScreen(cur.labels, next.labels)) { reachedEnd = true; break; }
@@ -1368,9 +1390,9 @@ function createPhoneRemoteServer() {
         }
 
         const head = [`Collected ${rows.length} rows from ${app || 'the foreground app'} (${screens.length} screens, ${scrolls} scrolls down${scrollsUp ? `, ${scrollsUp} up to reach the top` : ''}).`];
-        head.push(reachedEnd
-          ? 'Reached the end of the list.'
-          : `The end of the list was NOT reached (stopped at maxScrolls=${limit}). Call again with a higher maxScrolls, or fromTop:false to continue from here.`);
+        if (reachedEnd) head.push('Reached the end of the list.');
+        else if (timedOut) head.push(`The end of the list was NOT reached: stopped at the ${COLLECT_BUDGET_MS / 1000} s time limit. Call again with fromTop:false to read the rest; its first few rows repeat the last few here.`);
+        else head.push(`The end of the list was NOT reached (stopped at maxScrolls=${limit}). Call again with a higher maxScrolls, or fromTop:false to continue from here.`);
         if (screens.length === 1) head.push('The whole list fit on one screen, so title and bottom bars could not be told apart from rows and may be included.');
         if (merged.gaps) head.push(`WARNING: ${merged.gaps} step(s) had no overlap with the previous screen, so some rows may be missing. Call again with a smaller amount (for example 0.25).`);
         if (merged.dropped.length) head.push(`Removed fixed bars: ${merged.dropped.map((t) => `"${t}"`).join(', ')}.`);
