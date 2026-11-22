@@ -370,7 +370,14 @@ class WebRtcStreamer(
         if (peers[from] !== peer) return
         when (s) {
             PeerConnection.PeerConnectionState.CONNECTED ->
-                if (!peer.connected) { peer.connected = true; recount(); logStats(from, peer) }
+                if (!peer.connected) {
+                    peer.connected = true
+                    // Again now that the call is negotiated: applied right after
+                    // addTrack (before the answer) the caps were silently ignored,
+                    // and the encoder ran at WebRTC's default 2.5 Mbps.
+                    peer.pc.senders.forEach(::tuneSender)
+                    recount(); logStats(from, peer)
+                }
             PeerConnection.PeerConnectionState.DISCONNECTED ->
                 if (peer.connected) { peer.connected = false; recount() }
             PeerConnection.PeerConnectionState.FAILED,
