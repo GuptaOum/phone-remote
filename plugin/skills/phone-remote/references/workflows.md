@@ -62,12 +62,27 @@ For photos use Attach → Gallery instead of Document.
 
 ## Get a file from the phone to the PC
 
-1. `list_files(path="Download")` (or `DCIM/Camera`, `Pictures/Screenshots`,
-   `Documents`, `WhatsApp/Media/...` under `Android/media/com.whatsapp/`).
+1. Find the file: `list_files(path="Download", filter:"<part of the name>")`,
+   or `sort:"newest"` for something just downloaded (also `DCIM/Camera`,
+   `Pictures/Screenshots`, `Documents`, `WhatsApp/Media/...` under
+   `Android/media/com.whatsapp/`). Its full path is the folder + `/` + name.
 2. `get_file(path="/storage/emulated/0/...")` → one-time `download_url`.
 3. Save the `download_url` response to the local path with any HTTP client
    (it is a plain file download, nothing to run). Without one,
    give the user the link. Max 100 MB.
+
+## List or find files
+
+"What's in my Download folder", "find the PDF I downloaded yesterday":
+1. Searching for one file: `list_files(path, filter:"<word>")`, or
+   `sort:"newest"` / `sort:"largest"` with a small `limit`. Cheaper and
+   faster than listing the whole folder.
+2. Listing a folder: `list_files(path)` shows the first 60 entries. If it
+   says "(N more ...)", tell the user how many there are in total and offer
+   the rest; fetch more with `offset:60`, `offset:120`... only if they want
+   everything.
+3. For a big folder, summarise (counts by type, newest few, largest few)
+   rather than pasting every row.
 
 ## Download something from the web onto the phone
 

@@ -16,8 +16,11 @@ when it is lost.
 - **Skill** (`skills/phone-remote`): teaches Claude how to use those tools
   well: jump straight to a screen with deep links, `open_settings` or
   `open_file` instead of tapping through menus, read the screen as structured
-  data instead of screenshots, wait for results instead of sleeping, and follow
-  safety rules. It includes step-by-step recipes and a troubleshooting table.
+  data instead of screenshots, read a whole long list in one call, replace
+  text in a box in one call, find files without listing whole folders, wait
+  for results instead of sleeping, and follow safety rules. It includes
+  step-by-step recipes and a troubleshooting table, and keeps token use low
+  (compact replies, screenshots only when needed).
 
 The plugin runs nothing on your computer. It has no hooks, scripts or local
 servers; it only points Claude at the remote MCP server and adds the skill.

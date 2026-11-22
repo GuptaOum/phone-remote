@@ -1,6 +1,6 @@
 ---
 name: phone-remote
-description: How to drive a real Android phone through the Phone Remote MCP tools (list_devices, get_ui_tree, tap, type_text, open_url, open_settings, open_file, send_local_file, get_file, read_notifications, get_clipboard, set_clipboard, collect_list, clear_app_storage...). Use whenever the user asks to do anything on their phone - open an app or folder, send a WhatsApp/SMS/email, read an OTP or what they copied, list everything in a long playlist/contacts/chat/results list, move files between PC and phone, change a setting, free up storage, find a lost phone - even if they don't say "MCP" or name a tool.
+description: How to drive a real Android phone through the Phone Remote MCP tools (list_devices, get_ui_tree, tap, type_text, open_url, open_settings, open_file, list_files, send_local_file, get_file, read_notifications, get_clipboard, set_clipboard, collect_list, clear_app_storage...). Use whenever the user asks to do anything on their phone - open an app or folder, send a WhatsApp/SMS/email, read an OTP or what they copied, list everything in a long playlist/contacts/chat/results list, find or list files, move files between PC and phone, change a setting, free up storage, find a lost phone - even if they don't say "MCP" or name a tool.
 ---
 
 # Phone Remote
@@ -34,7 +34,9 @@ screen reader: look, act, confirm.
    pages often draw tips and popups the tree doesn't show), the page is a
    game/video/canvas, or you need to see something genuinely visual. Take
    one screenshot to understand what's wrong, then go straight back to
-   `get_ui_tree` for the next steps.
+   `get_ui_tree` for the next steps. The default screenshot is enough to read
+   a screen; pass `hd:true` only for small print (it costs about twice as
+   many tokens).
    Reading the compact tree: one node per line; a node without `cls` is a
    plain TextView; `desc` is left out when it repeats `text`; a label flagged
    `c` can stand for its whole list row, so tap the label to open the row.
@@ -80,6 +82,23 @@ one at the end if the user would benefit from seeing the result.
   Always read the box back with `get_ui_tree(filter:"EditText")`. Older
   phone app builds without `replace`: see references/workflows.md "Replace
   the text in a box".
+
+## Files
+
+- `list_files(path)` returns one header line, then one row per entry:
+  `name | size | modified` (folders end with `/`). A file's full path is the
+  folder path + `/` + name.
+- It shows the first 60 entries. If the reply ends with
+  "(N more: call again with offset:60)", the folder is bigger:
+  - **Looking for a file?** Don't page through everything. Use
+    `filter:"resume"` (part of the name), `sort:"newest"` (latest downloads)
+    or `sort:"largest"`.
+  - **User asked to list the folder?** Show what you have and say how many
+    more there are ("Showing 60 of 247; want the rest?"). Page with `offset`
+    only if they want everything, and summarise long lists instead of
+    pasting hundreds of rows.
+- Never claim a folder holds only what you were shown when the reply says
+  there are more.
 
 ## Safety rules (non-negotiable)
 

@@ -15,7 +15,7 @@ Every action performed on the phone MUST use one of these standard MCP tools. Ne
 | **`get_ui_tree`** | `deviceId`, `filter` (optional), `all` (bool) | Normalized tree nodes with center `(x, y)` | **Primary Perception Tool**. Always prefer over screenshot. Use `filter` to find target buttons instantly in ~50ms. |
 | **`wait_for`** | `deviceId`, `text`, `id`, `app`, `gone`, `timeout` | Matched node or timeout error | **Primary Sync Tool**. Wait reactively for a screen/button to appear without static sleep loops. |
 | **`list_apps`** | `deviceId`, `filter` (optional) | Array of installed apps + packages | Find installed apps and package identifiers. |
-| **`take_screenshot`** | `deviceId` | JPEG image | Use ONLY when visual verification (photo/media rendering) is strictly required. |
+| **`take_screenshot`** | `deviceId`, `hd` (bool) | JPEG image (~700 tokens; `hd` ~1,500) | Use ONLY when visual verification (photo/media rendering) is strictly required. `hd:true` only for small print. |
 | **`tap`** | `deviceId`, `x`, `y` | Tap confirmation | Normalized coordinates `(0.0 – 1.0)`. Always obtain coordinates from `get_ui_tree`. |
 | **`long_press`** | `deviceId`, `x`, `y`, `ms=700` | Gesture confirmation | For context menus, multi-select, or message actions. |
 | **`swipe`** | `deviceId`, `x1`, `y1`, `x2`, `y2`, `ms=300` | Gesture confirmation | For swiping carousels, notification shade, or custom drag gestures. |
@@ -37,7 +37,7 @@ Every action performed on the phone MUST use one of these standard MCP tools. Ne
 | **`read_notifications`**| `deviceId`, `filter`, `limit=20` | Notification items | Instant retrieval of incoming OTPs, 2FA codes, and status bar alerts. |
 | **`get_clipboard`** | `deviceId` | `{kind, text}` | What the user last copied. Needs the phone unlocked; briefly brings an invisible Phone Remote screen forward. Only when the user refers to something they copied. |
 | **`set_clipboard`** | `deviceId`, `text` | Copy status | Puts text on the phone's clipboard, ready to paste. Works in the background, no text box needed. Replaces the current clip. |
-| **`list_files`** | `deviceId`, `path` | File listing with size/date | Explore storage `/storage/emulated/0`. Default to single folder shallow scans. |
+| **`list_files`** | `deviceId`, `path`, `filter`, `sort` (`name`/`newest`/`largest`), `limit` (60), `offset` | Header + `name \| size \| modified` rows | Explore `/storage/emulated/0`. To find a file, use `filter` or `sort` instead of listing everything. If the reply says "N more", tell the user, and page with `offset` only when they want the whole folder. |
 | **`get_file`** | `deviceId`, `path` | Download URL & metadata | Retrieve a file from phone shared storage to PC. |
 | **`send_file`** | `deviceId`, `name`, `data_base64`, `folder` | Save confirmation | Send file (<= 18 MB) directly to phone Download directory. |
 | **`send_local_file`**| `deviceId`, `name`, `folder` | Upload URL | Upload larger files (> 18 MB up to 100 MB) via streaming HTTP PUT. |
