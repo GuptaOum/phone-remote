@@ -35,12 +35,21 @@ class WebRtcStreamer(
         val screencast: Boolean,
         val maxBitrateBps: Int,
         val degradation: RtpParameters.DegradationPreference,
+        val maxFramerate: Int = 30,
+        // Send at most 1/n of the capture size (WebRTC can still go lower).
+        val scaleDownBy: Double = 1.0,
     ) {
         // Remote control needs low latency more than sharp text: real-time mode
         // (not "screencast", which lets fps collapse to keep detail) and, when
         // bandwidth is tight (cellular start), lower the resolution — never the
         // frame rate.
-        SCREEN("screen", false, 2_500_000, RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE),
+        //
+        // Tuned for navigating the phone, not watching video (2026-11-23): on a
+        // Jio mobile uplink, bursts above ~600 kbps queued up and lost packets,
+        // which is what made taps feel late. 600 kbps max, 15 fps and half the
+        // screen size keep each frame small, so nothing builds up a delay.
+        SCREEN("screen", false, 600_000, RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE,
+            maxFramerate = 15, scaleDownBy = 2.0),
         // Camera is motion: keep it fluid, let resolution adapt on weak links.
         CAMERA("camera", false, 1_500_000, RtpParameters.DegradationPreference.BALANCED),
     }
@@ -331,7 +340,11 @@ class WebRtcStreamer(
         try {
             val p = sender.parameters
             p.degradationPreference = kind.degradation
-            p.encodings.forEach { it.maxBitrateBps = kind.maxBitrateBps; it.maxFramerate = 30 }
+            p.encodings.forEach {
+                it.maxBitrateBps = kind.maxBitrateBps
+                it.maxFramerate = kind.maxFramerate
+                if (kind.scaleDownBy > 1.0) it.scaleResolutionDownBy = kind.scaleDownBy
+            }
             sender.parameters = p
         } catch (_: Exception) {}
     }
