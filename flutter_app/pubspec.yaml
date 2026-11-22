@@ -1,7 +1,7 @@
 name: plus_u
 description: plusU — remote access to your phone via browser
 publish_to: 'none'
-version: 1.6.1+9
+version: 1.6.2+10
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
