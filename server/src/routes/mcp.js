@@ -315,6 +315,7 @@ const SERVER_INSTRUCTIONS = [
 const READ_ONLY_TOOLS = new Set([
   'list_devices', 'get_location', 'get_device_status', 'get_foreground_app', 'get_ui_tree', 'wait_for',
   'list_apps', 'find_unused_apps', 'read_notifications', 'take_screenshot', 'wait', 'list_files', 'get_file',
+  'get_clipboard',
 ]);
 const DESTRUCTIVE_TOOLS = new Set(['uninstall_app', 'clear_app_storage']);
 // Reach outside this server and the phone (arbitrary URLs).
@@ -329,7 +330,7 @@ const TOOL_TITLES = {
   wait: 'Wait', ring: 'Ring phone', flash_light: 'Flash light', list_files: 'List phone files',
   get_file: 'Download file from phone', send_local_file: 'Send local file to phone', send_file: 'Send file to phone',
   send_url: 'Send URL download to phone', open_settings: 'Open a Settings page',
-  open_file: 'Open a file or folder',
+  open_file: 'Open a file or folder', get_clipboard: 'Read phone clipboard',
 };
 
 // Pages open_settings can reach; mirrors the phone's fixed list
@@ -1129,6 +1130,32 @@ function createPhoneRemoteServer() {
           at: n.postedAt ? new Date(n.postedAt).toISOString() : undefined,
           showing: !!n.active,
         })));
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+  );
+
+  // 9b. get_clipboard
+  tool(
+    'get_clipboard',
+    'Read what the user last copied on the phone (a link, an address, a message). Use it when the user says they copied something ("I copied a link, open it", "read what I copied"). Android only lets the app in front read the clipboard, so the phone briefly brings an invisible Phone Remote screen forward and Android may show a "Phone Remote pasted from your clipboard" note; the user\'s current app is not changed. The phone must be unlocked. The clipboard can hold passwords or codes: read it only when the user asks, and don\'t repeat a secret back unless they want it.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+    },
+    async ({ deviceId }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(authInfo.userId, deviceId, 'clipboard')) {
+        return textResult('This phone build cannot read the clipboard — update the Phone Remote app on the phone.', true);
+      }
+      try {
+        const r = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({ type: 'clipboard', id }), 8000, 'clipboard');
+        if (!r.ok) return textResult(r.error || 'The phone could not read the clipboard.', true);
+        if (r.kind === 'empty' || !r.text) return textResult('The clipboard is empty.');
+        const out = { kind: r.kind, text: r.text };
+        if (r.label) out.label = r.label;
+        if (r.truncated) out.note = 'Long clip: only the first 20000 characters are shown.';
+        return textResult(out);
       } catch (e) {
         return textResult(e.message, true);
       }

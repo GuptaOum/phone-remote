@@ -75,6 +75,19 @@
             </intent-filter>
         </activity>
 
+        <!-- get_clipboard: invisible, comes to the front for a moment because
+             Android 10+ only lets the app in front read the clipboard. Its own
+             task, so it never brings the main app screen along. -->
+        <activity
+            android:name=".ClipboardReadActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:taskAffinity=""
+            android:launchMode="singleInstance"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|uiMode" />
+
         <!-- Screen capture foreground service -->
         <service
             android:name=".ScreenCaptureService"

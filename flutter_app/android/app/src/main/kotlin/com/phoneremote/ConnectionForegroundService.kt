@@ -277,7 +277,7 @@ class ConnectionForegroundService : Service() {
                                     // builds omit it and keep the fire-and-forget path.
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
-                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings", "open_file",
+                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings", "open_file", "clipboard",
                                         "frame_ack", "webrtc_screen", "webrtc_camera",
                                     )))
                                 }
@@ -382,6 +382,10 @@ class ConnectionForegroundService : Service() {
                             }
                             "open_url" -> {
                                 handleOpenUrl(json)
+                                return@post
+                            }
+                            "clipboard" -> {
+                                handleClipboard(json)
                                 return@post
                             }
                             "notifications" -> {
@@ -1506,6 +1510,60 @@ class ConnectionForegroundService : Service() {
      * jumping straight to a chat or a settings page beats tapping through
      * several screens and can't mis-tap.
      */
+    /**
+     * get_clipboard: a background service may not read the clipboard on
+     * Android 10+, so flash the invisible ClipboardReadActivity, which reads it
+     * once it is in front and closes. Replies exactly once: with the text, or
+     * an error if it never got to the front (phone locked, Accessibility off).
+     */
+    private fun handleClipboard(json: JSONObject) {
+        val id = json.optString("id")
+        if (id.isEmpty()) return
+        val replied = java.util.concurrent.atomic.AtomicBoolean(false)
+        val reply = { r: ClipboardReadActivity.ClipResult ->
+            if (replied.compareAndSet(false, true)) {
+                send(JSONObject().apply {
+                    put("type", "clipboard_result"); put("id", id)
+                    if (r.error != null) {
+                        put("ok", false); put("error", r.error)
+                    } else {
+                        put("ok", true)
+                        put("kind", r.kind)
+                        put("text", r.text ?: "")
+                        if (r.label != null) put("label", r.label)
+                        if (r.truncated) put("truncated", true)
+                    }
+                }.toString())
+            }
+        }
+        val fail = { msg: String -> reply(ClipboardReadActivity.ClipResult(null, "empty", null, false, msg)) }
+        ClipboardReadActivity.pending = reply
+        val intent = Intent(this, ClipboardReadActivity::class.java).addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION or
+                Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+        )
+        // The accessibility service context may start activities from the
+        // background; without it Android blocks the launch.
+        val a11y = RemoteAccessibilityService.instance
+        if (a11y == null) {
+            ClipboardReadActivity.pending = null
+            fail("Accessibility is off for Phone Remote, so it cannot read the clipboard. Ask the user to turn it back on.")
+            return
+        }
+        handler.post {
+            try { a11y.startActivity(intent) } catch (e: Exception) {
+                ClipboardReadActivity.pending = null
+                fail("Could not open the clipboard reader: ${e.message}")
+            }
+        }
+        handler.postDelayed({
+            if (!replied.get()) {
+                ClipboardReadActivity.pending = null
+                fail("The phone did not let Phone Remote read the clipboard. It is probably locked: ask the user to unlock it and try again.")
+            }
+        }, 4000)
+    }
+
     private fun handleOpenUrl(json: JSONObject) {
         val id = json.optString("id")
         val url = json.optString("url").trim()
