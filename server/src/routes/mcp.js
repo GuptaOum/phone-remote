@@ -1409,21 +1409,25 @@ function createPhoneRemoteServer() {
   // 15. type_text
   tool(
     'type_text',
-    'Type text into the currently focused input field (tap the field first). Set submit:true to press Enter after typing — use this to run a search once the query is typed. IF TYPING REPORTS SUCCESS BUT THE TEXT DOES NOT APPEAR (WhatsApp and some other apps ignore the standard method), retry with method:"paste". Paste inserts at the cursor and keeps any text already in the box; TO REPLACE EXISTING TEXT, long_press it first to select it (for a sentence, then tap "Select all" in the menu that appears; that menu is not in get_ui_tree, so find it with take_screenshot), then paste, and check the box with get_ui_tree.',
+    'Type text into the currently focused input field (tap the field first). Set submit:true to press Enter after typing — use this to run a search once the query is typed. IF TYPING REPORTS SUCCESS BUT THE TEXT DOES NOT APPEAR (WhatsApp and some other apps ignore the standard method), retry with method:"paste". By default the text is inserted at the cursor and any text already in the box stays; TO REPLACE WHAT IS IN THE BOX (a number, a word or a whole sentence), pass replace:true, then check the box with get_ui_tree.',
     {
       deviceId: z.string(),
       text: z.string(),
       method: z.enum(['set', 'paste']).optional().describe('How to enter the text. "set" (default) writes it directly. "paste" puts it on the phone\'s clipboard and pastes it.'),
+      replace: z.boolean().optional().describe('Replace everything already in the box instead of inserting at the cursor (default false). Works with both methods; with paste it selects all the text first, like long-press → Select all.'),
       submit: z.boolean().optional().describe('Press Enter after typing, e.g. to execute a search (default false)'),
       screenshot: z.boolean().optional().describe('Return a fresh screenshot afterwards (default false)'),
     },
-    async ({ deviceId, text, method, submit, screenshot }, { authInfo }) => {
+    async ({ deviceId, text, method, replace, submit, screenshot }, { authInfo }) => {
       const paste = method === 'paste';
       if (paste && !signaling.deviceSupports(authInfo.userId, deviceId, 'paste')) {
         return textResult('This phone build does not support paste-typing — update the app, or call type_text without method:"paste".', true);
       }
+      if (replace && !signaling.deviceSupports(authInfo.userId, deviceId, 'replace_text')) {
+        return textResult('This phone build cannot replace text — update the app. Meanwhile, long_press the text to select it (for a sentence, then tap "Select all"), and type_text with method:"paste" without replace.', true);
+      }
       const r = await runControl(authInfo.userId, deviceId, {
-        type: 'control', action: paste ? 'paste' : 'text', value: text,
+        type: 'control', action: paste ? 'paste' : 'text', value: text, ...(replace ? { replace: true } : {}),
       });
       if (r.err) return r.err;
       let submitted = '';
@@ -1432,7 +1436,7 @@ function createPhoneRemoteServer() {
         const enter = await runControl(authInfo.userId, deviceId, { type: 'control', action: 'keyevent', keycode: 'KEYCODE_ENTER' });
         submitted = enter.err ? ' (but Enter was not accepted — the text is typed but not submitted)' : ' and submitted';
       }
-      return maybeScreenshot(authInfo.userId, deviceId, textResult(`Text ${paste ? 'pasted' : 'typed'}${submitted}.${r.note}`), screenshot);
+      return maybeScreenshot(authInfo.userId, deviceId, textResult(`Text ${replace ? 'replaced' : paste ? 'pasted' : 'typed'}${submitted}.${r.note}`), screenshot);
     }
   );
 

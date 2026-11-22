@@ -303,10 +303,15 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     // ── Type text ─────────────────────────────────────────────────────────
-    /** @return true only if a focused text field accepted the text. */
-    fun typeText(text: String): Boolean =
+    /**
+     * @param replace true = the new text replaces everything in the field;
+     *   false = it is inserted at the cursor (replacing any selection).
+     * @return true only if a focused text field accepted the text.
+     */
+    fun typeText(text: String, replace: Boolean = false): Boolean =
         editFocusedText { cur, selStart, selEnd ->
-            Pair(cur.substring(0, selStart) + text + cur.substring(selEnd), selStart + text.length)
+            if (replace) Pair(text, text.length)
+            else Pair(cur.substring(0, selStart) + text + cur.substring(selEnd), selStart + text.length)
         }
 
     /**
@@ -319,12 +324,28 @@ class RemoteAccessibilityService : AccessibilityService() {
      * explicit alternative rather than the default: pasting clobbers the
      * user's clipboard, which is rude to do on every keystroke.
      *
+     * With replace, the field's whole text is selected first (the same
+     * selection a person makes with long-press → Select all), so the paste
+     * overwrites it instead of being inserted at the cursor. This works for
+     * sentences too, and in apps that refill an emptied box with a default.
+     *
      * @return true only if a focused field accepted the paste.
      */
-    fun pasteText(text: String): Boolean {
+    fun pasteText(text: String, replace: Boolean = false): Boolean {
         val focused = screenRoot()?.findFocus(
             android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
         return try {
+            if (replace) {
+                val showingHint = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
+                    focused.isShowingHintText
+                val len = if (showingHint) 0 else (focused.text?.length ?: 0)
+                if (len > 0) {
+                    val selArgs = Bundle()
+                    selArgs.putInt(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                    selArgs.putInt(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, len)
+                    focused.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_SELECTION, selArgs)
+                }
+            }
             val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("phone-remote", text))
             focused.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_PASTE)

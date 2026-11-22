@@ -20,7 +20,7 @@ Every action performed on the phone MUST use one of these standard MCP tools. Ne
 | **`long_press`** | `deviceId`, `x`, `y`, `ms=700` | Gesture confirmation | For context menus, multi-select, or message actions. |
 | **`swipe`** | `deviceId`, `x1`, `y1`, `x2`, `y2`, `ms=300` | Gesture confirmation | For swiping carousels, notification shade, or custom drag gestures. |
 | **`scroll`** | `deviceId`, `direction` (`up`/`down`/`left`/`right`), `amount=0.6` | Scroll confirmation | For scrolling through feeds, contact lists, and settings. |
-| **`type_text`** | `deviceId`, `text`, `method` (`"set"` or `"paste"`), `submit` (bool) | Text injection status | Use `method="paste"` for WhatsApp and fields with existing hints. Use `submit=true` for search execution. `paste` inserts at the cursor; to replace existing text, select it first (see Rule 7). |
+| **`type_text`** | `deviceId`, `text`, `method` (`"set"` or `"paste"`), `replace` (bool), `submit` (bool) | Text injection status | Use `method="paste"` for WhatsApp and fields with existing hints. Use `submit=true` for search execution. Text is inserted at the cursor; pass `replace=true` to overwrite everything in the box (see Rule 7). |
 | **`press_key`** | `deviceId`, `key` (`"back"`, `"home"`, `"recents"`, `"lock"`) | Key event status | Dismiss keyboard/modals (`"back"`), return to launcher (`"home"`). |
 | **`open_app`** | `deviceId`, `package`, `name` | Launch status | Instant direct launch by package name in 1 single tool call. |
 | **`open_settings`** | `deviceId`, `page`, `package` (for app pages) | Open status | Jump straight to a Settings page (wifi, bluetooth, app_info, storage, accessibility...). Prefer over `android.settings.*` URLs. |
@@ -335,7 +335,7 @@ All internal storage is located under `/storage/emulated/0/`. The backend automa
 4. **Rule 4: Reactive Synchronization**: Always use `wait_for(text=...)` instead of static `wait(seconds=...)`.
 5. **Rule 5: Strict Copy-Paste for Form Fields**: Always pass `method: "paste"` in `type_text` when targeting messaging apps or search bars to prevent text corruption.
 6. **Rule 6: System Key Dismissals**: If an unexpected pop-up, keyboard, or overlay appears, dismiss it with `press_key(deviceId, key="back")`.
-7. **Rule 7: Select, Then Paste, to Replace Text**: To change text already in a box, don't clear it with backspace (some apps refill an empty box). `long_press` the text to select it; for a sentence, also tap **Select all** in the menu that appears (it is not in `get_ui_tree`; find it with one `take_screenshot`). Then `type_text(new, method="paste")` replaces the selection. Check the box with `get_ui_tree(filter="EditText")` before confirming.
+7. **Rule 7: Replace, Don't Clear**: To change text already in a box (a number, a word, a whole sentence), tap it and call `type_text(new, replace=true)`; if the app ignores it, add `method="paste"` (it selects all, then pastes over it). Don't clear with backspace first: some apps refill an empty box. Check the box with `get_ui_tree(filter="EditText")` before confirming. On an older phone app build without `replace`: `long_press` the text to select it, for a sentence also tap **Select all** (not in `get_ui_tree`; find it with one `take_screenshot`), then paste.
 
 ---
 *Created for Phone Remote AI Autonomous Control. Document Version 1.0 — October 30, 2026.*

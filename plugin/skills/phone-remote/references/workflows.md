@@ -154,8 +154,18 @@ search deep link (YouTube, Play Store, Maps); see deep-links.md.
 ## Replace the text in a box
 
 "Change the amount to 500", "set the frequency to 12345", "rewrite this
-message": the box already holds text, and `type_text(method:"paste")` only
-inserts at the cursor, so the old text stays.
+message": the box already holds text, and `type_text` normally inserts at
+the cursor, so the old text stays.
+
+**Use `replace:true`** (one call, works for words, numbers and sentences):
+1. Tap the box.
+2. `type_text(new text, replace:true)`. If the box doesn't change (the app
+   ignores direct text), `type_text(new text, method:"paste", replace:true)`:
+   it selects all the text and pastes over it.
+3. `get_ui_tree(filter:"EditText")`: the box must read exactly the new text.
+   Confirm (✓, Done, Save) if the app needs it, and read it again.
+
+**Fallback for older phone app builds** (type_text says it can't replace):
 1. Tap the box, then `long_press` on its text. This selects one word (or the
    whole number).
 2. One word or number: go to step 4.

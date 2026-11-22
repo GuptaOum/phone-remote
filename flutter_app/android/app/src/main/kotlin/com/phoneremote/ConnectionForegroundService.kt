@@ -277,7 +277,7 @@ class ConnectionForegroundService : Service() {
                                     // builds omit it and keep the fire-and-forget path.
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
-                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings", "open_file", "clipboard", "set_clipboard",
+                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings", "open_file", "clipboard", "set_clipboard", "replace_text",
                                         "frame_ack", "webrtc_screen", "webrtc_camera",
                                     )))
                                 }
@@ -876,9 +876,9 @@ class ConnectionForegroundService : Service() {
                 "keyevent" -> controlAck(id, action,
                     svc.pressKey(json.optString("keycode", "KEYCODE_BACK")), "key_not_accepted")
                 "text"     -> controlAck(id, action,
-                    svc.typeText(json.optString("value", "")), "no_focused_text_field")
+                    svc.typeText(json.optString("value", ""), json.optBoolean("replace", false)), "no_focused_text_field")
                 "paste"    -> controlAck(id, action,
-                    svc.pasteText(json.optString("value", "")), "paste_rejected")
+                    svc.pasteText(json.optString("value", ""), json.optBoolean("replace", false)), "paste_rejected")
                 "back"     -> controlAck(id, action, svc.pressKey("KEYCODE_BACK"), "key_not_accepted")
                 "home"     -> controlAck(id, action, svc.pressKey("KEYCODE_HOME"), "key_not_accepted")
                 "recents"  -> controlAck(id, action, svc.pressKey("KEYCODE_APP_SWITCH"), "key_not_accepted")

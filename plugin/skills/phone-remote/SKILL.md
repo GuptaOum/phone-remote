@@ -71,20 +71,15 @@ one at the end if the user would benefit from seeing the result.
   `paste`.
 - `submit:true` presses Enter, which runs a search. Don't use it to send chat
   messages; tap the Send button instead.
-- **Replacing text that is already in a box** (a number, a name, a sentence):
-  `paste` inserts at the cursor, so it adds to the old text instead of
-  replacing it. Select the old text first, then paste over it:
-  - One word or number: `long_press` the text (selects it), then
-    `type_text(new, method:"paste")`.
-  - A sentence or several words: `long_press` selects only one word, so
-    tap **Select all** in the menu that appears, then paste. That menu is a
-    floating window that `get_ui_tree` does NOT show: take one screenshot to
-    find it (usually top right, above the text).
-  - Always read the box back with `get_ui_tree(filter:"EditText")` and check
-    it holds exactly the new text before confirming. Some apps refill an
-    emptied box (Frequency Generator puts back "1"), so clearing with
-    backspace and then pasting can leave a stray character.
-  See references/workflows.md "Replace the text in a box".
+- **Replacing text that is already in a box** (a number, a name, a whole
+  sentence): tap the box, then `type_text(new, replace:true)`. Without
+  `replace`, text is inserted at the cursor and the old text stays. If the
+  app ignores it, use `type_text(new, method:"paste", replace:true)`, which
+  selects all the text first and pastes over it. Don't clear with backspace
+  first: some apps refill an emptied box (Frequency Generator puts back "1").
+  Always read the box back with `get_ui_tree(filter:"EditText")`. Older
+  phone app builds without `replace`: see references/workflows.md "Replace
+  the text in a box".
 
 ## Safety rules (non-negotiable)
 
