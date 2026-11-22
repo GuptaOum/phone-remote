@@ -83,7 +83,7 @@ you copied last, never a history, and reads it only when you ask.
 - *"Turn on dark mode."* / *"Turn on my hotspot."*
 - *"Open YouTube and search for lo-fi music."*
 - *"Take a screenshot and tell me what's on screen."*
-- *"List every song in my 'mixed' playlist and save it as a spreadsheet."* (it scrolls the whole list for you)
+- *"List every song in my 'mixed' playlist and save it as a spreadsheet."* (it scrolls the whole list for you; a very long list takes a couple of quick calls)
 
 **Chained tasks**
 

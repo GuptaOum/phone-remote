@@ -157,11 +157,17 @@ search deep link (YouTube, Play Store, Maps); see deep-links.md.
 1. Open the list (`open_app`, `open_url`, then `wait_for` something in it).
 2. `collect_list(deviceId)`. It scrolls to the top, goes to the end, and
    returns one numbered row per item (a row's texts joined with ` | `).
-3. Read the header it prints: whether the end was reached, any gap warning,
-   and which labels it removed. If the end wasn't reached, call again with a
-   higher `maxScrolls`; if it warns about a gap, call again with
-   `amount:0.25`.
-4. Present or save the rows (a table, a CSV file). The count shown by the
+3. Read the header it prints: whether the end was reached and which labels
+   it removed. One call stops after about 45 seconds so the result reaches
+   you in time; if the end was not reached, call
+   `collect_list(deviceId, fromTop:false)` to read the rest, and repeat until
+   it says "Reached the end of the list". A 200-row list started from the
+   bottom takes two calls.
+4. Join the calls' rows and drop duplicates yourself: a few rows repeat where
+   two screens did not line up and at the seam between calls. That is
+   expected; don't re-run to get a perfect list. Only if rows look missing,
+   call again with `amount:0.3`.
+5. Present or save the rows (a table, a CSV file). The count shown by the
    app (e.g. "193 tracks") can be a little higher than the rows you get when
    the app hides unavailable items.
 On a feed that refreshes when you pull down (YouTube Home), pass
