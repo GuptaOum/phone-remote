@@ -5,6 +5,7 @@ import android.graphics.Matrix
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.view.OrientationEventListener
 import android.view.Surface
 import org.json.JSONArray
 import org.json.JSONObject
@@ -76,6 +77,23 @@ class WebRtcStreamer(
     @Volatile private var camOrientation = 0
     @Volatile private var camFront = false
 
+    // How the phone is physically held (0/90/180/270, clockwise from upright),
+    // from the motion sensor. Not the display rotation: the camera runs in the
+    // background and auto-rotate may be off, so the screen can stay portrait
+    // while the phone is held sideways. Added to the frame rotation so the
+    // browser shows a landscape picture when the phone is held landscape.
+    @Volatile private var heldDegrees = 0
+    private val heldListener: OrientationEventListener? =
+        if (kind == Kind.CAMERA) object : OrientationEventListener(ctx.applicationContext) {
+            override fun onOrientationChanged(deg: Int) {
+                if (deg == ORIENTATION_UNKNOWN) return // lying flat: keep the last one
+                // Switch only when clearly past the 45° midpoint, so holding the
+                // phone near a diagonal doesn't make the picture flip back and forth.
+                val diff = ((deg - heldDegrees + 540) % 360) - 180
+                if (Math.abs(diff) > 55) heldDegrees = ((deg + 45) / 90 % 4) * 90
+            }
+        } else null
+
     @Volatile var connectedCount = 0
         private set
 
@@ -99,6 +117,7 @@ class WebRtcStreamer(
     override fun cameraSurface(w: Int, h: Int, sensorOrientation: Int, front: Boolean): Surface? {
         camOrientation = sensorOrientation
         camFront = front
+        heldListener?.let { if (it.canDetectOrientation()) it.enable() }
         return surface(w, h)
     }
 
@@ -180,7 +199,12 @@ class WebRtcStreamer(
         }
     }
 
-    /** Same correction libwebrtc's Camera2Session applies (device held upright). */
+    /**
+     * Same correction libwebrtc's Camera2Session applies: undo the OS texture
+     * transform, then send the rotation as metadata. The rotation combines the
+     * sensor angle with how the phone is held (Camera2Session uses the display
+     * rotation for the same purpose).
+     */
     private fun cameraFrame(frame: VideoFrame): VideoFrame {
         val buf = frame.buffer as? TextureBufferImpl ?: return frame.also { it.retain() }
         val m = Matrix()
@@ -188,10 +212,13 @@ class WebRtcStreamer(
         if (camFront) m.preScale(-1f, 1f)
         m.preRotate(-camOrientation.toFloat())
         m.preTranslate(-0.5f, -0.5f)
-        return VideoFrame(buf.applyTransformMatrix(m, buf.width, buf.height), camOrientation, frame.timestampNs)
+        val held = heldDegrees
+        val rotation = if (camFront) (camOrientation - held + 360) % 360 else (camOrientation + held) % 360
+        return VideoFrame(buf.applyTransformMatrix(m, buf.width, buf.height), rotation, frame.timestampNs)
     }
 
     private fun releaseMedia() {
+        try { heldListener?.disable() } catch (_: Exception) {}
         try { helper?.stopListening() } catch (_: Exception) {}
         try { helper?.dispose() } catch (_: Exception) {}
         try { surface?.release() } catch (_: Exception) {}
