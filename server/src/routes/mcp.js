@@ -64,15 +64,28 @@ const KEY_NAMES = Object.keys(KEY_MAP);
 
 // Screenshot constants
 const SCREENSHOT_SETTLE_MS = 850;
-const SCREENSHOT_MAX_EDGE = 1568;
+// 1092 px tall (~700 image tokens) is enough to understand a screen; hd:true
+// gives 1568 px (~1,470 tokens) for small print.
+const SCREENSHOT_MAX_EDGE = 1092;
+const SCREENSHOT_HD_MAX_EDGE = 1568;
 const SCREENSHOT_ACT_MAX_EDGE = 1092;
 const SCREENSHOT_JPEG_QUALITY = 70;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+// Token economy: replies are read by a model, so no pretty-printing. A list
+// comes back as one compact JSON object per line (like get_ui_tree); anything
+// else as one compact line. Indented JSON cost ~2x the tokens for list_apps.
+function compactJson(value) {
+  if (Array.isArray(value)) return `[${value.map((v) => `
+${JSON.stringify(v)}`).join(',')}
+]`;
+  return JSON.stringify(value);
+}
+
 function textResult(text, isError = false) {
-  return { content: [{ type: 'text', text: typeof text === 'string' ? text : JSON.stringify(text, null, 2) }], isError };
+  return { content: [{ type: 'text', text: typeof text === 'string' ? text : compactJson(text) }], isError };
 }
 
 function imageResult(jpeg) {
@@ -510,11 +523,11 @@ function createPhoneRemoteServer() {
   // 5. get_ui_tree
   tool(
     'get_ui_tree',
-    'Read the screen as structured data instead of an image: every visible text, button and input field, with the normalized x/y you can pass straight to tap. PREFER THIS OVER take_screenshot for finding and acting on things — it is far cheaper, has no capture throttle, and gives exact coordinates instead of estimates from pixels. Use take_screenshot only when you need to see something genuinely visual (an image, a layout problem, a CAPTCHA). Each node has: i (index), text, desc (accessibility label, left out when it repeats text), id (resource id), cls (widget class; left out for plain TextView), x/y (normalized centre — pass to tap), f (flags: c=clickable, e=editable/text field, s=scrollable, k=checkable, K=checked, f=focused, d=disabled). A label marked c may stand for its whole list row: tap it to open that row.',
+    'Read the screen as data: visible texts, buttons and fields with x/y to pass to tap. Prefer it over take_screenshot (far cheaper, exact coordinates). Node keys: i index, text, desc (accessibility label, omitted if same as text), id (resource id), cls (widget class, omitted for TextView), x/y (normalized centre), f flags (c clickable, e editable, s scrollable, k checkable, K checked, f focused, d disabled). A c label can stand for its whole list row.',
     {
       deviceId: z.string().describe('Device id from list_devices'),
-      all: z.boolean().optional().describe('Include layout containers with no text or action (default false). Leave false unless the tree looks incomplete — it adds a lot of noise.'),
-      filter: z.string().optional().describe('Only return elements whose text, accessibility label, resource id, or widget class contains this (case-insensitive substring match). ALWAYS set this when you already know what you are looking for — e.g. filter:"send" to find a send button — instead of reading the whole screen. A chat or feed screen can carry many message bubbles; without a filter every one of them comes back just to report one button\'s coordinates. Omit only when you genuinely need to see everything on screen.'),
+      all: z.boolean().optional().describe('Also include empty layout containers (default false; only if the tree looks incomplete).'),
+      filter: z.string().optional().describe('Only elements whose text, label, id or class contains this (case-insensitive). Set it whenever you know what you are looking for (e.g. "send"): an unfiltered chat or feed returns every message.'),
     },
     async ({ deviceId, all, filter }, { authInfo }) => {
       if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
@@ -595,7 +608,7 @@ function createPhoneRemoteServer() {
   // 7. list_apps
   tool(
     'list_apps',
-    'List every app installed on the phone, with display name and package name. Use this when you are unsure what an app is called or whether it is installed, rather than guessing a package name at open_app. Each app has system:true when it came preinstalled with the phone (vendor or Google apps; updated:true if since updated from the Play Store) and system:false when the user installed it; pass system:true or system:false to list only one kind. With sizes:true each app also gets its storage use (app, data, cache and total, in MB), sorted largest first; minSizeMB keeps only apps at least that big (e.g. 2048 for "over 2 GB"). Sizes need the one-time "Usage access" grant on the phone.',
+    'List installed apps (name, package), e.g. to find the exact package for open_app. system:true = preinstalled (updated:true if updated since), false = user-installed; pass system to list one kind. sizes:true adds storage in MB (app, data, cache, total), largest first; minSizeMB keeps apps at least that big. Sizes need the one-time Usage access grant.',
     {
       deviceId: z.string().describe('Device id from list_devices'),
       filter: z.string().optional().describe('Optional case-insensitive substring to match against the name or package'),
@@ -635,6 +648,8 @@ function createPhoneRemoteServer() {
           }
           apps = apps.filter((a) => a.system === system);
           if (!apps.length) return textResult(`No ${system ? 'system' : 'user-installed'} app found${filter ? ` matching "${filter}"` : ''}.`);
+          // Every row would repeat the filter value: drop it.
+          apps = apps.map(({ system: _s, ...rest }) => rest);
         }
         if (wantSizes) {
           const MB = 1024 * 1024;
@@ -1140,8 +1155,8 @@ function createPhoneRemoteServer() {
           app: n.package,
           title: n.title,
           text: n.text,
-          at: n.postedAt ? new Date(n.postedAt).toISOString() : undefined,
-          showing: !!n.active,
+          at: n.postedAt ? new Date(n.postedAt).toISOString().slice(0, 16) + 'Z' : undefined,
+          ...(n.active ? { showing: true } : {}),
         })));
       } catch (e) {
         return textResult(e.message, true);
@@ -1201,12 +1216,15 @@ function createPhoneRemoteServer() {
   // 10. take_screenshot
   tool(
     'take_screenshot',
-    'Capture and return the current screen of a device as a JPEG image. Requires the phone\'s Accessibility Service to be enabled. Call this first to see the screen before tapping. In long multi-step sessions, don\'t screenshot after every action — act with screenshot:false on intermediate steps and take one screenshot when you need to check state.',
-    { deviceId: z.string().describe('Device id from list_devices') },
-    async ({ deviceId }, { authInfo }) => {
+    'Return the current screen as a JPEG image (~700 tokens; get_ui_tree is ~50-300). Use it only when get_ui_tree does not explain the screen: a tap did nothing, something covers the target, or the content is visual (image, video, game). Pass hd:true only to read small print (~1,500 tokens).',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      hd: z.preprocess((v) => (v === 'true' ? true : v === 'false' ? false : v), z.boolean().optional()).describe('Higher resolution for small text (about twice the tokens). Default false.'),
+    },
+    async ({ deviceId, hd }, { authInfo }) => {
       try {
         const { jpeg, note } = await captureVerifiedScreenshot(authInfo.userId, deviceId);
-        const result = imageResult(await shrinkScreenshot(jpeg));
+        const result = imageResult(await shrinkScreenshot(jpeg, hd ? SCREENSHOT_HD_MAX_EDGE : SCREENSHOT_MAX_EDGE));
         if (note) result.content.push({ type: 'text', text: note });
         return result;
       } catch (e) {
@@ -1299,14 +1317,14 @@ function createPhoneRemoteServer() {
   // 14b. collect_list
   tool(
     'collect_list',
-    'Read an ENTIRE scrolling list in one call: playlists, contacts, chats, search results, settings, app lists. The server scrolls the list, reads the screen after every step, stitches the overlaps together and returns one numbered row per list item (the texts of a row joined with " | "), without repeats. Use this instead of calling scroll + get_ui_tree over and over. It first scrolls to the top (fromTop, default true), then down to the end. Title bars, bottom bars and mini players are removed automatically, and so are labels every row repeats (like a "0" counter), which the result lists. It only reads text, so use get_ui_tree afterwards if you need coordinates to tap a row. It scrolls the middle of the screen, so it reads the main vertical list; it does not work on carousels. Scrolling up to the top can trigger pull-to-refresh on feeds: pass fromTop:false there. Built for speed: a few rows may come back twice where two screens did not line up, so drop repeats yourself. One call runs for at most about 45 seconds (roughly 40 scroll steps); if the list is longer, it returns what it read and says to call again with fromTop:false to continue.',
+    'Read a whole scrolling list in one call (playlist, contacts, chats, results, settings) instead of scroll + get_ui_tree loops. Scrolls to the top, then to the end, and returns one numbered row per item (texts joined with " | "); fixed bars and labels every row repeats are removed. Text only: use get_ui_tree to get coordinates. Main vertical list only, not carousels. On feeds that refresh when pulled down, pass fromTop:false. A few rows may repeat; drop them yourself. Stops after ~45 s: if the end was not reached, call again with fromTop:false.',
     {
       deviceId: z.string().describe('Device id from list_devices'),
-      fromTop: z.boolean().optional().describe('Scroll to the top of the list first (default true). Pass false to collect from the current position down.'),
-      maxScrolls: z.coerce.number().int().min(1).max(150).optional().describe('Safety limit on scroll steps downward (default 60). The result says whether the end of the list was reached.'),
-      amount: z.coerce.number().min(0.2).max(0.6).optional().describe('How far each step scrolls (default 0.4; the swipe flings a bit further than this). Bigger steps are faster but can skip rows; smaller ones are slower but safer.'),
-      descriptions: z.boolean().optional().describe('Also include accessibility labels of items that have no visible text, such as icon-only rows (default false).'),
-      keepRepeated: z.boolean().optional().describe('Keep labels that repeat on nearly every row instead of dropping them (default false).'),
+      fromTop: z.boolean().optional().describe('Start at the top (default true); false = from here down.'),
+      maxScrolls: z.coerce.number().int().min(1).max(150).optional().describe('Max scroll steps (default 60).'),
+      amount: z.coerce.number().min(0.2).max(0.6).optional().describe('Step size (default 0.4). Smaller = slower but never skips rows.'),
+      descriptions: z.boolean().optional().describe('Include labels of icon-only rows (default false).'),
+      keepRepeated: z.boolean().optional().describe('Keep labels repeated on every row (default false).'),
     },
     async ({ deviceId, fromTop, maxScrolls, amount, descriptions, keepRepeated }, extra) => {
       const { userId } = extra.authInfo;
@@ -1409,13 +1427,13 @@ function createPhoneRemoteServer() {
   // 15. type_text
   tool(
     'type_text',
-    'Type text into the currently focused input field (tap the field first). Set submit:true to press Enter after typing — use this to run a search once the query is typed. IF TYPING REPORTS SUCCESS BUT THE TEXT DOES NOT APPEAR (WhatsApp and some other apps ignore the standard method), retry with method:"paste". By default the text is inserted at the cursor and any text already in the box stays; TO REPLACE WHAT IS IN THE BOX (a number, a word or a whole sentence), pass replace:true, then check the box with get_ui_tree.',
+    'Type into the focused field (tap it first). Inserted at the cursor; replace:true overwrites everything in the box (number, word or sentence). If it reports success but nothing appears (WhatsApp etc.), retry with method:"paste". submit:true presses Enter (searches; tap Send for chats).',
     {
       deviceId: z.string(),
       text: z.string(),
-      method: z.enum(['set', 'paste']).optional().describe('How to enter the text. "set" (default) writes it directly. "paste" puts it on the phone\'s clipboard and pastes it.'),
+      method: z.enum(['set', 'paste']).optional().describe('"set" (default) writes directly; "paste" goes through the clipboard.'),
       // Clients with a tool list cached from before this option existed send it as "true"/"false".
-      replace: z.preprocess((v) => (v === 'true' ? true : v === 'false' ? false : v), z.boolean().optional()).describe('Replace everything already in the box instead of inserting at the cursor (default false). Works with both methods; with paste it selects all the text first, like long-press → Select all.'),
+      replace: z.preprocess((v) => (v === 'true' ? true : v === 'false' ? false : v), z.boolean().optional()).describe('Overwrite the whole box instead of inserting (default false).'),
       submit: z.boolean().optional().describe('Press Enter after typing, e.g. to execute a search (default false)'),
       screenshot: z.boolean().optional().describe('Return a fresh screenshot afterwards (default false)'),
     },

@@ -364,10 +364,18 @@ class RemoteAccessibilityService : AccessibilityService() {
                         val hwBuffer = screenshot.hardwareBuffer
                         val bmp = Bitmap.wrapHardwareBuffer(hwBuffer, screenshot.colorSpace)!!
                         hwBuffer.close()
-                        val softBmp = bmp.copy(Bitmap.Config.ARGB_8888, false)
+                        val full = bmp.copy(Bitmap.Config.ARGB_8888, false)
                         bmp.recycle()
+                        // The server never shows the model more than 1568 px
+                        // (hd), so don't send more over mobile data: a full
+                        // 1080x2412 at q90 was ~280 KB per screenshot.
+                        val scale = minOf(1f, 1568f / maxOf(full.width, full.height))
+                        val softBmp = if (scale < 1f) {
+                            Bitmap.createScaledBitmap(full, (full.width * scale).toInt(), (full.height * scale).toInt(), true)
+                                .also { full.recycle() }
+                        } else full
                         val out = ByteArrayOutputStream()
-                        softBmp.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                        softBmp.compress(Bitmap.CompressFormat.JPEG, 80, out)
                         softBmp.recycle()
                         callback(out.toByteArray())
                     } catch (_: Exception) { callback(byteArrayOf()) }
