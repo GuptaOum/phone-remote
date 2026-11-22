@@ -46,10 +46,10 @@ class WebRtcStreamer(
         //
         // Tuned for navigating the phone, not watching video (2026-11-23): on a
         // Jio mobile uplink, bursts above ~600 kbps queued up and lost packets,
-        // which is what made taps feel late. 600 kbps max, 15 fps and half the
+        // which is what made taps feel late. 600 kbps max, 21 fps and half the
         // screen size keep each frame small, so nothing builds up a delay.
         SCREEN("screen", false, 600_000, RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE,
-            maxFramerate = 15, scaleDownBy = 2.0),
+            maxFramerate = 21, scaleDownBy = 2.0),
         // Camera is motion: keep it fluid, let resolution adapt on weak links.
         CAMERA("camera", false, 1_500_000, RtpParameters.DegradationPreference.BALANCED),
     }
