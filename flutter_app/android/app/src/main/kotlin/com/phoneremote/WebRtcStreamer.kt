@@ -35,12 +35,22 @@ class WebRtcStreamer(
         val screencast: Boolean,
         val maxBitrateBps: Int,
         val degradation: RtpParameters.DegradationPreference,
+        // 0 = leave WebRTC's own floor / starting estimate.
+        val minBitrateBps: Int = 0,
+        val startBitrateBps: Int = 0,
     ) {
         // Remote control needs low latency more than sharp text: real-time mode
         // (not "screencast", which lets fps collapse to keep detail) and, when
         // bandwidth is tight (cellular start), lower the resolution — never the
         // frame rate.
-        SCREEN("screen", false, 2_500_000, RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE),
+        //
+        // Floor and start: measured across networks (2026-11-22), the bandwidth
+        // estimate sat at 76-305 kbps with 0% loss. WebRTC's delay-based control
+        // read the jitter of bursty screen traffic as congestion and shrank the
+        // picture to 188x422. A 400 kbps floor keeps it readable; starting at
+        // 800 kbps avoids the slow climb from near zero.
+        SCREEN("screen", false, 2_500_000, RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE,
+            minBitrateBps = 400_000, startBitrateBps = 800_000),
         // Camera is motion: keep it fluid, let resolution adapt on weak links.
         CAMERA("camera", false, 1_500_000, RtpParameters.DegradationPreference.BALANCED),
     }
@@ -311,6 +321,11 @@ class WebRtcStreamer(
         peer.pendingIce.clear()
         // After the remote offer, so addTrack reuses the browser's recvonly transceiver.
         peer.pc.addTrack(track, listOf(kind.label))?.let(::tuneSender)
+        if (kind.startBitrateBps > 0) {
+            try {
+                peer.pc.setBitrate(kind.minBitrateBps, kind.startBitrateBps, kind.maxBitrateBps)
+            } catch (_: Exception) {}
+        }
         peer.pc.createAnswer(object : SdpCallback() {
             override fun onCreateSuccess(answer: SessionDescription) {
                 h.post {
@@ -331,7 +346,11 @@ class WebRtcStreamer(
         try {
             val p = sender.parameters
             p.degradationPreference = kind.degradation
-            p.encodings.forEach { it.maxBitrateBps = kind.maxBitrateBps; it.maxFramerate = 30 }
+            p.encodings.forEach {
+                it.maxBitrateBps = kind.maxBitrateBps
+                it.maxFramerate = 30
+                if (kind.minBitrateBps > 0) it.minBitrateBps = kind.minBitrateBps
+            }
             sender.parameters = p
         } catch (_: Exception) {}
     }
