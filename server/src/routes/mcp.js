@@ -1414,7 +1414,8 @@ function createPhoneRemoteServer() {
       deviceId: z.string(),
       text: z.string(),
       method: z.enum(['set', 'paste']).optional().describe('How to enter the text. "set" (default) writes it directly. "paste" puts it on the phone\'s clipboard and pastes it.'),
-      replace: z.boolean().optional().describe('Replace everything already in the box instead of inserting at the cursor (default false). Works with both methods; with paste it selects all the text first, like long-press → Select all.'),
+      // Clients with a tool list cached from before this option existed send it as "true"/"false".
+      replace: z.preprocess((v) => (v === 'true' ? true : v === 'false' ? false : v), z.boolean().optional()).describe('Replace everything already in the box instead of inserting at the cursor (default false). Works with both methods; with paste it selects all the text first, like long-press → Select all.'),
       submit: z.boolean().optional().describe('Press Enter after typing, e.g. to execute a search (default false)'),
       screenshot: z.boolean().optional().describe('Return a fresh screenshot afterwards (default false)'),
     },
