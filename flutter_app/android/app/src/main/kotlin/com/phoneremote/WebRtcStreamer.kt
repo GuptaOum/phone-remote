@@ -46,10 +46,10 @@ class WebRtcStreamer(
         //
         // Tuned for navigating the phone, not watching video (2026-11-23): on a
         // Jio mobile uplink, bursts above ~600 kbps queued up and lost packets,
-        // which is what made taps feel late. 600 kbps max, 21 fps and half the
+        // which is what made taps feel late. 450 kbps max, 19 fps and 1/2.5 of the
         // screen size keep each frame small, so nothing builds up a delay.
-        SCREEN("screen", false, 600_000, RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE,
-            maxFramerate = 21, scaleDownBy = 2.0),
+        SCREEN("screen", false, 450_000, RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE,
+            maxFramerate = 19, scaleDownBy = 2.5),
         // Camera is motion: keep it fluid, let resolution adapt on weak links.
         CAMERA("camera", false, 1_500_000, RtpParameters.DegradationPreference.BALANCED),
     }
@@ -337,16 +337,25 @@ class WebRtcStreamer(
     }
 
     private fun tuneSender(sender: RtpSender) {
-        try {
+        // setParameters reports a rejected set by returning false, not by
+        // throwing, so check it: an ignored cap is invisible otherwise.
+        fun apply(withScale: Boolean): Boolean = try {
             val p = sender.parameters
             p.degradationPreference = kind.degradation
             p.encodings.forEach {
                 it.maxBitrateBps = kind.maxBitrateBps
                 it.maxFramerate = kind.maxFramerate
-                if (kind.scaleDownBy > 1.0) it.scaleResolutionDownBy = kind.scaleDownBy
+                if (withScale && kind.scaleDownBy > 1.0) it.scaleResolutionDownBy = kind.scaleDownBy
             }
-            sender.parameters = p
-        } catch (_: Exception) {}
+            sender.setParameters(p)
+        } catch (e: Exception) {
+            Log.w(TAG, "rtc ${kind.label}: setParameters threw $e")
+            false
+        }
+        val ok = apply(true) || apply(false).also { if (it) Log.w(TAG, "rtc ${kind.label}: applied without scaleResolutionDownBy") }
+        val e = try { sender.parameters.encodings.firstOrNull() } catch (_: Exception) { null }
+        Log.i(TAG, "rtc ${kind.label}: params ok=$ok maxBitrate=${e?.maxBitrateBps} " +
+            "maxFps=${e?.maxFramerate} scaleDown=${e?.scaleResolutionDownBy} encodings=${try { sender.parameters.encodings.size } catch (_: Exception) { -1 }}")
     }
 
     private fun handleIce(from: String, c: JSONObject?) {
