@@ -47,8 +47,21 @@ Talk to your agent in plain words. These all work today.
 - *"Where is my phone?"* and then *"Make it ring."*
 - *"Read my notifications and tell me what's important."*
 - *"Did an OTP come in? Read it to me."*
-- *"I just copied a link on my phone, open it on my PC."* / *"Summarise what I copied."*
-- *"Copy this address to my phone so I can paste it."*
+
+**Clipboard between phone and AI**
+
+Copy something on your phone and the AI can read it; ask the AI and it puts
+text on your phone, ready to paste anywhere.
+
+- *"I just copied a link on my phone, open it on my PC."*
+- *"Summarise what I copied."* / *"Translate what I copied into Hindi."*
+- *"Copy this address to my phone so I can paste it in Maps."*
+- *"Put my Wi-Fi network name on my phone's clipboard."*
+
+Reading needs the phone unlocked; for a split second Android shows Phone
+Remote in front and may say it pasted from your clipboard. Setting works in
+the background with nothing changing on screen. The AI only sees the item
+you copied last, never a history, and reads it only when you ask.
 
 **Files between phone and computer**
 
@@ -75,6 +88,7 @@ Talk to your agent in plain words. These all work today.
 
 - **Morning check:** *"Check my battery, read my notifications, and tell me if any new file landed in Downloads."*
 - **Phone to PC:** *"Find my latest screenshot on the phone and save it to my PC."*
+- **Copied link to notes:** *"Read what I copied on my phone, summarise the page, and put the summary back on my phone's clipboard."*
 - **Settings tour:** *"Open each settings page and tell me what's turned on."*
 - **App report:** *"Open my battery usage and tell me the top 3 apps."*
 

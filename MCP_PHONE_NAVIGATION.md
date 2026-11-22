@@ -34,6 +34,8 @@ Every action performed on the phone MUST use one of these standard MCP tools. Ne
 | **`ring`** | `deviceId` | Ring status | Rings device at maximum volume (find my phone). |
 | **`flash_light`** | `deviceId`, `count=3` | Strobe status | Blinks rear camera LED flashlight. |
 | **`read_notifications`**| `deviceId`, `filter`, `limit=20` | Notification items | Instant retrieval of incoming OTPs, 2FA codes, and status bar alerts. |
+| **`get_clipboard`** | `deviceId` | `{kind, text}` | What the user last copied. Needs the phone unlocked; briefly brings an invisible Phone Remote screen forward. Only when the user refers to something they copied. |
+| **`set_clipboard`** | `deviceId`, `text` | Copy status | Puts text on the phone's clipboard, ready to paste. Works in the background, no text box needed. Replaces the current clip. |
 | **`list_files`** | `deviceId`, `path` | File listing with size/date | Explore storage `/storage/emulated/0`. Default to single folder shallow scans. |
 | **`get_file`** | `deviceId`, `path` | Download URL & metadata | Retrieve a file from phone shared storage to PC. |
 | **`send_file`** | `deviceId`, `name`, `data_base64`, `folder` | Save confirmation | Send file (<= 18 MB) directly to phone Download directory. |
