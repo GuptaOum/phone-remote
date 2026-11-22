@@ -1304,7 +1304,7 @@ function createPhoneRemoteServer() {
       deviceId: z.string().describe('Device id from list_devices'),
       fromTop: z.boolean().optional().describe('Scroll to the top of the list first (default true). Pass false to collect from the current position down.'),
       maxScrolls: z.coerce.number().int().min(1).max(150).optional().describe('Safety limit on scroll steps downward (default 60). The result says whether the end of the list was reached.'),
-      amount: z.coerce.number().min(0.2).max(0.6).optional().describe('How far each step scrolls (default 0.55, fast). Smaller steps overlap more, so fewer rows repeat, but are slower.'),
+      amount: z.coerce.number().min(0.2).max(0.6).optional().describe('How far each step scrolls (default 0.4; the swipe flings a bit further than this). Bigger steps are faster but can skip rows; smaller ones are slower but safer.'),
       descriptions: z.boolean().optional().describe('Also include accessibility labels of items that have no visible text, such as icon-only rows (default false).'),
       keepRepeated: z.boolean().optional().describe('Keep labels that repeat on nearly every row instead of dropping them (default false).'),
     },
@@ -1327,7 +1327,7 @@ function createPhoneRemoteServer() {
         return textResult('This phone build cannot read the UI tree — update the app.', true);
       }
       const limit = maxScrolls || 60;
-      const step = amount || 0.55;
+      const step = amount || 0.4;
       const read = async () => {
         const t = await fetchUiTree(userId, deviceId, false, 8000);
         if (t.error) throw new Error(CONTROL_ERRORS[t.error] || t.error);
