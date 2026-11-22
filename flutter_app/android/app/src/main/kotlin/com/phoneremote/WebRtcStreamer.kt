@@ -374,6 +374,13 @@ class WebRtcStreamer(
                     val pair = stats.firstOrNull { it.type == "candidate-pair" && it.members["nominated"] == true && it.members["state"] == "succeeded" }
                     val local = pair?.let { p -> stats.firstOrNull { it.id == p.members["localCandidateId"] } }
                     val remote = pair?.let { p -> stats.firstOrNull { it.id == p.members["remoteCandidateId"] } }
+                    // What the browser reports back: share of packets lost and jitter.
+                    val rin = stats.firstOrNull { it.type == "remote-inbound-rtp" && it.members["kind"] == "video" }
+                    fun num(v: Any?) = (v as? Number)?.toDouble()
+                    val bweKbps = num(pair?.members?.get("availableOutgoingBitrate"))?.let { (it / 1000).toLong() }
+                    val targetKbps = num(out?.members?.get("targetBitrate"))?.let { (it / 1000).toLong() }
+                    val lossPct = num(rin?.members?.get("fractionLost"))?.let { Math.round(it * 1000) / 10.0 }
+                    val jitterMs = num(rin?.members?.get("jitter"))?.let { Math.round(it * 1000) }
                     val bytes = (out?.members?.get("bytesSent") as? Number)?.toLong() ?: 0L
                     val now = System.currentTimeMillis()
                     val kbps = if (lastBytes >= 0 && now > lastAt) (bytes - lastBytes) * 8 / (now - lastAt) else 0
@@ -383,7 +390,10 @@ class WebRtcStreamer(
                         "limit=${out?.members?.get("qualityLimitationReason")} " +
                         "path=${local?.members?.get("candidateType")}/${local?.members?.get("protocol")}" +
                         "${local?.members?.get("relayProtocol")?.let { "($it)" } ?: ""}" +
-                        "→${remote?.members?.get("candidateType")} rtt=${pair?.members?.get("currentRoundTripTime")}")
+                        "→${remote?.members?.get("candidateType")} rtt=${pair?.members?.get("currentRoundTripTime")} " +
+                        "bwe=${bweKbps}kbps target=${targetKbps}kbps loss=${lossPct}% jitter=${jitterMs}ms " +
+                        "lost=${rin?.members?.get("packetsLost")} nack=${out?.members?.get("nackCount")} " +
+                        "pli=${out?.members?.get("pliCount")} resent=${out?.members?.get("retransmittedPacketsSent")}")
                 }
                 h.postDelayed(this, 5000)
             }
