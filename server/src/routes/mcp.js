@@ -1409,7 +1409,7 @@ function createPhoneRemoteServer() {
   // 15. type_text
   tool(
     'type_text',
-    'Type text into the currently focused input field (tap the field first). Set submit:true to press Enter after typing — use this to run a search once the query is typed. IF TYPING REPORTS SUCCESS BUT THE TEXT DOES NOT APPEAR (WhatsApp and some other apps ignore the standard method), retry with method:"paste".',
+    'Type text into the currently focused input field (tap the field first). Set submit:true to press Enter after typing — use this to run a search once the query is typed. IF TYPING REPORTS SUCCESS BUT THE TEXT DOES NOT APPEAR (WhatsApp and some other apps ignore the standard method), retry with method:"paste". Paste inserts at the cursor and keeps any text already in the box; TO REPLACE EXISTING TEXT, long_press it first to select it (for a sentence, then tap "Select all" in the menu that appears; that menu is not in get_ui_tree, so find it with take_screenshot), then paste, and check the box with get_ui_tree.',
     {
       deviceId: z.string(),
       text: z.string(),

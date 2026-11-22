@@ -151,6 +151,26 @@ Tap the search icon (`get_ui_tree(filter:"search")`), `type_text(query,
 submit:true)`, `wait_for(text=<expected result>)`. Many apps also accept a
 search deep link (YouTube, Play Store, Maps); see deep-links.md.
 
+## Replace the text in a box
+
+"Change the amount to 500", "set the frequency to 12345", "rewrite this
+message": the box already holds text, and `type_text(method:"paste")` only
+inserts at the cursor, so the old text stays.
+1. Tap the box, then `long_press` on its text. This selects one word (or the
+   whole number).
+2. One word or number: go to step 4.
+3. A sentence or several words: tap **Select all** in the Cut / Copy / Paste /
+   Select all menu. It is a floating window that `get_ui_tree` doesn't
+   include, so `take_screenshot` once to find it (usually top right, just
+   above the text).
+4. `type_text(new text, method:"paste")`. The paste replaces the selection.
+5. `get_ui_tree(filter:"EditText")`: the box must read exactly the new text.
+   Then confirm (✓, Done, Save) if the app needs it, and read it again.
+Tested on the phone: a number in Frequency Generator (4 calls, no screenshot)
+and a full sentence in Google Translate.
+Avoid clearing with backspace and then pasting: some apps put a default back
+into an empty box (Frequency Generator adds "1"), and the paste then joins it.
+
 ## Read a whole list
 
 "List every song in my playlist", "all my contacts", "every result":
