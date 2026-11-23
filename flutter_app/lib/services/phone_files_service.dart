@@ -83,7 +83,10 @@ class PhoneFilesService {
         return (a['name'] as String).toLowerCase().compareTo((b['name'] as String).toLowerCase());
       });
 
-      signaling.send({'type': 'pf_list_result', 'id': id, 'path': path, 'entries': entries});
+      signaling.send({
+        'type': 'pf_list_result', 'id': id, 'path': path, 'entries': entries,
+        'tzOffsetMin': DateTime.now().timeZoneOffset.inMinutes,
+      });
     } catch (e) {
       signaling.send({'type': 'pf_error', 'id': id, 'error': e.toString()});
     }

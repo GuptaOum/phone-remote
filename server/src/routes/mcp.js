@@ -14,6 +14,7 @@ const db = require('../services/db');
 const { verifyToken } = require('../middleware/auth');
 const signaling = require('../services/signaling');
 const { compactNodes, formatTree } = require('../services/uiTreeCompact');
+const { humanSize, selectPage, wantDetails, mediaNames, formatFileList } = require('../services/fileList');
 const {
   screenLabels, sameScreen, mergeScreens, dropRepeated, toRows,
 } = require('../services/listCollect');
@@ -84,40 +85,8 @@ ${JSON.stringify(v)}`).join(',')}
   return JSON.stringify(value);
 }
 
-// list_files used to repeat the full path and a meaningless folder size on
-// every row (~25 tokens/entry; ~9,500 for a 245-entry Download folder).
-function humanSize(b) {
-  if (b == null) return '';
-  if (b < 1024) return `${b} B`;
-  if (b < 1024 * 1024) return `${Math.round(b / 1024)} KB`;
-  if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
-  return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-function formatFileList(dir, entries, { filter, sort, limit, offset } = {}) {
-  let list = entries;
-  if (filter) {
-    const f = String(filter).toLowerCase();
-    list = list.filter((e) => String(e.name).toLowerCase().includes(f));
-  }
-  const dirs = list.filter((e) => e.type === 'dir').length;
-  if (sort === 'newest') list = [...list].sort((a, b) => (b.modified || 0) - (a.modified || 0));
-  else if (sort === 'largest') list = [...list].sort((a, b) => (b.type === 'file' ? b.size : -1) - (a.type === 'file' ? a.size : -1));
-  const from = offset || 0;
-  const n = limit || 60;
-  const page = list.slice(from, from + n);
-  const day = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : '');
-  const rows = page.map((e) => (e.type === 'dir'
-    ? `${e.name}/ | | ${day(e.modified)}`
-    : `${e.name} | ${humanSize(e.size)} | ${day(e.modified)}`));
-  let head = `${dir}: ${list.length} entries (${dirs} folders, ${list.length - dirs} files)`;
-  if (filter) head += ` matching "${filter}"`;
-  if (list.length) head += `, showing ${from + 1}-${from + page.length}` + (sort && sort !== 'name' ? `, ${sort} first` : '');
-  head += rows.length ? '. Rows: name | size | modified.' : '.';
-  const left = list.length - from - page.length;
-  const more = left > 0 ? `\n(${left} more: call again with offset:${from + page.length})` : '';
-  return [head, ...rows].join('\n') + more;
-}
+// list_files formatting (token-lean rows, optional time + media length) lives
+// in services/fileList.js.
 
 function textResult(text, isError = false) {
   return { content: [{ type: 'text', text: typeof text === 'string' ? text : compactJson(text) }], isError };
@@ -1604,10 +1573,25 @@ function createPhoneRemoteServer() {
     }
   );
 
+  // Lengths (seconds) of a few media files, read on the phone. Best effort:
+  // null on an older app build or any failure, so listing never breaks over it.
+  async function probeLengths(userId, deviceId, dir, names) {
+    if (!signaling.deviceSupports(userId, deviceId, 'file_media')) return null;
+    try {
+      const r = await signaling.requestFromPhone(userId, deviceId, (id) => ({
+        type: 'pf_media', id, paths: names.map((n) => `${dir}/${n}`),
+      }), 8000, 'file_media');
+      if (!Array.isArray(r.d)) return null;
+      return new Map(names.map((n, i) => [n, Number(r.d[i]) || 0]));
+    } catch {
+      return null;
+    }
+  }
+
   // 22. list_files
   tool(
     'list_files',
-    'List a folder on the phone (under /storage/emulated/0; outside paths are clamped to it). Compact: one header with the folder path, then one row per entry: name (folders end with /) | size | modified date. A file\'s full path is the folder path + "/" + name. Shows 60 entries by default; use filter, sort and offset for big folders.',
+    'List a folder on the phone (under /storage/emulated/0; outside paths are clamped to it). Compact: one header with the folder path, then one row per entry: name (folders end with /) | size | modified date. A file\'s full path is the folder path + "/" + name. Shows 60 entries by default; use filter, sort and offset for big folders. Pages of 10 rows or fewer (or details:true) also show the exact time and, for video/audio, the length, to match a chat\'s video to its file.',
     {
       deviceId: z.string(),
       path: z.string().optional().describe('Folder path under /storage/emulated/0 (default: the root)'),
@@ -1615,14 +1599,28 @@ function createPhoneRemoteServer() {
       sort: z.enum(['name', 'newest', 'largest']).optional().describe('name (default; folders first), newest, or largest'),
       limit: z.coerce.number().int().min(1).max(500).optional().describe('Max entries to show (default 60)'),
       offset: z.coerce.number().int().min(0).optional().describe('Skip this many entries, to page through a big folder'),
+      details: z.union([z.boolean(), z.enum(['true', 'false']).transform((v) => v === 'true')]).optional()
+        .describe('Force time+length columns on or off (default: on when 10 rows or fewer)'),
     },
-    async ({ deviceId, path, filter, sort, limit, offset }, { authInfo }) => {
+    async ({ deviceId, path, filter, sort, limit, offset, details }, { authInfo }) => {
       try {
         const safePath = confineToBase(path);
         const reply = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({
           type: 'pf_list', id, path: safePath,
         }));
-        return textResult(formatFileList(reply.path || safePath, reply.entries || [], { filter, sort, limit, offset }));
+        const dir = reply.path || safePath;
+        const sel = selectPage(reply.entries || [], { filter, sort, limit, offset });
+        const showDetails = wantDetails(details, sel.page.length);
+        let lengths = null;
+        let lengthsMissing = false;
+        const names = showDetails ? mediaNames(sel.page) : [];
+        if (names.length) {
+          lengths = await probeLengths(authInfo.userId, deviceId, dir, names);
+          lengthsMissing = !lengths;
+        }
+        return textResult(formatFileList(dir, sel, {
+          filter, sort, details: showDetails, tzOffsetMin: reply.tzOffsetMin, lengths, lengthsMissing,
+        }));
       } catch (e) {
         return textResult(e.message, true);
       }

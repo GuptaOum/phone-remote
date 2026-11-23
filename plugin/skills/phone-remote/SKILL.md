@@ -99,6 +99,15 @@ one at the end if the user would benefit from seeing the result.
     pasting hundreds of rows.
 - Never claim a folder holds only what you were shown when the reply says
   there are more.
+- **Which file is that chat video?** WhatsApp names (`VID-20261123-WA0004.mp4`)
+  don't say who sent it. Read the video's length and time in the chat
+  (`get_ui_tree`), then `list_files(sort:"newest", limit:5)` on the media
+  folder (`/Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp
+  Business Video`; regular WhatsApp: `/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video`).
+  Pages of 10 rows or fewer also show the phone-local time and the length
+  (`0:28`): match on length, not the name. If lengths show up as unavailable
+  (older app), download the candidates and check them instead. Two files with
+  the same length: ask the user.
 - `delete_file(path)` permanently removes one file (no recycle bin, no undo,
   folders refused) and checks it is gone. Use it, not file-manager or gallery
   tapping, when the user asks to delete a file. If they also want a copy,

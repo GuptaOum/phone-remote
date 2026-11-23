@@ -279,6 +279,7 @@ class ConnectionForegroundService : Service() {
                                         "control_ack", "device_status", "ui_tree",
                                         "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings", "open_file", "clipboard", "set_clipboard", "replace_text",
                                         "frame_ack", "webrtc_screen", "webrtc_camera",
+                                        "file_media",
                                     )))
                                 }
                                 webSocket.send(reg.toString())
@@ -311,7 +312,7 @@ class ConnectionForegroundService : Service() {
                                 handleControl(json)
                                 return@post
                             }
-                            "pf_list", "pf_download", "pf_delete",
+                            "pf_list", "pf_media", "pf_download", "pf_delete",
                             "pf_upload_start", "pf_upload_chunk", "pf_upload_cancel" -> {
                                 handlePhoneFiles(json)
                                 return@post
@@ -942,6 +943,21 @@ class ConnectionForegroundService : Service() {
     // stall uploads/listing.
     private val pfExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
+    // Whole seconds, rounded down like WhatsApp shows it (28.27 s -> 0:28).
+    // 0 when the file can't be read as media.
+    private fun mediaSeconds(f: java.io.File): Int {
+        val r = android.media.MediaMetadataRetriever()
+        return try {
+            r.setDataSource(f.path)
+            val ms = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            (ms / 1000).toInt()
+        } catch (_: Exception) {
+            0
+        } finally {
+            try { r.release() } catch (_: Exception) {}
+        }
+    }
+
     private fun handlePhoneFiles(json: JSONObject) {
         val id = json.optString("id")
         val work = Runnable {
@@ -973,6 +989,23 @@ class ConnectionForegroundService : Service() {
                         send(JSONObject().apply {
                             put("type", "pf_list_result"); put("id", id)
                             put("path", path); put("entries", entries)
+                            // One number per reply so the server can show file times
+                            // in the phone's own clock (what a chat displays).
+                            put("tzOffsetMin", java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000)
+                        }.toString())
+                    }
+                    "pf_media" -> {
+                        // Lengths in whole seconds (0 = unknown), same order as `paths`.
+                        // Only the files list_files is about to show are asked for.
+                        val paths = json.optJSONArray("paths")
+                        val out = org.json.JSONArray()
+                        val count = minOf(paths?.length() ?: 0, 40)
+                        for (i in 0 until count) {
+                            val f = confinedFile(paths!!.optString(i))
+                            out.put(if (f != null && f.isFile) mediaSeconds(f) else 0)
+                        }
+                        send(JSONObject().apply {
+                            put("type", "pf_media_result"); put("id", id); put("d", out)
                         }.toString())
                     }
                     "pf_download" -> {
