@@ -1,6 +1,6 @@
 ---
 name: phone-remote
-description: How to drive a real Android phone through the Phone Remote MCP tools (list_devices, get_ui_tree, tap, type_text, open_url, open_settings, open_file, list_files, send_local_file, get_file, read_notifications, get_clipboard, set_clipboard, collect_list, clear_app_storage...). Use whenever the user asks to do anything on their phone - open an app or folder, send a WhatsApp/SMS/email, read an OTP or what they copied, list everything in a long playlist/contacts/chat/results list, find or list files, move files between PC and phone, change a setting, free up storage, find a lost phone - even if they don't say "MCP" or name a tool.
+description: How to drive a real Android phone through the Phone Remote MCP tools (list_devices, get_ui_tree, tap, type_text, open_url, open_settings, open_file, list_files, send_local_file, get_file, delete_file, read_notifications, get_clipboard, set_clipboard, collect_list, clear_app_storage...). Use whenever the user asks to do anything on their phone - open an app or folder, send a WhatsApp/SMS/email, read an OTP or what they copied, list everything in a long playlist/contacts/chat/results list, find or list files, move files between PC and phone, change a setting, free up storage, find a lost phone - even if they don't say "MCP" or name a tool.
 ---
 
 # Phone Remote
@@ -99,6 +99,11 @@ one at the end if the user would benefit from seeing the result.
     pasting hundreds of rows.
 - Never claim a folder holds only what you were shown when the reply says
   there are more.
+- `delete_file(path)` permanently removes one file (no recycle bin, no undo,
+  folders refused) and checks it is gone. Use it, not file-manager or gallery
+  tapping, when the user asks to delete a file. If they also want a copy,
+  `get_file` first and confirm it reached the PC. Chat attachments (WhatsApp
+  videos, voice notes) stay as "download again" in the chat afterwards.
 
 ## Safety rules (non-negotiable)
 
@@ -107,8 +112,9 @@ one at the end if the user would benefit from seeing the result.
   someone, posting, calling, paying, deleting, uninstalling.
   Read the draft back ("Send 'On my way' to Yash on WhatsApp?") when the text
   or recipient came from you rather than the user.
-- `uninstall_app` and `clear_app_storage` with `what:"data"`/`"both"` permanently
-  delete user data. Only for the specific app the user named; resolve the exact
+- `delete_file`, `uninstall_app` and `clear_app_storage` with
+  `what:"data"`/`"both"` permanently delete user data. For `delete_file`, name
+  the exact file (from `list_files`) and delete only what the user asked for. Only for the specific app the user named; resolve the exact
   package with `list_apps` first and confirm if there is any doubt.
   `what:"cache"` is harmless.
 - Never type passwords, PINs, card or bank numbers, or UPI PINs. Never approve

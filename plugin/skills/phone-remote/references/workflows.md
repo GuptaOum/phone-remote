@@ -71,6 +71,15 @@ For photos use Attach → Gallery instead of Document.
    (it is a plain file download, nothing to run). Without one,
    give the user the link. Max 100 MB.
 
+## Delete a file on the phone
+
+"Move these videos to my PC, then delete them from the phone":
+1. `list_files(path, sort:"newest")` to get the exact names, then `get_file`
+   for each and save it on the PC. Check the saved size matches `bytes`.
+2. Only then `delete_file(path)` for each. It lists the folder again and says
+   "Verified gone". It is permanent, so delete only the files the user named.
+3. A WhatsApp media file stays in the chat as "Download"; mention it.
+
 ## List or find files
 
 "What's in my Download folder", "find the PDF I downloaded yesterday":

@@ -39,6 +39,7 @@ Every action performed on the phone MUST use one of these standard MCP tools. Ne
 | **`set_clipboard`** | `deviceId`, `text` | Copy status | Puts text on the phone's clipboard, ready to paste. Works in the background, no text box needed. Replaces the current clip. |
 | **`list_files`** | `deviceId`, `path`, `filter`, `sort` (`name`/`newest`/`largest`), `limit` (60), `offset` | Header + `name \| size \| modified` rows | Explore `/storage/emulated/0`. To find a file, use `filter` or `sort` instead of listing everything. If the reply says "N more", tell the user, and page with `offset` only when they want the whole folder. |
 | **`get_file`** | `deviceId`, `path` | Download URL & metadata | Retrieve a file from phone shared storage to PC. |
+| **`delete_file`** | `deviceId`, `path` | "Deleted … Verified gone." or an error | PERMANENTLY delete one file (no recycle bin; folders refused). Only for a file the user asked to delete, after any copy has reached the PC. |
 | **`send_file`** | `deviceId`, `name`, `data_base64`, `folder` | Save confirmation | Send file (<= 18 MB) directly to phone Download directory. |
 | **`send_local_file`**| `deviceId`, `name`, `folder` | Upload URL | Upload larger files (> 18 MB up to 100 MB) via streaming HTTP PUT. |
 | **`send_url`** | `deviceId`, `url`, `name`, `folder` | Download status | Instructs phone companion service to download remote URL. |

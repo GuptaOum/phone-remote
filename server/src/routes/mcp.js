@@ -376,7 +376,7 @@ const READ_ONLY_TOOLS = new Set([
   'list_apps', 'find_unused_apps', 'read_notifications', 'take_screenshot', 'wait', 'list_files', 'get_file',
   'get_clipboard',
 ]);
-const DESTRUCTIVE_TOOLS = new Set(['uninstall_app', 'clear_app_storage']);
+const DESTRUCTIVE_TOOLS = new Set(['uninstall_app', 'clear_app_storage', 'delete_file']);
 // Reach outside this server and the phone (arbitrary URLs).
 const OPEN_WORLD_TOOLS = new Set(['open_url', 'send_url']);
 const TOOL_TITLES = {
@@ -388,7 +388,7 @@ const TOOL_TITLES = {
   collect_list: 'Read a whole scrolling list',
   type_text: 'Type text', press_key: 'Press key', open_app: 'Open app', open_app_drawer: 'Open app drawer',
   wait: 'Wait', ring: 'Ring phone', flash_light: 'Flash light', list_files: 'List phone files',
-  get_file: 'Download file from phone', send_local_file: 'Send local file to phone', send_file: 'Send file to phone',
+  get_file: 'Download file from phone', delete_file: 'Delete a file on the phone', send_local_file: 'Send local file to phone', send_file: 'Send file to phone',
   send_url: 'Send URL download to phone', open_settings: 'Open a Settings page',
   open_file: 'Open a file or folder', get_clipboard: 'Read phone clipboard',
   set_clipboard: 'Copy text to phone clipboard',
@@ -1663,6 +1663,39 @@ function createPhoneRemoteServer() {
           expires_in_seconds: DOWNLOAD_TTL_MS / 1000,
           next_step: `With a shell: curl -sS -o "${name}" "${downloadUrl}". WITHOUT a shell: give the user the download_url to click.`,
         });
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+  );
+
+  // delete_file
+  tool(
+    'delete_file',
+    'PERMANENTLY delete one file on the phone, by its full path (find it with list_files). No recycle bin, no undo. Only a single file: folders are refused, and nothing outside /storage/emulated/0. Only after the user asked to delete that specific file, and after any copy they wanted (get_file) has reached the PC. Checks the file is gone and says so.',
+    {
+      deviceId: z.string(),
+      path: z.string().describe('Full path of the file, e.g. /storage/emulated/0/Download/report.pdf'),
+    },
+    async ({ deviceId, path }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      const safePath = confineToBase(path);
+      const slash = safePath.lastIndexOf('/');
+      const parent = safePath.slice(0, slash) || PHONE_BASE;
+      const name = safePath.slice(slash + 1);
+      if (safePath === PHONE_BASE || !name) return textResult('Pass the path of a single file, not the storage root.', true);
+      try {
+        const listParent = async () => {
+          const reply = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({ type: 'pf_list', id, path: parent }));
+          return (reply.entries || []).find((e) => e.name === name);
+        };
+        const entry = await listParent();
+        if (!entry) return textResult(`${safePath} does not exist (nothing deleted). Check the path with list_files.`, true);
+        if (entry.type === 'dir') return textResult(`${safePath} is a folder. delete_file only deletes single files; nothing deleted.`, true);
+        await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({ type: 'pf_delete', id, path: safePath }));
+        // The phone answers "ok" even when the file could not be removed, so look again.
+        if (await listParent()) return textResult(`The phone did not remove ${safePath} (it may be in use or protected). Nothing else was changed.`, true);
+        return textResult(`Deleted ${safePath}${entry.size != null ? ` (${humanSize(entry.size)})` : ''}. Verified gone.`);
       } catch (e) {
         return textResult(e.message, true);
       }

@@ -9,9 +9,9 @@ when it is lost.
 ## What's inside
 
 - **MCP server reference** (`.mcp.json`): connects Claude to the Phone Remote
-  server at `https://65-1-96-152.sslip.io/mcp`, which exposes 34 tools
+  server at `https://65-1-96-152.sslip.io/mcp`, which exposes 35 tools
   (`list_devices`, `get_ui_tree`, `tap`, `type_text`, `open_app`,
-  `open_settings`, `open_file`, `send_local_file`, `get_file`,
+  `open_settings`, `open_file`, `send_local_file`, `get_file`, `delete_file`,
   `read_notifications`, `find_unused_apps`, `clear_app_storage`, and more).
 - **Skill** (`skills/phone-remote`): teaches Claude how to use those tools
   well: jump straight to a screen with deep links, `open_settings` or
