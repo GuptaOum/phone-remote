@@ -169,6 +169,25 @@ tree to confirm the `K` (checked) flag flipped.
 `get_location` (last cached fix, may be minutes old; give the user a
 `https://maps.google.com/?q=<lat>,<lng>` link).
 
+## Set the volume to a level
+
+`set_volume(level: N)` sets media volume to N percent (0 mutes) and replies
+with the level it really ended on, e.g. "media volume set to 33% (step 5 of
+15)". `set_volume()` with no level just reads it. Never screenshot to check:
+Android's slider shows for a moment and is gone, so the reply is the only
+reading. "Raise by 30%" means read first, then set current + 30.
+`stream:"ring"` or `"alarm"` change those instead (ring can be refused under
+Do Not Disturb).
+
+Fallback for a phone app too old to have `set_volume` (the tool says so):
+`press_key("volume_up" | "volume_down")` moves one step per call and has no
+repeat option, and the level can't be read back. So always start from zero:
+1. Send 16 `press_key("volume_down")` calls in one parallel batch (media volume
+   has 15 steps, so this reaches 0 from anywhere).
+2. Send `round(0.15 * N)` `press_key("volume_up")` calls in one parallel batch
+   (30% is 5, 50% is 8, 100% is 15).
+3. No screenshot. Say the level is approximate.
+
 ## Search inside any app
 
 Tap the search icon (`get_ui_tree(filter:"search")`), `type_text(query,

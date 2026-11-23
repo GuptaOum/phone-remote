@@ -277,7 +277,7 @@ class ConnectionForegroundService : Service() {
                                     // builds omit it and keep the fire-and-forget path.
                                     put("caps", org.json.JSONArray(listOf(
                                         "control_ack", "device_status", "ui_tree",
-                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings", "open_file", "clipboard", "set_clipboard", "replace_text",
+                                        "list_apps", "open_url", "notifications", "paste", "uninstall_app", "app_sizes", "app_settings", "app_usage", "open_settings", "open_file", "clipboard", "set_clipboard", "replace_text", "set_volume",
                                         "frame_ack", "webrtc_screen", "webrtc_camera",
                                         "file_media",
                                     )))
@@ -391,6 +391,10 @@ class ConnectionForegroundService : Service() {
                             }
                             "set_clipboard" -> {
                                 handleSetClipboard(json)
+                                return@post
+                            }
+                            "set_volume" -> {
+                                handleSetVolume(json)
                                 return@post
                             }
                             "notifications" -> {
@@ -1618,6 +1622,45 @@ class ConnectionForegroundService : Service() {
                 result.put("ok", true); result.put("length", text.length)
             } catch (e: Exception) {
                 result.put("ok", false); result.put("error", e.message ?: "Could not set the clipboard")
+            }
+            send(result.toString())
+        }
+    }
+
+    /**
+     * set_volume: set a stream to an exact percent, or just read it when no
+     * level is sent. Replies with the real step and maximum so the caller never
+     * has to guess (the on-screen slider is gone in a moment). Ring and
+     * notification can refuse under Do Not Disturb; that comes back as an error.
+     */
+    private fun handleSetVolume(json: JSONObject) {
+        val id = json.optString("id")
+        if (id.isEmpty()) return
+        handler.post {
+            val result = JSONObject().apply { put("type", "set_volume_result"); put("id", id) }
+            try {
+                val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+                val name = json.optString("stream", "media")
+                val stream = when (name) {
+                    "media" -> android.media.AudioManager.STREAM_MUSIC
+                    "ring" -> android.media.AudioManager.STREAM_RING
+                    "alarm" -> android.media.AudioManager.STREAM_ALARM
+                    else -> throw IllegalArgumentException("Unknown stream \"$name\" (use media, ring or alarm)")
+                }
+                val max = am.getStreamMaxVolume(stream)
+                if (json.has("level") && !json.isNull("level")) {
+                    val pct = json.optInt("level", 0).coerceIn(0, 100)
+                    val target = Math.round(pct / 100.0 * max).toInt().coerceIn(0, max)
+                    am.setStreamVolume(stream, target, android.media.AudioManager.FLAG_SHOW_UI)
+                }
+                val now = am.getStreamVolume(stream)
+                result.put("ok", true)
+                result.put("stream", name)
+                result.put("steps", now)
+                result.put("max", max)
+                result.put("percent", Math.round(now * 100.0 / max).toInt())
+            } catch (e: Exception) {
+                result.put("ok", false); result.put("error", e.message ?: "Could not set the volume")
             }
             send(result.toString())
         }

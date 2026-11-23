@@ -361,6 +361,7 @@ const TOOL_TITLES = {
   send_url: 'Send URL download to phone', open_settings: 'Open a Settings page',
   open_file: 'Open a file or folder', get_clipboard: 'Read phone clipboard',
   set_clipboard: 'Copy text to phone clipboard',
+  set_volume: 'Set or read phone volume',
 };
 
 // Pages open_settings can reach; mirrors the phone's fixed list
@@ -1217,6 +1218,33 @@ function createPhoneRemoteServer() {
         const r = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({ type: 'set_clipboard', id, text }), 8000, 'set_clipboard');
         if (!r.ok) return textResult(r.error || 'The phone could not set the clipboard.', true);
         return textResult(`Copied to the phone's clipboard (${r.length ?? text.length} characters). The user can paste it anywhere.`);
+      } catch (e) {
+        return textResult(e.message, true);
+      }
+    }
+  );
+
+  // 9d. set_volume
+  tool(
+    'set_volume',
+    'Set the phone\'s volume to an exact percent (0-100), or read it by leaving level out. Always reports the real level it ended on (steps, max, percent), so no screenshot is needed: the on-screen slider vanishes in a moment. Default stream is media (music, video, YouTube Music). level 0 mutes it. Prefer this over repeated press_key volume_up/volume_down. ring and alarm are also available; ring can be refused while Do Not Disturb is on.',
+    {
+      deviceId: z.string().describe('Device id from list_devices'),
+      level: z.coerce.number().int().min(0).max(100).optional().describe('Target volume in percent. Omit to only read the current volume.'),
+      stream: z.enum(['media', 'ring', 'alarm']).optional().describe('Which volume (default media)'),
+    },
+    async ({ deviceId, level, stream }, { authInfo }) => {
+      if (!signaling.presence.isOnline(authInfo.userId, deviceId)) return offline();
+      if (!signaling.deviceSupports(authInfo.userId, deviceId, 'set_volume')) {
+        return textResult('This phone build cannot set an exact volume — update the Phone Remote app on the phone. Until then: press_key volume_down 16 times (one call each, in one batch) to reach 0, then volume_up round(0.15 x percent) times.', true);
+      }
+      try {
+        const r = await signaling.requestFromPhone(authInfo.userId, deviceId, (id) => ({
+          type: 'set_volume', id, stream: stream || 'media', ...(level === undefined ? {} : { level }),
+        }), 8000, 'set_volume');
+        if (!r.ok) return textResult(r.error || 'The phone could not change the volume.', true);
+        const verb = level === undefined ? 'is at' : 'set to';
+        return textResult(`${r.stream} volume ${verb} ${r.percent}% (step ${r.steps} of ${r.max}).`);
       } catch (e) {
         return textResult(e.message, true);
       }

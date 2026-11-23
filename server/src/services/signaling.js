@@ -1102,6 +1102,7 @@ function setupSignaling(wss, app) {
         case 'open_file_result':
         case 'clipboard_result':
         case 'set_clipboard_result':
+        case 'set_volume_result':
         case 'notifications_result':
         case 'pf_media_result': {
           if (ws.role !== 'phone') return;
