@@ -148,24 +148,28 @@ Then just say *"run my good night routine"*, or schedule it.
 
 ## Token economy
 
-Every tool call makes the agent re-read the whole conversation, so Phone
-Remote is built to need few calls and small replies:
+We have fine-tuned the results that come back from Phone Remote so your agent
+does not burn through tokens. Here is what we filter and trim:
 
-- **Compact replies.** The screen comes back as a short list of texts and
-  tap coordinates (about 50-300 tokens), not an image (about 700). A filter
-  returns only the rows you ask for, and screenshots are a last resort.
-- **One call where one exists.** `set_volume`, `open_settings`, `open_file`,
-  deep links, `collect_list` (a whole long list) and `type_text` with
-  `replace` each replace a string of taps and reads.
-- **Small file and app lists.** `list_files` and `list_apps` return trimmed
-  rows, with `filter`, `sort` and `offset` so the agent searches instead of
-  dumping a folder.
+- **Screen reads are filtered.** The agent gets a short list of the visible
+  texts, buttons and fields with tap coordinates, not an image. It can ask for
+  only the elements it needs (for example just the "Send" button), and empty
+  layout containers and duplicate labels are dropped.
+- **Screenshots are a last resort.** They come back small by default, with a
+  larger size only when fine print has to be read.
+- **File and app lists are trimmed.** `list_files` and `list_apps` return
+  compact rows, with `filter`, `sort` and `offset` so the agent searches
+  instead of dumping a whole folder.
+- **Long lists arrive as one clean list.** `collect_list` scrolls and stitches
+  the whole screen content for you instead of many separate reads.
+- **Short confirmations.** Actions like `set_volume` and `open_settings`
+  report the real result in one line.
 - **The skill teaches the habits:** filter every screen read, reuse button
-  coordinates, confirm once with a small read, skip repeated setup, keep
-  replies short. Sending a second message in the same chat takes four calls.
+  positions, confirm once with a small read, skip repeated setup, and keep
+  replies short.
 
-Tip: for long phone sessions, start a fresh chat. It drops the old history
-that every call would otherwise re-read.
+Tip: for long phone sessions, start a fresh chat so old history is not re-read
+on every call.
 
 ---
 
