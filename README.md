@@ -29,6 +29,7 @@ https://github.com/user-attachments/assets/2f5ebf74-f221-4b2c-9a6e-888cfde5c90a
 - [What you can ask it](#what-you-can-ask-it)
 - [Automate it: scheduled workflows and your own agents](#automate-it-scheduled-workflows-and-your-own-agents)
 - [Features](#features)
+- [Token economy](#token-economy)
 - [Use it with your AI agent](#use-it-with-your-ai-agent)
 - [The Android app](#the-android-app)
 - [Works while the phone is locked?](#works-while-the-phone-is-locked)
@@ -142,6 +143,29 @@ Then just say *"run my good night routine"*, or schedule it.
 - **Works anywhere.** Phone and computer don't need to be on the same Wi-Fi, and the stream keeps going when the phone switches from Wi-Fi to mobile data.
 - **Runs in the background.** Close the app and everything keeps working.
 - **Safe by default.** Agents only see the phones of the account that approved them, and risky actions (uninstall, clear data) are marked so your agent asks first.
+
+---
+
+## Token economy
+
+Every tool call makes the agent re-read the whole conversation, so Phone
+Remote is built to need few calls and small replies:
+
+- **Compact replies.** The screen comes back as a short list of texts and
+  tap coordinates (about 50-300 tokens), not an image (about 700). A filter
+  returns only the rows you ask for, and screenshots are a last resort.
+- **One call where one exists.** `set_volume`, `open_settings`, `open_file`,
+  deep links, `collect_list` (a whole long list) and `type_text` with
+  `replace` each replace a string of taps and reads.
+- **Small file and app lists.** `list_files` and `list_apps` return trimmed
+  rows, with `filter`, `sort` and `offset` so the agent searches instead of
+  dumping a folder.
+- **The skill teaches the habits:** filter every screen read, reuse button
+  coordinates, confirm once with a small read, skip repeated setup, keep
+  replies short. Sending a second message in the same chat takes four calls.
+
+Tip: for long phone sessions, start a fresh chat. It drops the old history
+that every call would otherwise re-read.
 
 ---
 
