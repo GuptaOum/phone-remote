@@ -1636,7 +1636,8 @@ class ConnectionForegroundService : Service() {
     private fun handleSetVolume(json: JSONObject) {
         val id = json.optString("id")
         if (id.isEmpty()) return
-        handler.post {
+        // Background thread: the step fallback below sleeps between steps.
+        Thread {
             val result = JSONObject().apply { put("type", "set_volume_result"); put("id", id) }
             try {
                 val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -1652,6 +1653,26 @@ class ConnectionForegroundService : Service() {
                     val pct = json.optInt("level", 0).coerceIn(0, 100)
                     val target = Math.round(pct / 100.0 * max).toInt().coerceIn(0, max)
                     am.setStreamVolume(stream, target, android.media.AudioManager.FLAG_SHOW_UI)
+                    // Some ROMs (realme ColorOS) silently ignore setStreamVolume
+                    // for third-party apps: no exception, nothing changes. Verify,
+                    // and fall back to single steps, which those ROMs still allow.
+                    var cur = am.getStreamVolume(stream)
+                    if (cur != target) {
+                        val dir = if (target > cur)
+                            android.media.AudioManager.ADJUST_RAISE
+                        else android.media.AudioManager.ADJUST_LOWER
+                        var guard = max + 2
+                        while (cur != target && guard-- > 0) {
+                            am.adjustStreamVolume(stream, dir, android.media.AudioManager.FLAG_SHOW_UI)
+                            Thread.sleep(60)
+                            val next = am.getStreamVolume(stream)
+                            if (next == cur) break // refused, stop instead of spinning
+                            cur = next
+                        }
+                    }
+                    if (cur != target) {
+                        throw IllegalStateException("The phone refused the volume change (wanted step $target of $max, stayed at step $cur).")
+                    }
                 }
                 val now = am.getStreamVolume(stream)
                 result.put("ok", true)
@@ -1663,7 +1684,7 @@ class ConnectionForegroundService : Service() {
                 result.put("ok", false); result.put("error", e.message ?: "Could not set the volume")
             }
             send(result.toString())
-        }
+        }.start()
     }
 
     private fun handleOpenUrl(json: JSONObject) {
