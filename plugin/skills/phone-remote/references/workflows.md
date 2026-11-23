@@ -44,6 +44,17 @@ anything on screen.
 Same pattern for WhatsApp Business (`com.whatsapp.w4b`), SMS (`sms:` link) and
 email (`mailto:` link). Never send without the user's go-ahead.
 
+**Several messages to the same chat (cheap path).** Do steps 1-2 once, and
+read the message box and Send positions once with
+`get_ui_tree(filter:"Message")` and `filter:"send"`. For each further
+message, with the chat still open and the keyboard up, reuse those
+coordinates: tap the box, `type_text(text, method:"paste")`, tap Send, then
+one `get_ui_tree(filter:"<first words>")` to confirm. That is 4 calls per
+message instead of 6, and never read the whole chat (a full tree returns
+every message on screen). Read positions again only if the keyboard closed
+or the app changed. When the user gives the text as "<text> to <name>", the
+text is what to send.
+
 ## Send a file from the PC to someone on WhatsApp
 
 1. Put the file on the phone: `send_local_file(name, folder:"Download")` →

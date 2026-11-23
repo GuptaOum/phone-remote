@@ -20,7 +20,8 @@ when it is lost.
   text in a box in one call, find files without listing whole folders, wait
   for results instead of sleeping, and follow safety rules. It includes
   step-by-step recipes and a troubleshooting table, and keeps token use low
-  (compact replies, screenshots only when needed).
+  (filtered screen reads, reused coordinates, one call where one exists,
+  compact replies, screenshots only when needed).
 
 The plugin runs nothing on your computer. It has no hooks, scripts or local
 servers; it only points Claude at the remote MCP server and adds the skill.

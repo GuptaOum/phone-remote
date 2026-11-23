@@ -65,6 +65,32 @@ screen reader: look, act, confirm.
 Keep screenshots off on intermediate steps (`screenshot:false`); take at most
 one at the end if the user would benefit from seeing the result.
 
+## Token economy
+
+Every tool call re-reads the whole conversation, so the number of calls
+matters more than the size of any one reply. Aim for the fewest, smallest
+calls that still let you confirm the result.
+
+- **Filter every tree read.** Ask for what you expect (`filter:"Message"`,
+  `filter:"send"`). Never read an unfiltered tree inside a chat, feed or
+  list: it returns every row on screen. One unfiltered read per new screen
+  is the most you need, and only when you don't know what is on it.
+- **Reuse coordinates.** A button stays put while the screen layout does.
+  After one filtered read, tap the same x/y again for the next message in
+  the same chat while the keyboard stays open. Read again only when the
+  screen changed (app switched, keyboard closed, a tap did nothing).
+- **Skip screenshots** unless the tree can't explain the screen. Leave
+  `screenshot:false` on intermediate steps.
+- **One call when one call exists.** `set_volume(level)` sets an exact
+  volume and reports the real level; don't press volume keys. Use
+  `open_settings`, `open_file` and deep links instead of walking menus.
+- **Confirm once, cheaply.** End with one filtered read of the thing you
+  did (the message text, the setting), not a screen dump.
+- **Don't repeat setup.** `list_devices` and `get_device_status` once per
+  conversation; reuse the `deviceId`. Load a tool's schema once.
+- **Keep replies short.** Say what was done in a line or two; skip a
+  play-by-play of each tap.
+
 ## Typing
 
 - Tap the field first, then `type_text`.
